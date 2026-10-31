@@ -20,6 +20,7 @@ type RowGroupScanMetrics struct {
 	Requests         int64
 	PlannedBytes     int64
 	TransferredBytes int64
+	UsefulBytes      int64
 	PagesRead        int64
 	DataValues       int64
 }
@@ -206,6 +207,13 @@ func (s *RowGroupScanner) Metrics() RowGroupScanMetrics {
 		m.TransferredBytes += cm.TransferredBytes
 		m.PagesRead += cm.PagesRead
 		m.DataValues += cm.DataValues
+	}
+	if !s.skipped && s.position >= s.rowGroup.NumRows {
+		for _, idx := range s.plan.ColumnIndexes {
+			if idx >= 0 && idx < len(s.rowGroup.Columns) && s.rowGroup.Columns[idx].MetaData != nil {
+				m.UsefulBytes += s.rowGroup.Columns[idx].MetaData.TotalCompressedSize
+			}
+		}
 	}
 	return m
 }
