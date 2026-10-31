@@ -1,0 +1,23 @@
+project:
+  name: gosql
+  architecture_version: "2.1-agent-ready"
+  status: "ARCHITECTURE_FROZEN"
+current_phase: 0
+phase_status:
+  phase_0: PLANNED
+  phase_1: LOCKED
+  phase_2: LOCKED
+  phase_3: LOCKED
+  phase_4: LOCKED
+  phase_5: LOCKED
+  phase_6: LOCKED
+rules:
+  next_phase_requires_previous_acceptance: true
+  frozen_architecture_requires_adr: true
+  stable_sql_target: duckdb_compatible
+required_acceptance_evidence:
+  - acceptance-report.md
+  - benchmark-report.md
+  - memory-report.md
+  - failure-report.md
+  - known-limitations.md
