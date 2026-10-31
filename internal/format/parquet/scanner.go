@@ -24,13 +24,28 @@ type RowGroupScanMetrics struct {
 	DataValues       int64
 }
 
+type projectedColumnReader interface {
+	Read(context.Context, int) (*vector.Vector, error)
+	Close()
+	Metrics() ColumnCursorMetrics
+	RowPosition() int64
+}
+
+type scalarColumnReader struct{ cursor *ColumnCursor }
+
+func (r *scalarColumnReader) Read(ctx context.Context, rows int) (*vector.Vector, error) {
+	return r.cursor.ReadScalar(ctx, rows)
+}
+func (r *scalarColumnReader) Close()                       { r.cursor.Close() }
+func (r *scalarColumnReader) Metrics() ColumnCursorMetrics { return r.cursor.Metrics() }
+func (r *scalarColumnReader) RowPosition() int64           { return r.cursor.Consumed() }
+
 type RowGroupScanner struct {
 	tree         *SchemaTree
 	rowGroup     RowGroup
 	plan         ProjectionPlan
 	prune        PruneResult
-	cursors      []*ColumnCursor
-	leaves       []*SchemaNode
+	readers      []projectedColumnReader
 	batchSize    int
 	position     int64
 	rowsProduced int64
@@ -69,23 +84,51 @@ func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdent
 			s.Close()
 			return nil, fmt.Errorf("parquet: schema leaf %q not found", strings.Join(meta.PathInSchema, "."))
 		}
-		if leaf.MaxRep != 0 {
-			s.Close()
-			return nil, ErrRepeatedColumnRequiresLevelReader
+		var reader projectedColumnReader
+		if leaf.MaxRep == 0 {
+			if meta.NumValues != rg.NumRows {
+				s.Close()
+				return nil, fmt.Errorf("parquet: scalar column %q has %d values for %d rows", strings.Join(meta.PathInSchema, "."), meta.NumValues, rg.NumRows)
+			}
+			cursor, err := NewColumnCursor(driver, uri, identity, meta, leaf, scope, bm)
+			if err != nil {
+				s.Close()
+				return nil, err
+			}
+			reader = &scalarColumnReader{cursor: cursor}
+		} else {
+			listNode, err := standardListAncestor(leaf)
+			if err != nil {
+				s.Close()
+				return nil, err
+			}
+			listReader, err := NewListColumnReader(driver, uri, identity, meta, listNode, rg.NumRows, scope, bm)
+			if err != nil {
+				s.Close()
+				return nil, err
+			}
+			reader = listReader
 		}
-		if meta.NumValues != rg.NumRows {
-			s.Close()
-			return nil, fmt.Errorf("parquet: scalar column %q has %d values for %d rows", strings.Join(meta.PathInSchema, "."), meta.NumValues, rg.NumRows)
-		}
-		cursor, err := NewColumnCursor(driver, uri, identity, meta, leaf, scope, bm)
-		if err != nil {
-			s.Close()
-			return nil, err
-		}
-		s.cursors = append(s.cursors, cursor)
-		s.leaves = append(s.leaves, leaf)
+		s.readers = append(s.readers, reader)
 	}
 	return s, nil
+}
+
+func standardListAncestor(leaf *SchemaNode) (*SchemaNode, error) {
+	for n := leaf.Parent; n != nil; n = n.Parent {
+		if !isListAnnotated(n.Element) {
+			continue
+		}
+		_, listLeaf, err := validateStandardList(n)
+		if err != nil {
+			return nil, err
+		}
+		if listLeaf != leaf {
+			return nil, ErrUnsupportedListLayout
+		}
+		return n, nil
+	}
+	return nil, ErrRepeatedColumnRequiresLevelReader
 }
 
 func leafForPath(tree *SchemaTree, path []string) *SchemaNode {
@@ -117,9 +160,9 @@ func (s *RowGroupScanner) Next(ctx context.Context) (*vector.DataChunk, error) {
 	if int64(rows) > remaining {
 		rows = int(remaining)
 	}
-	cols := make([]*vector.Vector, 0, len(s.cursors))
-	for _, cursor := range s.cursors {
-		col, err := cursor.ReadScalar(ctx, rows)
+	cols := make([]*vector.Vector, 0, len(s.readers))
+	for _, reader := range s.readers {
+		col, err := reader.Read(ctx, rows)
 		if err != nil {
 			for _, v := range cols {
 				v.Release()
@@ -137,8 +180,8 @@ func (s *RowGroupScanner) Next(ctx context.Context) (*vector.DataChunk, error) {
 	}
 	s.position += int64(rows)
 	s.rowsProduced += int64(rows)
-	for _, cursor := range s.cursors {
-		if cursor.Consumed() != s.position {
+	for _, reader := range s.readers {
+		if reader.RowPosition() != s.position {
 			chunk.Release()
 			return nil, errors.New("parquet: projected columns lost row alignment")
 		}
@@ -155,9 +198,9 @@ func (s *RowGroupScanner) Metrics() RowGroupScanMetrics {
 		m.RowGroupsPruned = 1
 	}
 	m.RowsProduced = s.rowsProduced
-	m.Columns = len(s.cursors)
-	for _, cursor := range s.cursors {
-		cm := cursor.Metrics()
+	m.Columns = len(s.readers)
+	for _, reader := range s.readers {
+		cm := reader.Metrics()
 		m.Requests += cm.Requests
 		m.PlannedBytes += cm.PlannedBytes
 		m.TransferredBytes += cm.TransferredBytes
@@ -172,9 +215,8 @@ func (s *RowGroupScanner) Close() {
 		return
 	}
 	s.closed = true
-	for _, cursor := range s.cursors {
-		cursor.Close()
+	for _, reader := range s.readers {
+		reader.Close()
 	}
-	s.cursors = nil
-	s.leaves = nil
+	s.readers = nil
 }
