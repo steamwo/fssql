@@ -4,7 +4,7 @@ project:
   status: "ARCHITECTURE_FROZEN"
 current_phase: 0
 phase_status:
-  phase_0: PLANNED
+  phase_0: ACCEPTED
   phase_1: LOCKED
   phase_2: LOCKED
   phase_3: LOCKED

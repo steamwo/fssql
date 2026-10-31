@@ -1,0 +1,11 @@
+{
+  "rows": 10000000,
+  "sum": 49999995000000,
+  "managed_peak_bytes": 16384,
+  "managed_end_bytes": 0,
+  "go_heap_live_bytes": 95152,
+  "go_total_allocated_bytes": 82753416,
+  "rss_bytes": 7282688,
+  "gc_cycles": 22,
+  "temp_disk_peak_bytes": 0
+}
