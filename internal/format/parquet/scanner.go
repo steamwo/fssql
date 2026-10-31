@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	coretypes "github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/format/scan"
 	"github.com/steamwo/fssql/internal/storage/vfs"
@@ -74,45 +75,120 @@ func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdent
 		s.skipped = true
 		return s, nil
 	}
+
+	explicit := nonEmptyProjectionNames(requested)
+	if len(explicit) > 0 {
+		for _, name := range explicit {
+			node := schemaNodeForPath(tree, name)
+			if node == nil {
+				s.Close()
+				return nil, fmt.Errorf("parquet: projected column %q not found", name)
+			}
+			reader, err := projectedReaderForNode(driver, uri, identity, tree, rg, node, scope, bm)
+			if err != nil {
+				s.Close()
+				return nil, err
+			}
+			s.readers = append(s.readers, reader)
+		}
+		return s, nil
+	}
+
 	for _, idx := range plan.ColumnIndexes {
-		if idx < 0 || idx >= len(rg.Columns) || rg.Columns[idx].MetaData == nil {
+		reader, err := projectedReaderForColumnIndex(driver, uri, identity, tree, rg, idx, scope, bm)
+		if err != nil {
 			s.Close()
-			return nil, fmt.Errorf("parquet: projected column index %d has no metadata", idx)
-		}
-		meta := rg.Columns[idx].MetaData
-		leaf := leafForPath(tree, meta.PathInSchema)
-		if leaf == nil {
-			s.Close()
-			return nil, fmt.Errorf("parquet: schema leaf %q not found", strings.Join(meta.PathInSchema, "."))
-		}
-		var reader projectedColumnReader
-		if leaf.MaxRep == 0 {
-			if meta.NumValues != rg.NumRows {
-				s.Close()
-				return nil, fmt.Errorf("parquet: scalar column %q has %d values for %d rows", strings.Join(meta.PathInSchema, "."), meta.NumValues, rg.NumRows)
-			}
-			cursor, err := NewColumnCursor(driver, uri, identity, meta, leaf, scope, bm)
-			if err != nil {
-				s.Close()
-				return nil, err
-			}
-			reader = &scalarColumnReader{cursor: cursor}
-		} else {
-			listNode, err := standardListAncestor(leaf)
-			if err != nil {
-				s.Close()
-				return nil, err
-			}
-			listReader, err := NewListColumnReader(driver, uri, identity, meta, listNode, rg.NumRows, scope, bm)
-			if err != nil {
-				s.Close()
-				return nil, err
-			}
-			reader = listReader
+			return nil, err
 		}
 		s.readers = append(s.readers, reader)
 	}
 	return s, nil
+}
+
+func nonEmptyProjectionNames(requested []string) []string {
+	out := make([]string, 0, len(requested))
+	for _, raw := range requested {
+		if name := strings.TrimSpace(raw); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+func schemaNodeForPath(tree *SchemaTree, name string) *SchemaNode {
+	if tree == nil || tree.Root == nil || name == "" {
+		return nil
+	}
+	parts := strings.Split(name, ".")
+	node := tree.Root
+	for _, part := range parts {
+		var next *SchemaNode
+		for _, child := range node.Children {
+			if child.Name == part {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		node = next
+	}
+	return node
+}
+
+func projectedReaderForNode(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, tree *SchemaTree, rg RowGroup, node *SchemaNode, scope *memory.Scope, bm *memory.BufferManager) (projectedColumnReader, error) {
+	if node == nil {
+		return nil, errors.New("parquet: nil projected schema node")
+	}
+	if node.Logical.ID == coretypes.Struct && node.MaxRep == 0 {
+		return NewStructColumnReader(driver, uri, identity, rg, node, scope, bm)
+	}
+	if node.Logical.ID == coretypes.List && isListAnnotated(node.Element) {
+		_, leaf, err := validateStandardList(node)
+		if err != nil {
+			return nil, err
+		}
+		meta := metadataForPath(rg, leaf.Path)
+		if meta == nil {
+			return nil, fmt.Errorf("parquet: projected LIST %q has no column metadata", strings.Join(node.Path, "."))
+		}
+		return NewListColumnReader(driver, uri, identity, meta, node, rg.NumRows, scope, bm)
+	}
+	if node.Element.Type == nil {
+		return nil, ErrUnsupportedStructLayout
+	}
+	meta := metadataForPath(rg, node.Path)
+	if meta == nil {
+		return nil, fmt.Errorf("parquet: projected column %q has no metadata", strings.Join(node.Path, "."))
+	}
+	if node.MaxRep == 0 {
+		if meta.NumValues != rg.NumRows {
+			return nil, fmt.Errorf("parquet: scalar column %q has %d values for %d rows", strings.Join(meta.PathInSchema, "."), meta.NumValues, rg.NumRows)
+		}
+		cursor, err := NewColumnCursor(driver, uri, identity, meta, node, scope, bm)
+		if err != nil {
+			return nil, err
+		}
+		return &scalarColumnReader{cursor: cursor}, nil
+	}
+	listNode, err := standardListAncestor(node)
+	if err != nil {
+		return nil, err
+	}
+	return NewListColumnReader(driver, uri, identity, meta, listNode, rg.NumRows, scope, bm)
+}
+
+func projectedReaderForColumnIndex(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, tree *SchemaTree, rg RowGroup, idx int, scope *memory.Scope, bm *memory.BufferManager) (projectedColumnReader, error) {
+	if idx < 0 || idx >= len(rg.Columns) || rg.Columns[idx].MetaData == nil {
+		return nil, fmt.Errorf("parquet: projected column index %d has no metadata", idx)
+	}
+	meta := rg.Columns[idx].MetaData
+	leaf := leafForPath(tree, meta.PathInSchema)
+	if leaf == nil {
+		return nil, fmt.Errorf("parquet: schema leaf %q not found", strings.Join(meta.PathInSchema, "."))
+	}
+	return projectedReaderForNode(driver, uri, identity, tree, rg, leaf, scope, bm)
 }
 
 func standardListAncestor(leaf *SchemaNode) (*SchemaNode, error) {
