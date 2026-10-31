@@ -71,6 +71,7 @@ type ColumnCursor struct {
 	end        int64
 	consumed   int64
 	page       *columnPageState
+	pending    *ColumnEntry
 	dictionary *vector.Vector
 	metrics    ColumnCursorMetrics
 	closed     bool
@@ -121,6 +122,7 @@ func (c *ColumnCursor) Close() {
 }
 
 func (c *ColumnCursor) releasePage() {
+	c.pending = nil
 	if c.page != nil {
 		c.page.release()
 		c.page = nil
@@ -355,7 +357,7 @@ func (c *ColumnCursor) loadDataV2(header PageHeader, body *memory.Buffer) (*colu
 	}
 	state := &columnPageState{header: header, compressed: body, decoded: decoded, rep: rep, def: def, remaining: int(h.NumValues)}
 	if err := c.configureValues(state, h.Encoding, decoded.Bytes()); err != nil {
-		state.compressed = nil
+		state.compressed = nil // caller still owns body on error
 		state.release()
 		return nil, err
 	}
@@ -377,6 +379,34 @@ func (c *ColumnCursor) configureValues(state *columnPageState, encoding Encoding
 	return nil
 }
 
+func (c *ColumnCursor) PeekEntry(ctx context.Context) (ColumnEntry, error) {
+	if c == nil || c.closed {
+		return ColumnEntry{}, errors.New("parquet: column cursor is closed")
+	}
+	if c.consumed >= c.meta.NumValues {
+		return ColumnEntry{}, io.EOF
+	}
+	if c.pending != nil {
+		return *c.pending, nil
+	}
+	if c.page == nil || c.page.remaining == 0 {
+		if err := c.loadPage(ctx); err != nil {
+			return ColumnEntry{}, err
+		}
+	}
+	rep, err := c.page.rep.Next()
+	if err != nil {
+		return ColumnEntry{}, err
+	}
+	def, err := c.page.def.Next()
+	if err != nil {
+		return ColumnEntry{}, err
+	}
+	entry := ColumnEntry{Definition: def, Repetition: rep, HasValue: def == c.leaf.MaxDef}
+	c.pending = &entry
+	return entry, nil
+}
+
 func (c *ColumnCursor) NextInto(ctx context.Context, dst *vector.Vector, row int) (ColumnEntry, error) {
 	if c == nil || c.closed {
 		return ColumnEntry{}, errors.New("parquet: column cursor is closed")
@@ -384,25 +414,11 @@ func (c *ColumnCursor) NextInto(ctx context.Context, dst *vector.Vector, row int
 	if dst == nil || row < 0 || row >= dst.Count() {
 		return ColumnEntry{}, errors.New("parquet: invalid destination row")
 	}
-	if c.consumed >= c.meta.NumValues {
-		return ColumnEntry{}, io.EOF
-	}
-	if c.page == nil || c.page.remaining == 0 {
-		if err := c.loadPage(ctx); err != nil {
-			return ColumnEntry{}, err
-		}
+	entry, err := c.PeekEntry(ctx)
+	if err != nil {
+		return ColumnEntry{}, err
 	}
 	p := c.page
-	rep, err := p.rep.Next()
-	if err != nil {
-		return ColumnEntry{}, err
-	}
-	def, err := p.def.Next()
-	if err != nil {
-		return ColumnEntry{}, err
-	}
-	entry := ColumnEntry{Definition: def, Repetition: rep}
-	entry.HasValue = def == c.leaf.MaxDef
 	if entry.HasValue {
 		switch {
 		case p.values != nil:
@@ -425,6 +441,7 @@ func (c *ColumnCursor) NextInto(ctx context.Context, dst *vector.Vector, row int
 		}
 		c.metrics.DataValues++
 	}
+	c.pending = nil
 	p.remaining--
 	c.consumed++
 	if p.remaining == 0 {
