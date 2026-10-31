@@ -258,14 +258,67 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		if n < 0 || s.off+n > len(s.data) {
 			return errors.New("parquet: byte-array value exhausted")
 		}
-		if err := dst.SetStringBytes(row, s.data[s.off:s.off+n]); err != nil {
+		value := s.data[s.off : s.off+n]
+		s.off += n
+		if dst.Type.ID == coretypes.Decimal {
+			v, err := decodeDecimal64BigEndian(value, dst.Type)
+			if err != nil {
+				return err
+			}
+			dst.SetInt64(row, v)
+			return nil
+		}
+		return dst.SetStringBytes(row, value)
+	case TypeFixedLenByteArray:
+		if s.leaf == nil || s.leaf.Element.TypeLength == nil || *s.leaf.Element.TypeLength <= 0 {
+			return errors.New("parquet: fixed-len byte array missing type length")
+		}
+		n := int(*s.leaf.Element.TypeLength)
+		if s.off+n > len(s.data) {
+			return errors.New("parquet: fixed-len byte-array stream exhausted")
+		}
+		value := s.data[s.off : s.off+n]
+		s.off += n
+		if dst.Type.ID != coretypes.Decimal {
+			return errors.New("parquet: FIXED_LEN_BYTE_ARRAY requires supported logical type")
+		}
+		v, err := decodeDecimal64BigEndian(value, dst.Type)
+		if err != nil {
 			return err
 		}
-		s.off += n
+		dst.SetInt64(row, v)
 		return nil
 	default:
 		return fmt.Errorf("parquet: physical value stream %d not implemented", s.physical)
 	}
+}
+
+func decodeDecimal64BigEndian(src []byte, typ coretypes.LogicalType) (int64, error) {
+	if typ.ID != coretypes.Decimal || typ.Decimal.Width == 0 || typ.Decimal.Width > 18 {
+		return 0, fmt.Errorf("parquet: DECIMAL(%d,%d) requires Decimal128 representation", typ.Decimal.Width, typ.Decimal.Scale)
+	}
+	if len(src) == 0 {
+		return 0, errors.New("parquet: empty decimal byte representation")
+	}
+	negative := src[0]&0x80 != 0
+	for len(src) > 8 {
+		expected := byte(0x00)
+		if negative {
+			expected = 0xff
+		}
+		if src[0] != expected || (src[1]&0x80 != 0) != negative {
+			return 0, errors.New("parquet: decimal value overflows Decimal64")
+		}
+		src = src[1:]
+	}
+	var bits uint64
+	for _, b := range src {
+		bits = bits<<8 | uint64(b)
+	}
+	if negative && len(src) < 8 {
+		bits |= ^uint64(0) << uint(len(src)*8)
+	}
+	return int64(bits), nil
 }
 
 type dictionaryIndexStream struct{ h *hybridStream }
