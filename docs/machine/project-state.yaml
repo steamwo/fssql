@@ -2,10 +2,10 @@ project:
   name: gosql
   architecture_version: "2.1-agent-ready"
   status: "ARCHITECTURE_FROZEN"
-current_phase: 0
+current_phase: 1
 phase_status:
   phase_0: ACCEPTED
-  phase_1: LOCKED
+  phase_1: IN_PROGRESS
   phase_2: LOCKED
   phase_3: LOCKED
   phase_4: LOCKED
