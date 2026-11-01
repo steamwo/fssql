@@ -52,8 +52,9 @@ func (i ResumeIdentity) Validate() error {
 	return nil
 }
 
-// PrepareResume 在任何新文件打开前验证稳定身份，并把旧 attempt 的 incomplete WRITING 文件转为可整文件重做状态。
-func (m *Manifest) PrepareResume(identity ResumeIdentity) error {
+// validateResumeIdentity 只验证 Manifest 与重启 attempt 的稳定身份，不修改任何文件/作业状态。
+// ADR-0004 的 remote cleanup 必须在该校验成功后、PrepareResume 状态修改前执行。
+func (m *Manifest) validateResumeIdentity(identity ResumeIdentity) error {
 	if m == nil {
 		return fmt.Errorf("%w: nil manifest", ErrInvalidManifest)
 	}
@@ -66,7 +67,12 @@ func (m *Manifest) PrepareResume(identity ResumeIdentity) error {
 	if m.QueryFingerprint != strings.TrimSpace(identity.QueryFingerprint) || m.SourceSnapshot.Fingerprint != strings.TrimSpace(identity.SourceSnapshotFingerprint) {
 		return fmt.Errorf("%w: query/source changed", ErrResumeIdentityMismatch)
 	}
-	if err := validateResumeSegmentPlan(m.SegmentPlan, identity.SegmentPlan, identity.Layout); err != nil {
+	return validateResumeSegmentPlan(m.SegmentPlan, identity.SegmentPlan, identity.Layout)
+}
+
+// PrepareResume 在任何新文件打开前验证稳定身份，并把旧 attempt 的 incomplete WRITING 文件转为可整文件重做状态。
+func (m *Manifest) PrepareResume(identity ResumeIdentity) error {
+	if err := m.validateResumeIdentity(identity); err != nil {
 		return err
 	}
 	switch m.ExportState {
