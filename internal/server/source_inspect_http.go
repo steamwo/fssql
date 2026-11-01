@@ -109,9 +109,9 @@ func (h *SourceInspectHTTPHandler) handleInspect(w http.ResponseWriter, r *http.
 		return
 	}
 	spec := introspection.SourceSpec{
-		Format: introspection.SourceFormat(strings.ToLower(strings.TrimSpace(input.Format))),
-		Pattern: input.Pattern,
-		UnionByName: input.UnionByName,
+		Format:         introspection.SourceFormat(strings.ToLower(strings.TrimSpace(input.Format))),
+		Pattern:        input.Pattern,
+		UnionByName:    input.UnionByName,
 		FullValidation: input.FullValidation,
 	}
 	report, err := h.inspector.InspectSource(r.Context(), spec)
@@ -130,14 +130,14 @@ func sourceInspectResponse(report introspection.SourceReport) sourceInspectHTTPR
 		outColumns[i] = sourceInspectHTTPColumn{Name: column.Name, Type: column.TypeName}
 	}
 	return sourceInspectHTTPResponse{
-		Columns: outColumns,
-		SchemaSource: string(report.SchemaSource),
-		Confidence: string(report.Confidence),
-		MatchedFiles: report.MatchedFiles,
-		SchemaFiles: report.SchemaFiles,
+		Columns:            outColumns,
+		SchemaSource:       string(report.SchemaSource),
+		Confidence:         string(report.Confidence),
+		MatchedFiles:       report.MatchedFiles,
+		SchemaFiles:        report.SchemaFiles,
 		DatasetFingerprint: report.DatasetFingerprint,
-		UnionByName: report.UnionByName,
-		FullValidation: report.FullValidation,
+		UnionByName:        report.UnionByName,
+		FullValidation:     report.FullValidation,
 	}
 }
 
