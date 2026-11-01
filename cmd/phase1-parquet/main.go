@@ -48,7 +48,7 @@ func main() {
 
 func parseFlags() config {
 	var cfg config
-	flag.StringVar(&cfg.mode, "mode", "scan", "describe|explain|scan")
+	flag.StringVar(&cfg.mode, "mode", "scan", "describe|explain|analyze|scan")
 	flag.StringVar(&cfg.source, "source", "", "S3 Parquet URI or glob, e.g. s3://bucket/path/*.parquet")
 	flag.StringVar(&cfg.endpoint, "endpoint", "https://s3.amazonaws.com", "S3 endpoint")
 	flag.StringVar(&cfg.region, "region", getenv("AWS_REGION", "us-east-1"), "S3 region")
@@ -58,7 +58,7 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.fullSchema, "full-schema-validation", false, "validate every matched file schema")
 	flag.BoolVar(&cfg.pathStyle, "path-style", false, "use path-style S3 addressing")
 	flag.BoolVar(&cfg.allowHTTP, "allow-http", false, "allow explicit insecure HTTP endpoint")
-	flag.Int64Var(&cfg.limit, "limit", 100, "maximum rows to print; 0 means no limit")
+	flag.Int64Var(&cfg.limit, "limit", 100, "maximum rows to print in scan mode; 0 means no limit")
 	flag.IntVar(&cfg.batch, "batch-size", vector.DefaultVectorSize, "Parquet output batch size")
 	flag.Int64Var(&cfg.memory, "memory-limit", 256<<20, "managed memory limit in bytes")
 	flag.StringVar(&cfg.accessKey, "access-key", os.Getenv("AWS_ACCESS_KEY_ID"), "S3 access key (defaults AWS_ACCESS_KEY_ID)")
@@ -115,7 +115,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 
 	validation := parquet.SchemaValidationBounded
-	if cfg.fullSchema || cfg.mode == "scan" || cfg.mode == "explain" {
+	if cfg.fullSchema || cfg.mode == "scan" || cfg.mode == "explain" || cfg.mode == "analyze" {
 		validation = parquet.SchemaValidationFull
 	}
 	opts := parquet.SourceBindOptions{
@@ -129,6 +129,8 @@ func run(ctx context.Context, cfg config) error {
 		err = describe(ctx, binder, cfg.source, opts)
 	case "explain":
 		err = explain(ctx, binder, cfg.source, opts, splitColumns(cfg.columns))
+	case "analyze":
+		err = analyze(ctx, registry, binder, scope, bm, cfg, opts)
 	case "scan":
 		err = scanSource(ctx, registry, binder, scope, bm, cfg, opts)
 	default:
@@ -179,6 +181,58 @@ func explain(ctx context.Context, binder *parquet.SourceBinder, source string, o
 	fmt.Printf("projected_columns=%s\n", strings.Join(columns, ","))
 	fmt.Printf("rowgroups_total=%d\n", rowGroups)
 	fmt.Printf("footer_requests=%d planned_bytes=%d transferred_bytes=%d useful_bytes=%d\n", requests, planned, transferred, useful)
+	return nil
+}
+
+func analyze(ctx context.Context, registry *vfs.Registry, binder *parquet.SourceBinder, scope *memory.Scope, bm *memory.BufferManager, cfg config, opts parquet.SourceBindOptions) error {
+	binding, err := binder.Bind(ctx, cfg.source, opts)
+	if err != nil {
+		return err
+	}
+	columns := splitColumns(cfg.columns)
+	if len(columns) == 0 {
+		for _, field := range binding.Schema().Fields {
+			columns = append(columns, field.Name)
+		}
+	}
+	var rowGroupsTotal int64
+	footerMetrics := make([]parquet.FooterMetrics, 0, len(binding.Metadata()))
+	rowGroupMetrics := make([]parquet.RowGroupScanMetrics, 0)
+	for _, metadata := range binding.Metadata() {
+		footerMetrics = append(footerMetrics, metadata.Footer.Metrics)
+		rowGroupsTotal += int64(len(metadata.Footer.Metadata.RowGroups))
+		driver, err := registry.DriverFor(metadata.File.URI)
+		if err != nil {
+			return err
+		}
+		for _, rowGroup := range metadata.Footer.Metadata.RowGroups {
+			scanner, err := parquet.NewRowGroupScanner(driver, metadata.File.URI, metadata.File.Identity, metadata.Footer.Schema, rowGroup, columns, nil, scope, bm, cfg.batch)
+			if err != nil {
+				return fmt.Errorf("analyze %s: %w", metadata.File.URI.String(), err)
+			}
+			for {
+				chunk, err := scanner.Next(ctx)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					scanner.Close()
+					return err
+				}
+				chunk.Release()
+			}
+			rowGroupMetrics = append(rowGroupMetrics, scanner.Metrics())
+			scanner.Close()
+		}
+	}
+	profile, err := parquet.BuildScanProfile(parquet.ScanProfileInput{
+		Binding: binding, ProjectedColumns: columns, RowGroupsTotal: rowGroupsTotal,
+		FooterMetrics: footerMetrics, RowGroupMetrics: rowGroupMetrics,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(profile.Explain(true))
 	return nil
 }
 
