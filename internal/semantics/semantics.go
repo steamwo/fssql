@@ -20,13 +20,14 @@ func CompareInt64(a, b int64) int {
 	return 0
 }
 
+func EqualFloat32(a, b float32) bool { return a == b }
 func EqualFloat64(a, b float64) bool {
 	// SQL comparison treats NaN as not equal; hashing canonicalizes NaNs separately.
 	return a == b
 }
 
-func HashNull() uint64          { return mix64(nullHashSeed) }
-func HashInt64(v int64) uint64  { return mix64(uint64(v)) }
+func HashNull() uint64           { return mix64(nullHashSeed) }
+func HashInt64(v int64) uint64   { return mix64(uint64(v)) }
 func HashUint64(v uint64) uint64 { return mix64(v) }
 func HashBool(v bool) uint64 {
 	if v {
