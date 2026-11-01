@@ -108,3 +108,23 @@ func TestNetworkPolicyRejectsMetadataHostnameBeforeDNS(t *testing.T) {
 		t.Fatalf("error = %v, want ErrEndpointDenied", err)
 	}
 }
+
+func TestResolveURLBindsValidatedDialAddresses(t *testing.T) {
+	resolver := fakeResolver{addrs: map[string][]net.IPAddr{
+		"example.com": {{IP: net.ParseIP("93.184.216.34")}, {IP: net.ParseIP("203.0.113.10")}},
+	}}
+	p := NewNetworkPolicy(443).WithResolver(resolver)
+	endpoint, err := p.ResolveURL(context.Background(), "https://example.com/data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := endpoint.DialAddresses()
+	if len(got) != 2 || got[0] != "93.184.216.34:443" || got[1] != "203.0.113.10:443" {
+		t.Fatalf("dial addresses = %#v", got)
+	}
+	// 修改返回 IP 快照不应影响 resolver 的原始输入，防止共享可写 slice。
+	endpoint.IPs[0][0] = 1
+	if resolver.addrs["example.com"][0].IP.String() != "93.184.216.34" {
+		t.Fatalf("resolver input mutated: %s", resolver.addrs["example.com"][0].IP)
+	}
+}
