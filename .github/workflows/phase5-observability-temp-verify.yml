@@ -1,0 +1,32 @@
+name: phase5-observability-temp-verify
+
+on:
+  push:
+    branches:
+      - phase-5-observability
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Gofmt check
+        run: |
+          files="$(gofmt -l \
+            internal/profile/runtime.go \
+            internal/profile/runtime_test.go \
+            internal/profile/adapters.go \
+            internal/profile/adapters_test.go)"
+          printf '%s\n' "$files"
+          test -z "$files"
+      - name: Observability tests
+        run: go test -count=1 ./internal/profile
+      - name: Observability race tests
+        run: go test -race -count=1 ./internal/profile
+      - name: Architecture boundary check
+        run: go run ./tools/architecture-check
+      - name: Hot-path benchmarks
+        run: go test -run '^$' -bench 'Benchmark(WorkerCountersAddChunk|RuntimeMetricsMergeWorker)$' -benchmem -benchtime=100ms ./internal/profile
