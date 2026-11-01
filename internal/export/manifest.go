@@ -77,6 +77,8 @@ type Manifest struct {
 	Compression string `json:"compression"`
 	// Consistency 记录本次导出采用的一致性策略。
 	Consistency string `json:"consistency"`
+	// SegmentPlan 保存 resumable MultiFile/Partitioned 的稳定 segment identity；SingleFile 可为空。
+	SegmentPlan *SegmentPlan `json:"segment_plan,omitempty"`
 	// FileStates 保存所有计划输出文件的状态；已完成文件不可回退。
 	FileStates []FileEntry `json:"file_states"`
 	// ExportState 是整个导出作业的状态。
@@ -106,7 +108,7 @@ func NewManifest(jobID, queryFingerprint, sourceFingerprint, destinationURI, for
 	return m, nil
 }
 
-// Validate 检查 Manifest 的版本、身份字段、文件唯一性以及状态组合是否自洽。
+// Validate 检查 Manifest 的版本、身份字段、SegmentPlan、文件唯一性以及状态组合是否自洽。
 func (m *Manifest) Validate() error {
 	if m == nil {
 		return fmt.Errorf("%w: nil manifest", ErrInvalidManifest)
@@ -119,6 +121,11 @@ func (m *Manifest) Validate() error {
 	}
 	if strings.TrimSpace(m.Destination.URI) == "" || strings.TrimSpace(m.Format) == "" || strings.TrimSpace(m.Consistency) == "" {
 		return fmt.Errorf("%w: missing destination/format/consistency", ErrInvalidManifest)
+	}
+	if m.SegmentPlan != nil {
+		if err := m.SegmentPlan.Validate(); err != nil {
+			return err
+		}
 	}
 	if !validExportState(m.ExportState) {
 		return fmt.Errorf("%w: unknown export state %q", ErrInvalidManifest, m.ExportState)
@@ -212,7 +219,7 @@ func (m *Manifest) MarshalBinary() ([]byte, error) {
 	return json.Marshal(m)
 }
 
-// UnmarshalManifest 读取持久化 Manifest，并在返回前拒绝版本或状态损坏。
+// UnmarshalManifest 读取持久化 Manifest，并在返回前拒绝版本、SegmentPlan 或状态损坏。
 func UnmarshalManifest(data []byte) (*Manifest, error) {
 	var m Manifest
 	if err := json.Unmarshal(data, &m); err != nil {
