@@ -121,25 +121,40 @@ func nonEmptyProjectionNames(requested []string) []string {
 }
 
 func schemaNodeForPath(tree *SchemaTree, name string) *SchemaNode {
-	if tree == nil || tree.Root == nil || name == "" {
+	if tree == nil || name == "" {
 		return nil
 	}
-	parts := strings.Split(name, ".")
-	node := tree.Root
-	for _, part := range parts {
-		var next *SchemaNode
-		for _, child := range node.Children {
-			if child.Name == part {
-				next = child
+	want := strings.TrimSpace(name)
+	if tree.Root != nil {
+		parts := strings.Split(want, ".")
+		node := tree.Root
+		found := true
+		for _, part := range parts {
+			var next *SchemaNode
+			for _, child := range node.Children {
+				if child.Name == part {
+					next = child
+					break
+				}
+			}
+			if next == nil {
+				found = false
 				break
 			}
+			node = next
 		}
-		if next == nil {
-			return nil
+		if found {
+			return node
 		}
-		node = next
 	}
-	return node
+	for _, leaf := range tree.Leaves {
+		for node := leaf; node != nil; node = node.Parent {
+			if strings.Join(node.Path, ".") == want || (node.Parent == nil && node.Name == want) || (len(strings.Split(want, ".")) == 1 && node.Name == want) {
+				return node
+			}
+		}
+	}
+	return nil
 }
 
 func projectedReaderForNode(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, tree *SchemaTree, rg RowGroup, node *SchemaNode, scope *memory.Scope, bm *memory.BufferManager) (projectedColumnReader, error) {
