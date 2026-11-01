@@ -1,0 +1,26 @@
+name: phase3
+
+on:
+  push:
+    branches: ["phase3-text-sftp"]
+    paths-ignore:
+      - "docs/**"
+      - "artifacts/**"
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Unit and integration tests
+        run: go test ./...
+      - name: Race tests
+        run: go test -race ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Architecture boundaries
+        run: go run ./tools/architecture-check .
