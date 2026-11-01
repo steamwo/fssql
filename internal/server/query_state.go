@@ -92,7 +92,7 @@ type QueryHandle struct {
 	id QueryID
 	// query 是真正拥有 cancel/memory/temp/task lifecycle 的 QueryContext。
 	query *querypkg.Context
-	// mu 保护 state/cancelRequested/terminalErr/updatedAt。
+	// mu 保护 state/cancelRequested/terminalErr/updatedAt；Finalize 持锁跨 QueryContext.Close，保证取消和终态发布原子化。
 	mu sync.RWMutex
 	// state 是当前 Phase 5 Query 状态。
 	state QueryState
@@ -158,8 +158,8 @@ func (h *QueryHandle) Transition(next QueryState, now time.Time) error {
 // 只有 Finalize(QueryCanceled) 在生命周期资源归零后才能形成终态。
 func (h *QueryHandle) RequestCancel(now time.Time) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.state.Terminal() {
-		h.mu.Unlock()
 		return ErrQueryTerminal
 	}
 	if now.IsZero() {
@@ -167,7 +167,6 @@ func (h *QueryHandle) RequestCancel(now time.Time) error {
 	}
 	h.cancelRequested = true
 	h.updatedAt = now
-	h.mu.Unlock()
 	h.query.Cancel()
 	return nil
 }
@@ -179,14 +178,13 @@ func (h *QueryHandle) Finalize(target QueryState, terminalErr error, now time.Ti
 		return fmt.Errorf("%w: %s", ErrInvalidQueryTerminal, target.String())
 	}
 
-	h.mu.RLock()
-	current := h.state
-	cancelRequested := h.cancelRequested
-	h.mu.RUnlock()
-	if current.Terminal() {
+	// 持有状态写锁跨 Close：RequestCancel/其他 Finalize 必须等待，避免 Context 已关闭但状态仍非终态的竞态窗口。
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.state.Terminal() {
 		return ErrQueryTerminal
 	}
-	if target == QuerySucceeded && cancelRequested {
+	if target == QuerySucceeded && h.cancelRequested {
 		return fmt.Errorf("%w: canceled query cannot succeed", ErrInvalidQueryTransition)
 	}
 	if target == QueryFailed && terminalErr == nil {
@@ -202,16 +200,6 @@ func (h *QueryHandle) Finalize(target QueryState, terminalErr error, now time.Ti
 	// 终态发布前必须通过 QueryContext 的 active-task/temp/memory lifecycle 检查。
 	if err := h.query.Close(); err != nil {
 		return fmt.Errorf("server: query lifecycle close before %s: %w", target.String(), err)
-	}
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// Close 期间其他 goroutine 可能已经完成终态；此处再次检查，避免覆盖合法终态。
-	if h.state.Terminal() {
-		return ErrQueryTerminal
-	}
-	if target == QuerySucceeded && h.cancelRequested {
-		return fmt.Errorf("%w: cancellation raced with successful finalize", ErrInvalidQueryTransition)
 	}
 	if now.IsZero() {
 		now = time.Now().UTC()
