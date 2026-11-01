@@ -461,3 +461,14 @@ Stable：
 - parquet_file_metadata
 
 Introspection 必须复用 Query Binder / TableFunction.Bind 的 Schema Resolution。
+
+## AD-043 Remote Server Transport
+Status: FROZEN
+
+按 ADR-0005：
+
+- Phase 5 / v1 必需 remote transport 是 HTTP；`HTTP/gRPC Server` 不解释为双 transport 同时必需。
+- gRPC 不是 Phase 5 acceptance requirement，也不是 v1 Stable 必需能力；未来进入 Stable 前必须单独 ADR 定义 public wire contract。
+- QueryService / QueryRegistry / QueryHandle / QueryContext / ResultCursor 是唯一 server lifecycle core；transport adapter 不得复制状态机、scheduler、introspection 或 resource ownership。
+- Query lifetime 与 transport request lifetime 分离。
+- HTTP / protobuf / gRPC / Arrow SDK types 不得进入 Core / Execution / Query / Resource ABI。
