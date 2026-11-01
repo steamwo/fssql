@@ -1,0 +1,19 @@
+name: phase5-cancellation-leak-temp-verify
+
+on:
+  push:
+    branches:
+      - phase-5-cancellation-leak
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Cancellation leak acceptance
+        run: bash ./scripts/phase5-cancellation-leak.sh
+      - name: Architecture boundary check
+        run: go run ./tools/architecture-check
