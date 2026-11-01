@@ -39,7 +39,7 @@ type sftpWriteHandle struct {
 	failed error
 	// poison 表示当前 session 不能返回 idle pool。
 	poison bool
-	// terminal 防止 Close/Abort 后再次写入。
+	// terminal 防止成功 Close/Abort 后再次写入；Close 失败不会进入终态，以便随后 Abort 清理。
 	terminal bool
 	mu       sync.Mutex
 }
@@ -125,7 +125,7 @@ func (h *sftpWriteHandle) Write(ctx context.Context, data []byte) (int, error) {
 	return n, nil
 }
 
-// Close 确保空文件也被创建，然后 Stat 最终对象身份并归还 session lease。
+// Close 确保空文件也被创建，然后 Stat 最终对象身份并归还 session lease；失败时保留 Abort 清理能力。
 func (h *sftpWriteHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -133,9 +133,7 @@ func (h *sftpWriteHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error)
 		return vfs.ObjectIdentity{}, vfs.ErrWriteClosed
 	}
 	if h.failed != nil {
-		err := h.failed
-		h.releaseLocked(true)
-		return vfs.ObjectIdentity{}, err
+		return vfs.ObjectIdentity{}, h.failed
 	}
 	if !h.started {
 		n, err := h.session.WriteAt(ctx, h.path, nil, 0, true)
@@ -144,7 +142,6 @@ func (h *sftpWriteHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error)
 				err = io.ErrShortWrite
 			}
 			h.markFailed(err)
-			h.releaseLocked(true)
 			return vfs.ObjectIdentity{}, err
 		}
 		h.started = true
@@ -152,14 +149,12 @@ func (h *sftpWriteHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error)
 	info, err := h.session.Stat(ctx, h.path)
 	if err != nil {
 		h.markFailed(err)
-		h.releaseLocked(h.poison)
 		return vfs.ObjectIdentity{}, err
 	}
 	identity := infoIdentity(info)
 	if identity.Size != h.offset {
 		err := fmt.Errorf("%w: final size=%d written=%d", io.ErrShortWrite, identity.Size, h.offset)
 		h.markFailed(err)
-		h.releaseLocked(false)
 		return vfs.ObjectIdentity{}, err
 	}
 	h.releaseLocked(false)
