@@ -11,6 +11,9 @@ import (
 	"github.com/steamwo/fssql/internal/core/vector"
 )
 
+// ErrWriterClosed 表示 pooled writer 已进入 Close/Abort 终态。
+var ErrWriterClosed = errors.New("export: pooled writer is closed")
+
 // WriteResult 描述一个格式 writer 完成后的文件级结果，供 Manifest 记录 COMPLETE 状态。
 type WriteResult struct {
 	// Bytes 是最终文件字节数。
@@ -106,31 +109,52 @@ type PooledWriter struct {
 	writer FormatWriter
 	// reservation 是该 writer 创建前获得的基础内存预算。
 	reservation *memory.Reservation
-	// once 保证 Close/Abort 竞争时只释放一次 pool ownership。
+	// mu 串行化 Write/Flush/Close/Abort，避免终态切换与仍在进行的写入竞态。
+	mu sync.Mutex
+	// terminal 表示 writer 已经 Close 或 Abort；进入终态后禁止再次写入或关闭。
+	terminal bool
+	// once 保证 pool ownership 在所有终态路径中只释放一次。
 	once sync.Once
 }
 
 // WriteChunk 将数据转发给具体格式 writer。
 func (w *PooledWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk) error {
-	if w == nil || w.writer == nil {
-		return errors.New("export: pooled writer is closed")
+	if w == nil {
+		return ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.terminal || w.writer == nil {
+		return ErrWriterClosed
 	}
 	return w.writer.WriteChunk(ctx, chunk)
 }
 
 // Flush 转发格式层 flush。
 func (w *PooledWriter) Flush(ctx context.Context) error {
-	if w == nil || w.writer == nil {
-		return errors.New("export: pooled writer is closed")
+	if w == nil {
+		return ErrWriterClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.terminal || w.writer == nil {
+		return ErrWriterClosed
 	}
 	return w.writer.Flush(ctx)
 }
 
 // Close 完成文件；若具体 writer Close 失败，会额外 Abort，再释放 pool ownership。
 func (w *PooledWriter) Close(ctx context.Context) (WriteResult, error) {
-	if w == nil || w.writer == nil {
-		return WriteResult{}, errors.New("export: pooled writer is closed")
+	if w == nil {
+		return WriteResult{}, ErrWriterClosed
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.terminal || w.writer == nil {
+		return WriteResult{}, ErrWriterClosed
+	}
+	// 先标记终态，确保底层 Close 即使失败也不会再次被写入；失败文件由 Abort 清理。
+	w.terminal = true
 	result, err := w.writer.Close(ctx)
 	if err != nil {
 		abortErr := w.writer.Abort(context.Background())
@@ -143,9 +167,15 @@ func (w *PooledWriter) Close(ctx context.Context) (WriteResult, error) {
 
 // Abort 放弃 incomplete file，并无条件释放 slot 与 reservation。
 func (w *PooledWriter) Abort(ctx context.Context) error {
-	if w == nil || w.writer == nil {
+	if w == nil {
 		return nil
 	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.terminal || w.writer == nil {
+		return nil
+	}
+	w.terminal = true
 	err := w.writer.Abort(ctx)
 	w.release()
 	return err
