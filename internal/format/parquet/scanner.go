@@ -77,6 +77,11 @@ func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdent
 	}
 
 	explicit := nonEmptyProjectionNames(requested)
+	if len(explicit) == 0 && tree.Root != nil {
+		for _, child := range tree.Root.Children {
+			explicit = append(explicit, child.Name)
+		}
+	}
 	if len(explicit) > 0 {
 		for _, name := range explicit {
 			node := schemaNodeForPath(tree, name)
