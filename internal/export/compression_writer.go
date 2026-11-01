@@ -205,12 +205,13 @@ func (s *CompressionSink) writeZstd(ctx context.Context, p []byte) (int, error) 
 	return written, nil
 }
 
-// ensureZstdHeader 写最小标准 frame header：unknown content size、无 checksum、无 dictionary。
+// ensureZstdHeader 写最小标准 frame header：unknown content size、无 checksum、无 dictionary，128KiB window 与 raw block 上限一致。
 func (s *CompressionSink) ensureZstdHeader(ctx context.Context) error {
 	if s.zstdHeader {
 		return nil
 	}
-	header := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00}
+	// descriptor=0 表示非 single-segment 且 content size unknown；window descriptor 0x38 表示 128KiB window。
+	header := []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x38}
 	n, err := s.downstream.Write(ctx, header)
 	if err != nil {
 		return err
