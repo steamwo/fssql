@@ -31,7 +31,7 @@ func TestConfigCompatibilityMigratesOldConfigThenResolvesTypedSettings(t *testin
 	}
 
 	input := RawConfig{Version: 1, Values: map[string]string{
-		"plain_ftp":  "true",
+		"plain_ftp":   "true",
 		"max_workers": "8",
 	}}
 	migrated, err := migrator.Migrate(input)
