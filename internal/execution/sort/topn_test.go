@@ -1,0 +1,18 @@
+package sort
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/core/vector"
+)
+
+func collectTopN(t testing.TB,n *TopN)[]sortedRow{t.Helper();var out []sortedRow;if err:=n.Emit(context.Background(),func(c *vector.DataChunk)error{for i:=0;i<c.Cardinality;i++{x,ok:=c.Columns[0].Int64(i);p,_:=c.Columns[1].String(i);out=append(out,sortedRow{ok,x,p})};c.Release();return nil});err!=nil{t.Fatal(err)};return out}
+func TestTopNEqualsFullSortLimit(t *testing.T){h,clean:=newSortHarness(t,64<<20);defer clean();keys:=[]Key{{Column:0}};full,all:=runSort(t,h,64<<20,keys,1000);full.Release();top,err:=NewTopN(TopNConfig{InputTypes:[]types.LogicalType{{ID:types.BigInt},{ID:types.Varchar}},Keys:keys,N:37,MemoryBudget:64<<10,Scope:h.scope,Buffers:h.bm});if err!=nil{t.Fatal(err)};for base:=0;base<1000;base+=125{c:=makeSortChunk(t,h,base,125,1000,0);if err:=top.Consume(context.Background(),c);err!=nil{t.Fatal(err)};c.Release()};got:=collectTopN(t,top);if len(got)!=37{t.Fatalf("len=%d",len(got))};for i:=range got{if got[i]!=all[i]{t.Fatalf("row %d=%+v want %+v",i,got[i],all[i])}};top.Release()}
+func TestTopNZeroAndMoreThanRows(t *testing.T){h,clean:=newSortHarness(t,16<<20);defer clean();cfg:=TopNConfig{InputTypes:[]types.LogicalType{{ID:types.BigInt},{ID:types.Varchar}},Keys:[]Key{{Column:0}},N:0,MemoryBudget:4096,Scope:h.scope,Buffers:h.bm};z,err:=NewTopN(cfg);if err!=nil{t.Fatal(err)};c:=makeSortChunk(t,h,0,10,10,0);if err:=z.Consume(context.Background(),c);err!=nil{t.Fatal(err)};c.Release();got:=collectTopN(t,z);if len(got)!=0{t.Fatalf("zero TopN len=%d",len(got))};z.Release();cfg.N=20;n,err:=NewTopN(cfg);if err!=nil{t.Fatal(err)};c=makeSortChunk(t,h,0,10,10,0);if err:=n.Consume(context.Background(),c);err!=nil{t.Fatal(err)};c.Release();got=collectTopN(t,n);if len(got)!=10{t.Fatalf("len=%d",len(got))};for i:=1;i<len(got);i++{if got[i-1].key>got[i].key{t.Fatal("not sorted")}};n.Release()}
+func TestTopNNullsAndTies(t *testing.T){h,clean:=newSortHarness(t,16<<20);defer clean();top,err:=NewTopN(TopNConfig{InputTypes:[]types.LogicalType{{ID:types.BigInt},{ID:types.Varchar}},Keys:[]Key{{Column:0,Desc:true,NullsFirst:true}},N:25,MemoryBudget:16<<10,Scope:h.scope,Buffers:h.bm});if err!=nil{t.Fatal(err)};c:=makeSortChunk(t,h,0,100,100,7);if err:=top.Consume(context.Background(),c);err!=nil{t.Fatal(err)};c.Release();got:=collectTopN(t,top);if len(got)!=25{t.Fatalf("len=%d",len(got))};validSeen:=false;for i,r:=range got{if !r.valid{if validSeen{t.Fatalf("null ordering at %d",i)}}else{validSeen=true}};top.Release()}
+func TestTopNMemoryBudget(t *testing.T){mm:=memory.NewManager(1<<20);s:=mm.NewScope();bm:=memory.NewBufferManager(nil);_,err:=NewTopN(TopNConfig{InputTypes:[]types.LogicalType{{ID:types.BigInt}},Keys:[]Key{{Column:0}},N:1000,MemoryBudget:1024,Scope:s,Buffers:bm});if !errors.Is(err,memory.ErrLimitExceeded){t.Fatalf("err=%v",err)};if err:=s.Close();err!=nil{t.Fatal(err)};if mm.Used()!=0{t.Fatalf("leak=%d",mm.Used())}}
+func BenchmarkTopN(b *testing.B){for i:=0;i<b.N;i++{h,clean:=newSortHarness(b,64<<20);top,err:=NewTopN(TopNConfig{InputTypes:[]types.LogicalType{{ID:types.BigInt},{ID:types.Varchar}},Keys:[]Key{{Column:0}},N:100,MemoryBudget:64<<10,Scope:h.scope,Buffers:h.bm});if err!=nil{b.Fatal(err)};for base:=0;base<2048;base+=256{c:=makeSortChunk(b,h,base,256,2048,0);if err:=top.Consume(context.Background(),c);err!=nil{b.Fatal(err)};c.Release()};if err:=top.Emit(context.Background(),func(c *vector.DataChunk)error{c.Release();return nil});err!=nil{b.Fatal(err)};top.Release();clean()}}

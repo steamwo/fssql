@@ -1,0 +1,21 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+
+	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/execution/aggregate"
+	storagetemp "github.com/steamwo/fssql/internal/storage/temp"
+)
+
+type report struct { Rows int `json:"rows"`; Groups int `json:"groups"`; EngineMemoryLimit int64 `json:"engine_memory_limit_bytes"`; OperatorMemoryBudget int64 `json:"operator_memory_budget_bytes"`; ManagedPeak int64 `json:"managed_peak_bytes"`; ManagedUsedAfter int64 `json:"managed_used_after_bytes"`; TempPeak int64 `json:"temp_disk_peak_bytes"`; TempUsedAfter int64 `json:"temp_used_after_bytes"`; TempFilesAfter int `json:"temp_files_after"`; GoHeapLive uint64 `json:"go_heap_live_bytes"`; GoTotalAllocated uint64 `json:"go_total_allocated_bytes"`; GoHeapSys uint64 `json:"go_heap_sys_bytes"`; RSS uint64 `json:"rss_bytes"`; GCCycles uint32 `json:"gc_cycles"`; SpillPasses int `json:"spill_passes"`; SpillPages int `json:"spill_pages"`; SpilledGroups uint64 `json:"spilled_groups"`; PeakAggregateBytes int64 `json:"peak_aggregate_bytes"` }
+func rssBytes()uint64{b,err:=os.ReadFile("/proc/self/statm");if err!=nil{return 0};fields:=strings.Fields(string(b));if len(fields)<2{return 0};pages,err:=strconv.ParseUint(fields[1],10,64);if err!=nil{return 0};return pages*uint64(os.Getpagesize())}
+func main(){const rows=200000;const groups=10000;const engineLimit=int64(32<<20);const opBudget=int64(64<<10);mm:=memory.NewManager(engineLimit);scope:=mm.NewScope();bm:=memory.NewBufferManager(nil);quotas:=storagetemp.NewTemporaryMemoryManager(storagetemp.Limits{Global:512<<20,DefaultResourceGroup:512<<20,DefaultQuery:512<<20});root,err:=os.MkdirTemp("","fssql-phase2-metrics-");if err!=nil{panic(err)};defer os.RemoveAll(root);sm,err:=storagetemp.NewTemporaryStorageManager(root,quotas);if err!=nil{panic(err)};tempScope,err:=sm.NewQueryScope("metrics");if err!=nil{panic(err)};inputTypes:=[]types.LogicalType{{ID:types.BigInt},{ID:types.BigInt}};ext,err:=aggregate.NewExternalAggregate(aggregate.ExternalConfig{InputTypes:inputTypes,GroupColumns:[]int{0},Specs:[]aggregate.Spec{{Kind:aggregate.CountStar},{Kind:aggregate.Sum,Input:1},{Kind:aggregate.Avg,Input:1},{Kind:aggregate.Min,Input:1},{Kind:aggregate.Max,Input:1}},EstimatedGroups:64,MemoryBudget:opBudget,RadixBits:6,SpillBlockBytes:16<<10,Scope:scope,Buffers:bm,Temp:tempScope,Compression:storagetemp.CompressionRLE});if err!=nil{panic(err)};ctx:=context.Background();for base:=0;base<rows;base+=vector.DefaultVectorSize{n:=rows-base;if n>vector.DefaultVectorSize{n=vector.DefaultVectorSize};g,err:=vector.NewFlat(scope,bm,types.LogicalType{ID:types.BigInt},n);if err!=nil{panic(err)};v,err:=vector.NewFlat(scope,bm,types.LogicalType{ID:types.BigInt},n);if err!=nil{g.Release();panic(err)};for i:=0;i<n;i++{g.SetInt64(i,int64((base+i)%groups));v.SetInt64(i,int64(base+i+1))};c,err:=vector.NewDataChunk(g,v);if err!=nil{g.Release();v.Release();panic(err)};err=ext.Consume(ctx,c);c.Release();if err!=nil{ext.Release();panic(err)}};emitted:=0;if err:=ext.Emit(ctx,func(c *vector.DataChunk)error{emitted+=c.Cardinality;c.Release();return nil});err!=nil{ext.Release();panic(err)};if emitted!=groups{ext.Release();panic(fmt.Sprintf("emitted groups=%d want=%d",emitted,groups))};st:=ext.Stats();ext.Release();managedPeak:=mm.Peak();tempPeak:=tempScope.Peak();tempUsedAfter:=tempScope.Used();tempFilesAfter:=tempScope.OwnedFiles();if err:=tempScope.Close();err!=nil{panic(err)};if err:=scope.Close();err!=nil{panic(err)};runtime.GC();var ms runtime.MemStats;runtime.ReadMemStats(&ms);r:=report{Rows:rows,Groups:groups,EngineMemoryLimit:engineLimit,OperatorMemoryBudget:opBudget,ManagedPeak:managedPeak,ManagedUsedAfter:mm.Used(),TempPeak:tempPeak,TempUsedAfter:tempUsedAfter,TempFilesAfter:tempFilesAfter,GoHeapLive:ms.HeapAlloc,GoTotalAllocated:ms.TotalAlloc,GoHeapSys:ms.HeapSys,RSS:rssBytes(),GCCycles:ms.NumGC,SpillPasses:st.SpillPasses,SpillPages:st.SpillPages,SpilledGroups:st.SpilledGroups,PeakAggregateBytes:st.PeakAggregateBytes};enc:=json.NewEncoder(os.Stdout);enc.SetIndent("","  ");if err:=enc.Encode(r);err!=nil{panic(err)}}

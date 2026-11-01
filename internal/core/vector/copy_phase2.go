@@ -41,6 +41,9 @@ func CopyValue(src *Vector, srcRow int, dst *Vector, dstRow int) error {
 	case types.Double:
 		x, _ := src.Float64(srcRow)
 		dst.SetFloat64(dstRow, x)
+	case types.HugeInt:
+		x, _ := src.Int128(srcRow)
+		dst.SetInt128(dstRow, x)
 	case types.Decimal:
 		if src.Type.Decimal.Width <= 18 {
 			x, _ := src.Int64(srcRow)

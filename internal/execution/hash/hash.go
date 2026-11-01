@@ -32,6 +32,9 @@ func hashValue(v *vector.Vector, row int) (uint64, error) {
 	case types.BigInt, types.TimestampType:
 		x, _ := v.Int64(row)
 		return semantics.HashInt64(x), nil
+	case types.HugeInt:
+		x, _ := v.Int128(row)
+		return semantics.HashInt128(x.Lo, x.Hi), nil
 	case types.Float:
 		x, _ := v.Float32(row)
 		return semantics.HashFloat32(x), nil
@@ -194,7 +197,6 @@ func (l RowLayout) RowSize(chunk *vector.DataChunk, row int) (int, error) {
 }
 
 func setNullBit(dst []byte, column int) { dst[column>>3] |= byte(1 << uint(column&7)) }
-
 func (l RowLayout) IsNull(row []byte, column int) bool {
 	if !l.relocatable || column < 0 || column >= len(l.Columns) || len(row) < l.NullBytes {
 		return false
@@ -264,6 +266,10 @@ func (l RowLayout) WriteRow(chunk *vector.DataChunk, row int, dst []byte) (int, 
 		case types.BigInt, types.TimestampType:
 			x, _ := v.Int64(row)
 			binary.LittleEndian.PutUint64(d, uint64(x))
+		case types.HugeInt:
+			x, _ := v.Int128(row)
+			binary.LittleEndian.PutUint64(d[:8], x.Lo)
+			binary.LittleEndian.PutUint64(d[8:16], uint64(x.Hi))
 		case types.Float:
 			x, _ := v.Float32(row)
 			binary.LittleEndian.PutUint32(d, math.Float32bits(x))
@@ -378,7 +384,6 @@ func (c *TupleDataCollection) growRows(nextCount int) error {
 	c.capacity = next
 	return nil
 }
-
 func (c *TupleDataCollection) growData(need int) error {
 	if need <= c.buf.Len() {
 		return nil
@@ -417,9 +422,43 @@ func (c *TupleDataCollection) AppendChunkRow(chunk *vector.DataChunk, row int) e
 	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
 	return nil
 }
-
+func (c *TupleDataCollection) AppendEncodedRow(row []byte) error {
+	if c.layout == nil {
+		return errors.New("collection has no row layout")
+	}
+	if len(row) < c.layout.FixedWidth {
+		return errors.New("encoded row too short")
+	}
+	if uint64(c.used)+uint64(len(row)) > uint64(math.MaxUint32) {
+		return errors.New("tuple data exceeds 4GiB offset range")
+	}
+	if err := c.growRows(c.count + 1); err != nil {
+		return err
+	}
+	if err := c.growData(c.used + len(row)); err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	copy(c.buf.Bytes()[c.used:c.used+len(row)], row)
+	c.used += len(row)
+	c.count++
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	return nil
+}
 func (c *TupleDataCollection) Count() int { return c.count }
-
+func (c *TupleDataCollection) AllocatedBytes() int {
+	if c == nil {
+		return 0
+	}
+	n := 0
+	if c.buf != nil {
+		n += c.buf.Len()
+	}
+	if c.offsets != nil {
+		n += c.offsets.Len()
+	}
+	return n
+}
 func (c *TupleDataCollection) Row(i int) []byte {
 	if i < 0 || i >= c.count {
 		return nil
@@ -431,7 +470,6 @@ func (c *TupleDataCollection) Row(i int) []byte {
 	end := int(binary.LittleEndian.Uint32(c.offsets.Bytes()[(i+1)*4 : (i+1)*4+4]))
 	return c.buf.Bytes()[start:end]
 }
-
 func (c *TupleDataCollection) Serialize() (*memory.Buffer, error) {
 	if c.layout != nil {
 		return nil, errors.New("relocatable collection serialization is handled by spill page consumers")
@@ -446,7 +484,6 @@ func (c *TupleDataCollection) Serialize() (*memory.Buffer, error) {
 	copy(dst[8:], c.buf.Bytes()[:c.count*c.rowWidth])
 	return out, nil
 }
-
 func Deserialize(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*TupleDataCollection, error) {
 	if len(data) < 8 {
 		return nil, errors.New("short tuple data")
@@ -465,7 +502,6 @@ func Deserialize(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*T
 	c.count = n
 	return c, nil
 }
-
 func (c *TupleDataCollection) Release() {
 	if c.buf != nil {
 		c.buf.Release()
@@ -498,9 +534,7 @@ func NewHashTable(scope *memory.Scope, bm *memory.BufferManager, capacity int) (
 	}
 	return &HashTable{buf: b, capacity: cap2}, nil
 }
-
 func (h *HashTable) slot(i int) []byte { return h.buf.Bytes()[i*slotWidth : (i+1)*slotWidth] }
-
 func (h *HashTable) Insert(key, value int64) error {
 	if h.count*10 >= h.capacity*7 {
 		return errors.New("hash table load factor exceeded")
@@ -525,7 +559,6 @@ func (h *HashTable) Insert(key, value int64) error {
 	}
 	return errors.New("hash table full")
 }
-
 func (h *HashTable) Lookup(key int64) (int64, bool) {
 	hashv := semantics.HashInt64(key)
 	mask := h.capacity - 1
@@ -541,7 +574,6 @@ func (h *HashTable) Lookup(key int64) (int64, bool) {
 	}
 	return 0, false
 }
-
 func (h *HashTable) Release() {
 	if h.buf != nil {
 		h.buf.Release()
@@ -560,10 +592,8 @@ func NewRadixPartitioner(bits uint8) (RadixPartitioner, error) {
 	}
 	return RadixPartitioner{bits: bits, mask: (uint64(1) << bits) - 1}, nil
 }
-
 func (r RadixPartitioner) Partition(hash uint64) int { return int(hash & r.mask) }
 func (r RadixPartitioner) Count() int                { return 1 << r.bits }
-
 func (r RadixPartitioner) PartitionAtDepth(hash uint64, depth int) (int, error) {
 	if depth < 0 {
 		return 0, errors.New("negative radix depth")

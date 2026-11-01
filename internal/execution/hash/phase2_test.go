@@ -13,14 +13,14 @@ import (
 	"github.com/steamwo/fssql/internal/semantics"
 )
 
-func phase2HashEnv(limit int64) (*memory.Manager, *memory.Scope, *memory.BufferManager) {
+func testEnv(limit int64) (*memory.Manager, *memory.Scope, *memory.BufferManager) {
 	m := memory.NewManager(limit)
 	s := m.NewScope()
 	return m, s, memory.NewBufferManager(nil)
 }
 
 func TestVectorHashPhase2ScalarTypes(t *testing.T) {
-	m, s, bm := phase2HashEnv(1 << 20)
+	m, s, bm := testEnv(1 << 20)
 	dec128, _ := types.NewDecimal(38, 4)
 	cases := []struct {
 		typ  types.LogicalType
@@ -66,7 +66,7 @@ func TestVectorHashPhase2ScalarTypes(t *testing.T) {
 }
 
 func TestVectorHashConstantDictionaryEquivalent(t *testing.T) {
-	m, s, bm := phase2HashEnv(1 << 20)
+	m, s, bm := testEnv(1 << 20)
 	base, _ := vector.NewFlat(s, bm, types.LogicalType{ID: types.BigInt}, 4)
 	for i, x := range []int64{11, 22, 11, 33} {
 		base.SetInt64(i, x)
@@ -110,7 +110,7 @@ func TestVectorHashConstantDictionaryEquivalent(t *testing.T) {
 }
 
 func TestHashChunkComposition(t *testing.T) {
-	m, s, bm := phase2HashEnv(1 << 20)
+	m, s, bm := testEnv(1 << 20)
 	ids, _ := vector.NewFlat(s, bm, types.LogicalType{ID: types.BigInt}, 3)
 	names, _ := vector.NewFlat(s, bm, types.LogicalType{ID: types.Varchar}, 3)
 	for i, id := range []int64{1, 1, 2} {
@@ -130,10 +130,10 @@ func TestHashChunkComposition(t *testing.T) {
 		t.Fatal("compound hash failed to distinguish test keys")
 	}
 	one := make([]uint64, 3)
-	ref := make([]uint64, 3)
 	if err := HashChunk(chunk, []int{0}, one); err != nil {
 		t.Fatal(err)
 	}
+	ref := make([]uint64, 3)
 	if err := VectorHash(ids, ref); err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestHashChunkComposition(t *testing.T) {
 }
 
 func TestRelocatableRowLayoutAndTupleCollection(t *testing.T) {
-	m, s, bm := phase2HashEnv(1 << 20)
+	m, s, bm := testEnv(1 << 20)
 	layout, err := NewRelocatableRowLayout([]types.LogicalType{{ID: types.BigInt}, {ID: types.Varchar}, {ID: types.Double}})
 	if err != nil {
 		t.Fatal(err)
@@ -211,10 +211,13 @@ func TestRelocatableRowLayoutAndTupleCollection(t *testing.T) {
 	if m.Used() != 0 {
 		t.Fatalf("managed memory leak: %d", m.Used())
 	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTupleCollectionGrowthFailureRemainsReleasable(t *testing.T) {
-	m, s, bm := phase2HashEnv(250)
+	m, s, bm := testEnv(250)
 	layout, err := NewRelocatableRowLayout([]types.LogicalType{{ID: types.Varchar}})
 	if err != nil {
 		t.Fatal(err)
@@ -262,8 +265,48 @@ func TestRadixPartitionAtDepth(t *testing.T) {
 	}
 }
 
+func FuzzRelocatableVarcharRow(f *testing.F) {
+	f.Add("alpha")
+	f.Add("")
+	f.Add("this is longer than inline storage")
+	f.Fuzz(func(t *testing.T, value string) {
+		if len(value) > 64<<10 {
+			t.Skip()
+		}
+		m, s, bm := testEnv(1 << 20)
+		v, err := vector.NewFlat(s, bm, types.LogicalType{ID: types.Varchar}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := v.SetString(0, value); err != nil {
+			t.Fatal(err)
+		}
+		chunk, _ := vector.NewDataChunk(v)
+		layout, _ := NewRelocatableRowLayout([]types.LogicalType{{ID: types.Varchar}})
+		size, err := layout.RowSize(chunk, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := make([]byte, size)
+		if _, err := layout.WriteRow(chunk, 0, row); err != nil {
+			t.Fatal(err)
+		}
+		data, ok, err := layout.ColumnData(row, 0)
+		if err != nil || !ok {
+			t.Fatalf("decode=%v,%v", ok, err)
+		}
+		if !bytes.Equal(data, []byte(value)) {
+			t.Fatal("row round trip mismatch")
+		}
+		v.Release()
+		if m.Used() != 0 {
+			t.Fatalf("leak %d", m.Used())
+		}
+	})
+}
+
 func TestLegacyFixedTupleAPIStillRoundTrips(t *testing.T) {
-	m, s, bm := phase2HashEnv(1 << 20)
+	m, s, bm := testEnv(1 << 20)
 	layout, err := NewRowLayout([]types.LogicalType{{ID: types.BigInt}, {ID: types.Boolean}})
 	if err != nil {
 		t.Fatal(err)
@@ -302,48 +345,31 @@ func TestLegacyFixedTupleAPIStillRoundTrips(t *testing.T) {
 	}
 }
 
-func FuzzRelocatableVarcharRow(f *testing.F) {
-	f.Add("alpha")
-	f.Add("")
-	f.Add("this is longer than inline storage")
-	f.Fuzz(func(t *testing.T, value string) {
-		if len(value) > 64<<10 {
-			t.Skip()
-		}
-		m, s, bm := phase2HashEnv(1 << 20)
-		v, err := vector.NewFlat(s, bm, types.LogicalType{ID: types.Varchar}, 1)
-		if err != nil {
+func TestManagedHashTablePrimitiveStillWorks(t *testing.T) {
+	m, s, bm := testEnv(1 << 20)
+	h, err := NewHashTable(s, bm, 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 64; i++ {
+		if err := h.Insert(i, i*7); err != nil {
 			t.Fatal(err)
 		}
-		if err := v.SetString(0, value); err != nil {
-			t.Fatal(err)
+	}
+	for i := int64(0); i < 64; i++ {
+		v, ok := h.Lookup(i)
+		if !ok || v != i*7 {
+			t.Fatalf("lookup %d=(%d,%v)", i, v, ok)
 		}
-		chunk, _ := vector.NewDataChunk(v)
-		layout, _ := NewRelocatableRowLayout([]types.LogicalType{{ID: types.Varchar}})
-		size, err := layout.RowSize(chunk, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		row := make([]byte, size)
-		if _, err := layout.WriteRow(chunk, 0, row); err != nil {
-			t.Fatal(err)
-		}
-		data, ok, err := layout.ColumnData(row, 0)
-		if err != nil || !ok {
-			t.Fatalf("decode=%v,%v", ok, err)
-		}
-		if !bytes.Equal(data, []byte(value)) {
-			t.Fatal("row round trip mismatch")
-		}
-		v.Release()
-		if m.Used() != 0 {
-			t.Fatalf("leak %d", m.Used())
-		}
-	})
+	}
+	h.Release()
+	if m.Used() != 0 {
+		t.Fatalf("leak %d", m.Used())
+	}
 }
 
 func BenchmarkHashChunkBigIntVarchar(b *testing.B) {
-	m, s, bm := phase2HashEnv(8 << 20)
+	m, s, bm := testEnv(8 << 20)
 	ids, _ := vector.NewFlat(s, bm, types.LogicalType{ID: types.BigInt}, vector.DefaultVectorSize)
 	names, _ := vector.NewFlat(s, bm, types.LogicalType{ID: types.Varchar}, vector.DefaultVectorSize)
 	for i := 0; i < vector.DefaultVectorSize; i++ {
@@ -365,5 +391,59 @@ func BenchmarkHashChunkBigIntVarchar(b *testing.B) {
 	names.Release()
 	if m.Used() != 0 {
 		b.Fatal("leak")
+	}
+}
+
+func TestHugeIntHashAndRowEquality(t *testing.T) {
+	m, s, bm := testEnv(1 << 20)
+	v, err := vector.NewFlat(s, bm, types.LogicalType{ID: types.HugeInt}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vals := []types.Int128{
+		types.Int128FromInt64(-1),
+		{Lo: 1 << 63, Hi: 0},
+		{Lo: 1 << 63, Hi: 0},
+		{Lo: ^uint64(0), Hi: int64(^uint64(0) >> 1)},
+	}
+	for i, x := range vals {
+		v.SetInt128(i, x)
+	}
+	h := make([]uint64, len(vals))
+	if err := VectorHash(v, h); err != nil {
+		t.Fatal(err)
+	}
+	if h[1] != h[2] {
+		t.Fatal("equal HUGEINT values must hash equally")
+	}
+	if h[0] == h[1] {
+		t.Fatal("test values unexpectedly collide")
+	}
+	layout, err := NewRelocatableRowLayout([]types.LogicalType{{ID: types.HugeInt}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &vector.DataChunk{Columns: []*vector.Vector{v}, Cardinality: v.Count()}
+	rows, err := NewTupleDataCollectionForLayout(s, bm, layout, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if err := rows.AppendChunkRow(c, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eq, err := layout.EqualRows(rows.Row(1), rows.Row(2), NullsEqual)
+	if err != nil || !eq {
+		t.Fatalf("HUGEINT row equality=%v err=%v", eq, err)
+	}
+	neq, err := layout.EqualRows(rows.Row(0), rows.Row(1), NullsEqual)
+	if err != nil || neq {
+		t.Fatalf("HUGEINT row inequality=%v err=%v", neq, err)
+	}
+	rows.Release()
+	v.Release()
+	if m.Used() != 0 {
+		t.Fatalf("leak %d", m.Used())
 	}
 }

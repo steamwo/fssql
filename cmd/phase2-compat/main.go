@@ -1,0 +1,27 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	stdsort "sort"
+
+	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/execution/aggregate"
+	"github.com/steamwo/fssql/internal/execution/distinct"
+	execsort "github.com/steamwo/fssql/internal/execution/sort"
+	storagetemp "github.com/steamwo/fssql/internal/storage/temp"
+)
+
+type int128JSON struct{Hi int64 `json:"hi"`;Lo uint64 `json:"lo"`}
+type result struct{SumBigIntType string `json:"sum_bigint_type"`;SumBigInt int128JSON `json:"sum_bigint"`;Count int64 `json:"count"`;Avg float64 `json:"avg"`;Min int64 `json:"min"`;Max int64 `json:"max"`;NullOnlySumIsNull bool `json:"null_only_sum_is_null"`;EmptyCount int64 `json:"empty_count"`;Distinct []string `json:"distinct"`;Sorted []string `json:"sorted_desc_nulls_last"`}
+func must(err error){if err!=nil{panic(err)}}
+func tempScope()(*storagetemp.QueryScope,func()){root,err:=os.MkdirTemp("","fssql-phase2-compat-");must(err);q:=storagetemp.NewTemporaryMemoryManager(storagetemp.Limits{Global:64<<20,DefaultResourceGroup:64<<20,DefaultQuery:64<<20});sm,err:=storagetemp.NewTemporaryStorageManager(root,q);must(err);s,err:=sm.NewQueryScope("compat");must(err);return s,func(){must(s.Close());must(os.RemoveAll(root))}}
+func aggregateCase(scope *memory.Scope,bm *memory.BufferManager)(int128JSON,string,int64,float64,int64,int64,bool,int64){ts:=[]types.LogicalType{{ID:types.BigInt}};sumAgg,err:=aggregate.NewHashAggregate(scope,bm,ts,nil,[]aggregate.Spec{{Kind:aggregate.Sum,Input:0}},1);must(err);sv,err:=vector.NewFlat(scope,bm,ts[0],2);must(err);sv.SetInt64(0,math.MaxInt64);sv.SetInt64(1,1);sc,err:=vector.NewDataChunk(sv);must(err);must(sumAgg.Consume(context.Background(),sc));sc.Release();so,err:=sumAgg.Finalize(context.Background());must(err);sum,ok:=so.Columns[0].Int128(0);if !ok{panic("sum is NULL")};so.Release();typ:="UNKNOWN";if sumAgg.OutputTypes()[0].ID==types.HugeInt{typ="HUGEINT"};sumAgg.Release();specs:=[]aggregate.Spec{{Kind:aggregate.Count,Input:0},{Kind:aggregate.Avg,Input:0},{Kind:aggregate.Min,Input:0},{Kind:aggregate.Max,Input:0}};a,err:=aggregate.NewHashAggregate(scope,bm,ts,nil,specs,1);must(err);v,err:=vector.NewFlat(scope,bm,ts[0],2);must(err);v.SetInt64(0,1);v.SetInt64(1,2);c,err:=vector.NewDataChunk(v);must(err);must(a.Consume(context.Background(),c));c.Release();out,err:=a.Finalize(context.Background());must(err);cnt,_:=out.Columns[0].Int64(0);avg,_:=out.Columns[1].Float64(0);minv,_:=out.Columns[2].Int64(0);maxv,_:=out.Columns[3].Int64(0);out.Release();a.Release();nullAgg,err:=aggregate.NewHashAggregate(scope,bm,ts,nil,[]aggregate.Spec{{Kind:aggregate.Sum,Input:0}},1);must(err);nv,err:=vector.NewFlat(scope,bm,ts[0],2);must(err);nv.SetNull(0);nv.SetNull(1);nc,err:=vector.NewDataChunk(nv);must(err);must(nullAgg.Consume(context.Background(),nc));nc.Release();no,err:=nullAgg.Finalize(context.Background());must(err);nullSum:=!no.Columns[0].IsValid(0);no.Release();nullAgg.Release();empty,err:=aggregate.NewHashAggregate(scope,bm,ts,nil,[]aggregate.Spec{{Kind:aggregate.CountStar}},1);must(err);eo,err:=empty.Finalize(context.Background());must(err);emptyCount,_:=eo.Columns[0].Int64(0);eo.Release();empty.Release();return int128JSON{Hi:sum.Hi,Lo:sum.Lo},typ,cnt,avg,minv,maxv,nullSum,emptyCount}
+func distinctCase(scope *memory.Scope,bm *memory.BufferManager)[]string{d,err:=distinct.New(scope,bm,[]types.LogicalType{{ID:types.BigInt}},[]int{0},8);must(err);v,err:=vector.NewFlat(scope,bm,types.LogicalType{ID:types.BigInt},5);must(err);v.SetInt64(0,1);v.SetInt64(1,1);v.SetNull(2);v.SetNull(3);v.SetInt64(4,2);c,_:=vector.NewDataChunk(v);must(d.Consume(context.Background(),c));c.Release();var out []string;must(d.Emit(context.Background(),func(c *vector.DataChunk)error{for i:=0;i<c.Cardinality;i++{if !c.Columns[0].IsValid(i){out=append(out,"NULL")}else{x,_:=c.Columns[0].Int64(i);out=append(out,fmt.Sprint(x))}};c.Release();return nil}));d.Release();stdsort.Strings(out);return out}
+func sortCase(scope *memory.Scope,bm *memory.BufferManager,temp *storagetemp.QueryScope)[]string{s,err:=execsort.New(execsort.Config{InputTypes:[]types.LogicalType{{ID:types.BigInt}},Keys:[]execsort.Key{{Column:0,Desc:true,NullsFirst:false}},MemoryBudget:1024,SpillBlockBytes:512,Scope:scope,Buffers:bm,Temp:temp});must(err);v,err:=vector.NewFlat(scope,bm,types.LogicalType{ID:types.BigInt},4);must(err);v.SetInt64(0,3);v.SetNull(1);v.SetInt64(2,1);v.SetInt64(3,2);c,_:=vector.NewDataChunk(v);must(s.Consume(context.Background(),c));c.Release();var out []string;must(s.Emit(context.Background(),func(c *vector.DataChunk)error{for i:=0;i<c.Cardinality;i++{if !c.Columns[0].IsValid(i){out=append(out,"NULL")}else{x,_:=c.Columns[0].Int64(i);out=append(out,fmt.Sprint(x))}};c.Release();return nil}));s.Release();return out}
+func main(){mm:=memory.NewManager(32<<20);scope:=mm.NewScope();bm:=memory.NewBufferManager(nil);temp,closeTemp:=tempScope();sum,typ,cnt,avg,minv,maxv,nullSum,emptyCount:=aggregateCase(scope,bm);r:=result{SumBigIntType:typ,SumBigInt:sum,Count:cnt,Avg:avg,Min:minv,Max:maxv,NullOnlySumIsNull:nullSum,EmptyCount:emptyCount,Distinct:distinctCase(scope,bm),Sorted:sortCase(scope,bm,temp)};closeTemp();must(scope.Close());if mm.Used()!=0{panic(fmt.Sprintf("managed leak %d",mm.Used()))};enc:=json.NewEncoder(os.Stdout);enc.SetIndent("","  ");must(enc.Encode(r))}

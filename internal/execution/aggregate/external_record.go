@@ -1,0 +1,15 @@
+package aggregate
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+
+	"github.com/steamwo/fssql/internal/core/types"
+)
+
+func(e *ExternalAggregate)combineVarchar(dst []byte,src []byte,kind Kind)error{if len(src)==0&&dst[0]==0{};if dst[0]==0{if err:=e.local.ensureArena(len(src));err!=nil{return err};off:=e.local.arenaUsed;copy(e.local.arena.Bytes()[off:off+len(src)],src);e.local.arenaUsed+=len(src);dst[0]=1;binary.LittleEndian.PutUint32(dst[16:20],uint32(off));binary.LittleEndian.PutUint32(dst[20:24],uint32(len(src)));return nil};off:=int(binary.LittleEndian.Uint32(dst[16:20]));n:=int(binary.LittleEndian.Uint32(dst[20:24]));if e.local.arena==nil||off<0||n<0||off>e.local.arenaUsed||n>e.local.arenaUsed-off{return errors.New("invalid varchar aggregate state")};cur:=e.local.arena.Bytes()[off:off+n];cmp:=bytesCompare(cur,src);take:=(kind==Min&&cmp>0)||(kind==Max&&cmp<0);if !take{return nil};if err:=e.local.ensureArena(len(src));err!=nil{return err};newOff:=e.local.arenaUsed;copy(e.local.arena.Bytes()[newOff:newOff+len(src)],src);e.local.arenaUsed+=len(src);binary.LittleEndian.PutUint32(dst[16:20],uint32(newOff));binary.LittleEndian.PutUint32(dst[20:24],uint32(len(src)));return nil}
+func bytesCompare(a,b []byte)int{n:=len(a);if len(b)<n{n=len(b)};for i:=0;i<n;i++{if a[i]<b[i]{return -1};if a[i]>b[i]{return 1}};if len(a)<len(b){return -1};if len(a)>len(b){return 1};return 0}
+func(e *ExternalAggregate)applyRecord(ctx context.Context,rec []byte)error{if err:=ctx.Err();err!=nil{return err};if len(rec)<12{return errors.New("short aggregate spill record")};hashv:=binary.LittleEndian.Uint64(rec[:8]);gl:=int(binary.LittleEndian.Uint32(rec[8:12]));stateBase:=12+gl;fixed:=stateBase+len(e.bound)*aggregateStateWidth;if gl<e.groupLayout.FixedWidth||stateBase<12||fixed>len(rec){return errors.New("invalid aggregate spill record")};groupRow:=rec[12:stateBase];g,err:=e.local.findOrInsertEncoded(groupRow,hashv);if err!=nil{return err};for ai,s:=range e.bound{src:=rec[stateBase+ai*aggregateStateWidth:stateBase+(ai+1)*aggregateStateWidth];dst:=e.local.state(g,ai);if(s.Spec.Kind==Min||s.Spec.Kind==Max)&&s.InputType.ID==types.Varchar{if src[0]==0{continue};off:=int(binary.LittleEndian.Uint32(src[16:20]));n:=int(binary.LittleEndian.Uint32(src[20:24]));if off<fixed||n<0||off>len(rec)||n>len(rec)-off{return errors.New("invalid spilled varchar state")};if err:=e.combineVarchar(dst,rec[off:off+n],s.Spec.Kind);err!=nil{return err};continue};if err:=e.local.combineState(dst,e.local,src,s);err!=nil{return err}};return nil}
+func scanAggregateRecords(data []byte,fn func([]byte)error)error{for pos:=0;pos<len(data);{if len(data)-pos<4{return errors.New("truncated aggregate spill page")};n:=int(binary.LittleEndian.Uint32(data[pos:pos+4]));pos+=4;if n<12||n>len(data)-pos{return errors.New("invalid aggregate spill record length")};if err:=fn(data[pos:pos+n]);err!=nil{return err};pos+=n};return nil}
+func(e *ExternalAggregate)deletePartition(part aggregatePartition)error{if part.pages==nil{return nil};for i:=0;i<part.pages.Count();i++{id,_:=part.pages.At(i);if err:=e.store.DeletePage(id);err!=nil{return err}};part.pages.Release();return nil}

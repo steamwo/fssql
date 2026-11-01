@@ -30,6 +30,8 @@ func hashEncoded(col ColumnLayout, data []byte) (uint64, error) {
 		return semantics.HashInt64(int64(int32(binary.LittleEndian.Uint32(data)))), nil
 	case types.BigInt, types.TimestampType:
 		return semantics.HashInt64(int64(binary.LittleEndian.Uint64(data))), nil
+	case types.HugeInt:
+		return semantics.HashInt128(binary.LittleEndian.Uint64(data[:8]), int64(binary.LittleEndian.Uint64(data[8:16]))), nil
 	case types.Float:
 		return semantics.HashFloat32(math.Float32frombits(binary.LittleEndian.Uint32(data))), nil
 	case types.Double:
@@ -81,7 +83,7 @@ func equalEncoded(col ColumnLayout, a, b []byte) (bool, error) {
 		return semantics.EqualFloat32(math.Float32frombits(binary.LittleEndian.Uint32(a)), math.Float32frombits(binary.LittleEndian.Uint32(b))), nil
 	case types.Double:
 		return semantics.EqualFloat64(math.Float64frombits(binary.LittleEndian.Uint64(a)), math.Float64frombits(binary.LittleEndian.Uint64(b))), nil
-	case types.Boolean, types.TinyInt, types.SmallInt, types.Integer, types.DateType, types.BigInt, types.TimestampType, types.Decimal, types.Varchar:
+	case types.Boolean, types.TinyInt, types.SmallInt, types.Integer, types.DateType, types.BigInt, types.HugeInt, types.TimestampType, types.Decimal, types.Varchar:
 		return bytes.Equal(a, b), nil
 	default:
 		return false, errors.New("row equality unsupported type")
@@ -142,6 +144,8 @@ func (l RowLayout) MaterializeRow(row []byte, dst []*vector.Vector, dstRow int) 
 			dst[i].SetInt32(dstRow, int32(binary.LittleEndian.Uint32(data)))
 		case types.BigInt, types.TimestampType:
 			dst[i].SetInt64(dstRow, int64(binary.LittleEndian.Uint64(data)))
+		case types.HugeInt:
+			dst[i].SetInt128(dstRow, types.Int128{Lo: binary.LittleEndian.Uint64(data[:8]), Hi: int64(binary.LittleEndian.Uint64(data[8:16]))})
 		case types.Float:
 			dst[i].SetFloat32(dstRow, math.Float32frombits(binary.LittleEndian.Uint32(data)))
 		case types.Double:
