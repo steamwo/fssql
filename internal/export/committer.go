@@ -35,10 +35,25 @@ type Committer struct {
 	buffers *memory.BufferManager
 	// finalURI 是调用方显式指定的最终 manifest 对象。
 	finalURI vfs.URI
+	// store 非空时把 COMMITTING/COMMITTED transition 作为 durable export-staging state 持久化。
+	store ManifestStore
 }
 
-// NewCommitter 创建提交器，并拒绝跨 endpoint 的 final manifest，避免把一个 dataset 的提交标记写到无关目标。
+// NewCommitter 创建非持久化 Committer；适用于不声明 process-restart resume 的调用路径。
 func NewCommitter(manifest *Manifest, registry *vfs.Registry, scope *memory.Scope, buffers *memory.BufferManager, opts CommitOptions) (*Committer, error) {
+	return newCommitter(manifest, registry, scope, buffers, opts, nil)
+}
+
+// NewDurableCommitter 创建具备 Kill/Restart commit recovery 语义的 Committer；远端提交前必须先持久化 COMMITTING。
+func NewDurableCommitter(manifest *Manifest, registry *vfs.Registry, scope *memory.Scope, buffers *memory.BufferManager, opts CommitOptions, store ManifestStore) (*Committer, error) {
+	if store == nil {
+		return nil, errors.New("export: durable committer requires manifest store")
+	}
+	return newCommitter(manifest, registry, scope, buffers, opts, store)
+}
+
+// newCommitter 共享普通/可恢复 Committer 的 endpoint 与 Manifest 校验逻辑。
+func newCommitter(manifest *Manifest, registry *vfs.Registry, scope *memory.Scope, buffers *memory.BufferManager, opts CommitOptions, store ManifestStore) (*Committer, error) {
 	if manifest == nil || registry == nil || scope == nil || buffers == nil {
 		return nil, errors.New("export: committer requires manifest, VFS registry and managed memory")
 	}
@@ -56,7 +71,7 @@ func NewCommitter(manifest *Manifest, registry *vfs.Registry, scope *memory.Scop
 	if finalURI.Scheme != destination.Scheme || finalURI.Host != destination.Host {
 		return nil, fmt.Errorf("export: final manifest endpoint differs from destination: %s vs %s", finalURI.String(), destination.String())
 	}
-	return &Committer{manifest: manifest, registry: registry, scope: scope, buffers: buffers, finalURI: finalURI}, nil
+	return &Committer{manifest: manifest, registry: registry, scope: scope, buffers: buffers, finalURI: finalURI, store: store}, nil
 }
 
 // Commit 条件创建 committed final manifest；COMMITTING 重试会先尝试同一原子创建，冲突时再读取并核对既有 final manifest。
@@ -94,7 +109,8 @@ func (c *Committer) Commit(ctx context.Context) error {
 	defer reservation.Release()
 
 	if c.manifest.ExportState == ExportStateWriting {
-		if err := c.manifest.TransitionExport(ExportStateCommitting); err != nil {
+		// durable 模式必须在任何 final manifest 远端请求之前持久化 COMMITTING。
+		if err := transitionExportPersisted(ctx, c.manifest, c.store, ExportStateCommitting); err != nil {
 			return err
 		}
 	}
@@ -123,7 +139,7 @@ func (c *Committer) Commit(ctx context.Context) error {
 		// Close 成功但返回 identity 不可信时不降级到 FAILED；读取最终对象决定是否真的提交成功。
 		return c.reconcileCommittedManifest(ctx, payload)
 	}
-	return c.manifest.TransitionExport(ExportStateCommitted)
+	return transitionExportPersisted(ctx, c.manifest, c.store, ExportStateCommitted)
 }
 
 // reconcileCommittedManifest 读取已经存在的 final manifest；只有字节完全等于当前 committed payload 才确认 COMMITTED。
@@ -156,7 +172,7 @@ func (c *Committer) reconcileCommittedManifest(ctx context.Context, expected []b
 	if !bytes.Equal(result.Buffer.Bytes(), expected) {
 		return ErrCommitConflict
 	}
-	return c.manifest.TransitionExport(ExportStateCommitted)
+	return transitionExportPersisted(ctx, c.manifest, c.store, ExportStateCommitted)
 }
 
 // marshalCommittedManifest 在普通 Go heap 序列化前先 Reserve Metadata 上界，满足 allocate-before-accounting 约束。
