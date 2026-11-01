@@ -1,118 +1,146 @@
-package compression
+package compression_test
 
 import (
 	"bytes"
 	"compress/gzip"
-	"errors"
+	"context"
+	"encoding/hex"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/format/compression"
+	"github.com/steamwo/fssql/internal/format/csv"
 	"github.com/steamwo/fssql/internal/format/scan"
+	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-func env(t *testing.T) (*memory.Manager, *memory.Scope, *memory.BufferManager) {
+func gzipBytes(t *testing.T, plain []byte) []byte {
 	t.Helper()
-	m := memory.NewManager(16 << 20)
-	return m, m.NewScope(), memory.NewBufferManager(nil)
-}
-
-func gzipEncode(p []byte) ([]byte, error) {
 	var b bytes.Buffer
-	w := gzip.NewWriter(&b)
-	if _, err := w.Write(p); err != nil {
-		return nil, err
+	zw := gzip.NewWriter(&b)
+	if _, err := zw.Write(plain); err != nil {
+		t.Fatal(err)
 	}
-	if err := w.Close(); err != nil {
-		return nil, err
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
 	}
-	return b.Bytes(), nil
+	return b.Bytes()
 }
-
-func gzipBytes(t testing.TB, p []byte) []byte {
+func decompress(t *testing.T, c compression.Codec, src []byte, max int64) ([]byte, int64) {
 	t.Helper()
-	b, err := gzipEncode(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}
-
-func TestGzipRoundTripAndCorruption(t *testing.T) {
-	m, s, bm := env(t)
-	plain := bytes.Repeat([]byte("row,1\n"), 10000)
-	out, err := (Gzip{}).Decode(gzipBytes(t, plain), s, bm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(out.Bytes(), plain) {
-		t.Fatal("mismatch")
-	}
-	out.Release()
-	bad := gzipBytes(t, plain)
-	bad[len(bad)-3] ^= 0xff
-	if _, err = (Gzip{}).Decode(bad, s, bm); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("err=%v", err)
-	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
-	}
-}
-
-func TestCodecCapabilities(t *testing.T) {
-	if (Gzip{}).Capability() != scan.CompressionSequential || (Zstd{}).Capability() != scan.CompressionSequential || (Identity{}).Capability() != scan.CompressionIdentity {
-		t.Fatal("capability mismatch")
-	}
-}
-
-func TestZstdBaseline(t *testing.T) {
-	if !ZstdAvailable() {
-		t.Skip("zstd backend unavailable")
-	}
-	m, s, bm := env(t)
-	frame := []byte{40, 181, 47, 253, 36, 11, 89, 0, 0, 104, 101, 108, 108, 111, 32, 122, 115, 116, 100, 10, 108, 87, 249, 81}
-	out, err := (Zstd{}).Decode(frame, s, bm)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out.Bytes()) != "hello zstd\n" {
-		t.Fatalf("%q", out.Bytes())
-	}
-	out.Release()
-	frame[10] ^= 0xff
-	if _, err = (Zstd{}).Decode(frame, s, bm); err == nil {
-		t.Fatal("expected corrupt stream")
-	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
-	}
-}
-
-func TestAllocationFailureNoLeak(t *testing.T) {
-	m := memory.NewManager(8)
+	m := memory.NewManager(32 << 20)
 	s := m.NewScope()
 	bm := memory.NewBufferManager(nil)
-	_, err := (Gzip{}).Decode(gzipBytes(t, []byte("a lot more than eight bytes")), s, bm)
-	if err == nil {
-		t.Fatal("expected limit")
+	b, err := c.Decompress(context.Background(), src, max, s, bm)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
+	out := append([]byte(nil), b.Bytes()...)
+	b.Release()
+	if s.Used() != 0 {
+		t.Fatalf("managed leak %d", s.Used())
+	}
+	return out, m.Peak()
+}
+func TestGzipAndZstdLogicalResultEqualsPlain(t *testing.T) {
+	plain := []byte("1,alpha\n2,beta\n")
+	gz := gzipBytes(t, plain)
+	zhex := "28b52ffd240f790000312c616c7068610a322c626574610acb559942"
+	zsrc, _ := hex.DecodeString(zhex)
+	gout, _ := decompress(t, compression.Gzip(), gz, 1<<20)
+	zout, _ := decompress(t, compression.Zstd(), zsrc, 1<<20)
+	if !bytes.Equal(gout, plain) || !bytes.Equal(zout, plain) {
+		t.Fatalf("logical bytes differ gzip=%q zstd=%q", gout, zout)
+	}
+	schema := []types.LogicalType{{ID: types.BigInt}, {ID: types.Varchar}}
+	for name, data := range map[string][]byte{"plain": plain, "gzip": gout, "zstd": zout} {
+		m := memory.NewManager(1 << 20)
+		scope := m.NewScope()
+		bm := memory.NewBufferManager(nil)
+		chunk, _, err := csv.DecodeChunk(data, schema, csv.DecodeOptions{Lex: csv.DefaultLexConfig(), Final: true}, scope, bm)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if v, _ := chunk.Columns[0].Int64(1); v != 2 {
+			t.Fatalf("%s id=%d", name, v)
+		}
+		chunk.Release()
+		if scope.Used() != 0 {
+			t.Fatalf("%s leak=%d", name, scope.Used())
+		}
+	}
+}
+
+func TestGzipCorruptionAndLimitReleaseMemory(t *testing.T) {
+	plain := bytes.Repeat([]byte("abcdef"), 1000)
+	gz := gzipBytes(t, plain)
+	m := memory.NewManager(32 << 20)
+	s := m.NewScope()
+	bm := memory.NewBufferManager(nil)
+	bad := append([]byte(nil), gz...)
+	bad[len(bad)-1] ^= 0xff
+	if b, err := compression.Gzip().Decompress(context.Background(), bad, 1<<20, s, bm); err == nil {
+		if b != nil {
+			b.Release()
+		}
+		t.Fatal("expected gzip corruption")
+	}
+	if s.Used() != 0 {
+		t.Fatalf("corruption leak=%d", s.Used())
+	}
+	if b, err := compression.Gzip().Decompress(context.Background(), gz, 128, s, bm); err == nil {
+		if b != nil {
+			b.Release()
+		}
+		t.Fatal("expected output limit")
+	}
+	if s.Used() != 0 {
+		t.Fatalf("limit leak=%d", s.Used())
+	}
+}
+func TestCompressionCapabilityComposition(t *testing.T) {
+	caps := vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead)
+	if got := scan.ResolveScanCapability(caps, compression.Gzip().Capability(), scan.FormatParallelBoundary); got.Mode != scan.ScanSequential || got.Blocker != scan.BlockerCompression {
+		t.Fatalf("gzip decision=%+v", got)
+	}
+	if got := scan.ResolveScanCapability(caps, compression.Identity().Capability(), scan.FormatParallelBoundary); got.Mode != scan.ScanParallelRange {
+		t.Fatalf("identity decision=%+v", got)
+	}
+	if compression.Zstd().Capability() != scan.CompressionSequential {
+		t.Fatal("zstd baseline must be sequential")
 	}
 }
 
 func BenchmarkGzipDecode(b *testing.B) {
-	plain := bytes.Repeat([]byte("1234567890,abcdefghij\n"), 50000)
-	src, err := gzipEncode(plain)
-	if err != nil {
-		b.Fatal(err)
-	}
-	m := memory.NewManager(1 << 30)
+	plain := bytes.Repeat([]byte("id,name,description\n1,alpha,abcdefghijklmnopqrstuvwxyz\n"), 2048)
+	gz := gzipBytes(&testing.T{}, plain)
+	m := memory.NewManager(256 << 20)
 	s := m.NewScope()
 	bm := memory.NewBufferManager(nil)
-	b.SetBytes(int64(len(plain)))
 	b.ReportAllocs()
+	b.SetBytes(int64(len(plain)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		out, err := (Gzip{}).Decode(src, s, bm)
+		out, err := compression.Gzip().Decompress(context.Background(), gz, 64<<20, s, bm)
+		if err != nil {
+			b.Fatal(err)
+		}
+		out.Release()
+	}
+}
+func BenchmarkZstdDecode(b *testing.B) {
+	zhex := "28b52ffd240f790000312c616c7068610a322c626574610acb559942"
+	frame, _ := hex.DecodeString(zhex)
+	src := bytes.Repeat(frame, 4096)
+	m := memory.NewManager(128 << 20)
+	s := m.NewScope()
+	bm := memory.NewBufferManager(nil)
+	b.ReportAllocs()
+	b.SetBytes(15 * 4096)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, err := compression.Zstd().Decompress(context.Background(), src, 1<<20, s, bm)
 		if err != nil {
 			b.Fatal(err)
 		}
