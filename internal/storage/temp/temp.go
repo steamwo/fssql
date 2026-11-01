@@ -31,9 +31,9 @@ type quota struct {
 }
 
 func newQuota(limit int64) *quota { return &quota{limit: limit} }
-func (q *quota) Limit() int64      { return q.limit }
-func (q *quota) Used() int64       { return q.used.Load() }
-func (q *quota) Peak() int64       { return q.peak.Load() }
+func (q *quota) Limit() int64     { return q.limit }
+func (q *quota) Used() int64      { return q.used.Load() }
+func (q *quota) Peak() int64      { return q.peak.Load() }
 
 func (q *quota) reserve(n int64) error {
 	if n < 0 {
@@ -74,8 +74,8 @@ func NewTemporaryMemoryManager(limits Limits) *TemporaryMemoryManager {
 		global:       newQuota(limits.Global),
 		defaultGroup: limits.DefaultResourceGroup,
 		defaultQuery: limits.DefaultQuery,
-		groupLimits: groupLimits,
-		groups:      make(map[string]*quota),
+		groupLimits:  groupLimits,
+		groups:       make(map[string]*quota),
 	}
 }
 
@@ -275,9 +275,10 @@ type QueryScope struct {
 	backend Backend
 	dir     string
 
-	mu     sync.Mutex
-	closed bool
-	files  map[*File]struct{}
+	mu      sync.Mutex
+	closing bool
+	closed  bool
+	files   map[*File]struct{}
 }
 
 func (s *QueryScope) Dir() string { return s.dir }
@@ -293,7 +294,7 @@ func (s *QueryScope) OwnedFiles() int {
 func (s *QueryScope) CreateFile() (*File, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed || s.closing {
 		return nil, ErrClosed
 	}
 	h, err := s.backend.CreateTemp(s.dir, "spill-")
@@ -311,6 +312,7 @@ func (s *QueryScope) Close() error {
 		s.mu.Unlock()
 		return nil
 	}
+	s.closing = true
 	files := make([]*File, 0, len(s.files))
 	for f := range s.files {
 		files = append(files, f)
