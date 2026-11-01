@@ -1,6 +1,6 @@
 # ADR-0001 — DECIMAL128 Own Vector Representation for Phase 1 Parquet
 
-Status: PROPOSED
+Status: ACCEPTED
 
 ## Context
 
@@ -12,7 +12,7 @@ This is an architecture-level gap rather than a Parquet-only decoder omission be
 
 ## Decision
 
-Proposed decision:
+Accepted decision:
 
 1. Add a canonical signed 128-bit core value type, `types.Int128`, represented as two's-complement 128-bit integer with explicit high/low 64-bit limbs.
 2. Define Own Vector `PhysicalInt128` storage as exactly 16 bytes per value, little-endian limb layout: low unsigned 64 bits followed by high signed 64 bits.
@@ -30,7 +30,7 @@ Implementation MUST remain managed by MemoryManager/BufferManager and preserve O
 ## Alternatives
 
 1. Limit Phase 1 DECIMAL to precision <= 18.
-   - Rejected as the default proposal because the frozen logical type contract explicitly accepts width up to 38 and the current Parquet schema tests accept precision 20. Adopting this alternative would require changing the Phase 1 gate and/or type contract explicitly.
+   - Rejected because the frozen logical type contract explicitly accepts width up to 38 and the current Parquet schema tests accept precision 20. Adopting this alternative would require changing the Phase 1 gate and/or type contract explicitly.
 
 2. Store DECIMAL(19..38) as VARCHAR or raw 16-byte blobs.
    - Rejected because it changes logical semantics, breaks type-preserving bind/introspection, and leaks format-specific representation into execution.
@@ -55,9 +55,9 @@ Negative:
 
 ## Compatibility Impact
 
-No SQL logical type change is proposed. `DECIMAL(p,s)` remains the public type. The change is an internal physical representation completion for widths 19..38.
+No SQL logical type change is introduced. `DECIMAL(p,s)` remains the public type. The change is an internal physical representation completion for widths 19..38.
 
-Binary vector serialization produced before this decision has no defined Decimal128 payload because the accessor/serialization contract does not yet exist. A format version marker or explicit type-aware 16-byte encoding must be used if serialized vectors are persisted across versions.
+Binary vector serialization produced before this decision has no defined Decimal128 payload because the accessor/serialization contract did not yet exist. Decimal128 serialization is therefore type-aware and explicitly carries DECIMAL width/scale plus the canonical 16-byte little-endian Int128 payload.
 
 ## Migration
 
@@ -70,16 +70,14 @@ After approval:
 5. Add DECIMAL corpus cases at widths <=18 and >18, including negative values and precision boundaries.
 6. Re-run Phase 1 ordinary/race/leak/differential/interop gates.
 
-No migration code should be merged into execution paths while this ADR remains PROPOSED.
-
 ## Affected Frozen Decisions
 
 - I-01 Own Vector / DataChunk: defines the missing canonical representation for existing `PhysicalInt128`; does not replace Own Vector.
 - I-04 Managed Memory: 16-byte vector storage remains BufferManager-managed.
 - I-10 Lifecycle Protocol: no lifecycle change; new storage follows existing Vector ownership/release rules.
 - AD-007 Controlled Parquet Engine: enables controlled DECIMAL decode rather than delegating to a third-party engine.
-- Phase 1 correctness gate: resolves the currently unspecified high-precision DECIMAL execution representation.
+- Phase 1 correctness gate: resolves the previously unspecified high-precision DECIMAL execution representation.
 
 ## Approval
 
-Pending. No DECIMAL128 execution changes are authorized by this document until it is explicitly approved and incorporated into the frozen architecture/decision set.
+Approved by the project owner on 2026-11-01. DECIMAL128 execution changes are authorized only as specified by this ADR; broader numeric or Phase 2 behavior remains out of scope.
