@@ -4,234 +4,236 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
+	"io"
 	"path"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/storage/remote"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-var ErrHostKeyMismatch = errors.New("sftp: host key mismatch")
-var ErrConnectionReset = errors.New("sftp: connection reset")
-
-type RemoteInfo struct {
-	Path     string
-	Size     int64
-	Modified time.Time
-}
-
-type RemoteEntry struct {
-	Path     string
-	Size     int64
-	Modified time.Time
-}
-
-type RemotePage struct {
-	Entries   []RemoteEntry
-	NextToken string
-	Truncated bool
-}
-
-type Config struct {
-	Endpoint          string
-	CredentialScope   string
-	CredentialVersion string
-	SecurityProfile   string
-	HostKeySHA256     string
-	MaxSessions       int
-	MaxRetries        int
-}
-
 type Driver struct {
-	cfg      Config
-	endpoint *url.URL
-	pool     *sessionPool
+	Key         remote.ClientKey
+	Pools       *Manager
+	MaxAttempts int
 }
 
-func NewDriver(cfg Config, dialer Dialer) (*Driver, error) {
-	if dialer == nil {
-		return nil, errors.New("sftp: dialer is required")
-	}
-	u, err := url.Parse(cfg.Endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("sftp: parse endpoint: %w", err)
-	}
-	if strings.ToLower(u.Scheme) != "sftp" || u.Host == "" {
-		return nil, errors.New("sftp: endpoint must use sftp:// with a host")
-	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("sftp: endpoint must not embed credentials, query, or fragment")
-	}
-	if cfg.CredentialScope == "" || cfg.SecurityProfile == "" {
-		return nil, errors.New("sftp: credential scope and security profile are required")
-	}
-	if cfg.HostKeySHA256 == "" {
-		return nil, errors.New("sftp: pinned host-key SHA256 is required")
-	}
-	if cfg.MaxSessions <= 0 {
-		cfg.MaxSessions = 8
-	}
-	if cfg.MaxRetries < 0 {
-		return nil, errors.New("sftp: negative retry count")
-	}
-	dialCfg := DialConfig{Endpoint: u.String(), CredentialScope: cfg.CredentialScope, CredentialVersion: cfg.CredentialVersion, SecurityProfile: cfg.SecurityProfile}
-	return &Driver{cfg: cfg, endpoint: u, pool: newSessionPool(cfg.MaxSessions, dialer, dialCfg)}, nil
-}
-
-func (d *Driver) Close() { d.pool.close() }
-func (d *Driver) Scheme() string { return "sftp" }
-func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.ServerSideList)
-}
-func (d *Driver) Probe(context.Context) (vfs.ProbeResult, error) {
-	return vfs.ProbeResult{Supported: d.StaticCapabilities(), Endpoint: d.endpoint.String(), CredentialScope: d.cfg.CredentialScope, CredentialVersion: d.cfg.CredentialVersion, SecurityProfile: d.cfg.SecurityProfile}, nil
-}
-
-func (d *Driver) acquireVerified(ctx context.Context) (*lease, error) {
-	l, hostKey, err := d.pool.acquire(ctx)
-	if err != nil {
+func NewDriver(key remote.ClientKey, pools *Manager, maxAttempts int) (*Driver, error) {
+	if err := key.Validate(); err != nil {
 		return nil, err
 	}
-	if hostKey != "" && hostKey != d.cfg.HostKeySHA256 {
-		l.Poison()
-		l.Release()
-		return nil, fmt.Errorf("%w: got=%s", ErrHostKeyMismatch, hostKey)
+	if pools == nil {
+		return nil, errors.New("sftp: pool manager required")
 	}
-	return l, nil
+	if maxAttempts <= 0 {
+		maxAttempts = 2
+	}
+	return &Driver{Key: key, Pools: pools, MaxAttempts: maxAttempts}, nil
+}
+func (d *Driver) Scheme() string { return "sftp" }
+func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
+	caps := vfs.Capabilities(vfs.RandomRead, vfs.StreamingRead, vfs.ServerSideList)
+	if d.Pools != nil && d.Pools.MaxSessions() > 1 {
+		caps = caps.With(vfs.ParallelRandomRead)
+	}
+	return caps
+}
+func (d *Driver) Probe(ctx context.Context) (vfs.ProbeResult, error) {
+	p, err := d.Pools.Pool(d.Key)
+	if err != nil {
+		return vfs.ProbeResult{}, err
+	}
+	s, err := p.Acquire(ctx)
+	if err != nil {
+		return vfs.ProbeResult{}, err
+	}
+	p.Release(s, false)
+	return vfs.ProbeResult{Supported: d.StaticCapabilities(), Endpoint: d.Key.Endpoint, CredentialScope: d.Key.CredentialScope, CredentialVersion: d.Key.CredentialVersion, SecurityProfile: d.Key.SecurityProfile}, nil
+}
+func infoIdentity(info FileInfo) vfs.ObjectIdentity {
+	return vfs.ObjectIdentity{Size: info.Size, ModifiedAt: time.Unix(info.ModUnix, 0).UTC()}
+}
+func (d *Driver) validateURI(u vfs.URI) error {
+	if strings.ToLower(u.Scheme) != "sftp" {
+		return vfs.ErrUnsupportedScheme
+	}
+	if u.Host != d.Key.Endpoint {
+		return fmt.Errorf("sftp: endpoint mismatch: uri=%s pool=%s", u.Host, d.Key.Endpoint)
+	}
+	return nil
 }
 
-func (d *Driver) Stat(ctx context.Context, uri vfs.URI) (vfs.ObjectInfo, error) {
-	if err := d.checkURI(uri); err != nil {
-		return vfs.ObjectInfo{}, err
+func uriPath(u vfs.URI) string {
+	p := u.Path
+	if p == "" {
+		p = "/"
 	}
-	var out RemoteInfo
-	err := d.retry(ctx, func(l *lease) error {
-		var err error
-		out, err = l.session.Stat(ctx, uri.Path)
+	return path.Clean(p)
+}
+func (d *Driver) pool() (*Pool, error) { return d.Pools.Pool(d.Key) }
+func (d *Driver) withSession(ctx context.Context, fn func(Session) error) error {
+	p, err := d.pool()
+	if err != nil {
 		return err
-	})
-	if err != nil {
-		return vfs.ObjectInfo{}, err
 	}
-	id := vfs.ObjectIdentity{Size: out.Size, ModifiedAt: out.Modified}
-	return vfs.ObjectInfo{URI: uri, Size: out.Size, Identity: id}, nil
-}
-
-func (d *Driver) List(ctx context.Context, base vfs.URI, opts vfs.ListOptions) (vfs.ListPage, error) {
-	if err := d.checkURI(base); err != nil {
-		return vfs.ListPage{}, err
-	}
-	maxKeys := opts.MaxKeys
-	if maxKeys <= 0 {
-		maxKeys = 1000
-	}
-	prefix := path.Join(base.Path, opts.Prefix)
-	var remote RemotePage
-	err := d.retry(ctx, func(l *lease) error {
-		var err error
-		remote, err = l.session.List(ctx, prefix, opts.ContinuationToken, maxKeys)
-		return err
-	})
-	if err != nil {
-		return vfs.ListPage{}, err
-	}
-	page := vfs.ListPage{NextContinuationToken: remote.NextToken, Truncated: remote.Truncated}
-	for _, entry := range remote.Entries {
-		u, err := vfs.ParseURI("sftp://" + base.Host + "/" + strings.TrimPrefix(entry.Path, "/"))
-		if err != nil {
-			return vfs.ListPage{}, err
-		}
-		id := vfs.ObjectIdentity{Size: entry.Size, ModifiedAt: entry.Modified}
-		page.Entries = append(page.Entries, vfs.ListEntry{URI: u, Size: entry.Size, Identity: id})
-	}
-	return page, nil
-}
-
-func (d *Driver) ReadRange(ctx context.Context, r vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager) (vfs.RangeResult, error) {
-	if err := r.Validate(); err != nil {
-		return vfs.RangeResult{}, err
-	}
-	if err := d.checkURI(r.URI); err != nil {
-		return vfs.RangeResult{}, err
-	}
-	if scope == nil || bm == nil {
-		return vfs.RangeResult{}, errors.New("sftp: managed memory required")
-	}
-	if r.Length > int64(^uint(0)>>1) {
-		return vfs.RangeResult{}, fmt.Errorf("sftp: range too large")
-	}
-	var result vfs.RangeResult
-	err := d.retry(ctx, func(l *lease) error {
-		info, err := l.session.Stat(ctx, r.URI.Path)
-		if err != nil {
-			return err
-		}
-		identity := vfs.ObjectIdentity{Size: info.Size, ModifiedAt: info.Modified}
-		if r.Expected != nil && !r.Expected.Matches(identity) {
-			return vfs.ErrObjectChanged
-		}
-		tag := r.Tag
-		if tag == "" {
-			tag = memory.TagSFTPRead
-		}
-		buf, err := bm.Allocate(scope, tag, int(r.Length))
-		if err != nil {
-			return err
-		}
-		n, readErr := l.session.ReadAt(ctx, r.URI.Path, r.Offset, buf.Bytes())
-		if readErr != nil || int64(n) != r.Length {
-			buf.Release()
-			if readErr != nil {
-				return readErr
-			}
-			return fmt.Errorf("%w: got=%d want=%d", vfs.ErrShortRead, n, r.Length)
-		}
-		result = vfs.RangeResult{Buffer: buf, Identity: identity}
-		return nil
-	})
-	if err != nil {
-		return vfs.RangeResult{}, err
-	}
-	return result, nil
-}
-
-func (d *Driver) retry(ctx context.Context, fn func(*lease) error) error {
 	var last error
-	for attempt := 0; attempt <= d.cfg.MaxRetries; attempt++ {
+	for attempt := 0; attempt < d.MaxAttempts; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		l, err := d.acquireVerified(ctx)
+		s, err := p.Acquire(ctx)
 		if err != nil {
-			return err
+			if errors.Is(err, ErrHostKey) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			last = err
+			if !IsRetryable(err) {
+				return err
+			}
+			continue
 		}
-		err = fn(l)
+		err = fn(s)
+		poison := IsRetryable(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+		p.Release(s, poison)
 		if err == nil {
-			l.Release()
 			return nil
 		}
-		last = err
-		if errors.Is(err, ErrConnectionReset) {
-			l.Poison()
+		if errors.Is(err, ErrHostKey) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
 		}
-		l.Release()
-		if !errors.Is(err, ErrConnectionReset) || attempt == d.cfg.MaxRetries {
+		last = err
+		if !IsRetryable(err) {
 			return err
 		}
 	}
 	return last
 }
-
-func (d *Driver) checkURI(uri vfs.URI) error {
-	if strings.ToLower(uri.Scheme) != "sftp" {
-		return fmt.Errorf("sftp: unexpected scheme %q", uri.Scheme)
+func (d *Driver) Stat(ctx context.Context, u vfs.URI) (out vfs.ObjectInfo, err error) {
+	if err := d.validateURI(u); err != nil {
+		return out, err
 	}
-	if !strings.EqualFold(uri.Host, d.endpoint.Host) {
-		return fmt.Errorf("sftp: endpoint mismatch %q", uri.Host)
+	var fi FileInfo
+	err = d.withSession(ctx, func(s Session) error {
+		v, e := s.Stat(ctx, uriPath(u))
+		if e == nil {
+			fi = v
+		}
+		return e
+	})
+	if err != nil {
+		return out, err
 	}
-	return nil
+	return vfs.ObjectInfo{URI: u, Size: fi.Size, Identity: infoIdentity(fi)}, nil
 }
-
-func (d *Driver) PoolStats() (open, leased, idle int) { return d.pool.stats() }
+func (d *Driver) List(ctx context.Context, u vfs.URI, opts vfs.ListOptions) (vfs.ListPage, error) {
+	if err := d.validateURI(u); err != nil {
+		return vfs.ListPage{}, err
+	}
+	prefix := strings.TrimPrefix(opts.Prefix, "/")
+	dir := "/"
+	basePrefix := prefix
+	if slash := strings.LastIndex(prefix, "/"); slash >= 0 {
+		dir = "/" + prefix[:slash]
+		basePrefix = prefix[slash+1:]
+	}
+	var entries []DirEntry
+	err := d.withSession(ctx, func(s Session) error {
+		v, e := s.List(ctx, dir)
+		if e == nil {
+			entries = v
+		}
+		return e
+	})
+	if err != nil {
+		return vfs.ListPage{}, err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
+	start := 0
+	if opts.ContinuationToken != "" {
+		n, e := strconv.Atoi(opts.ContinuationToken)
+		if e != nil || n < 0 {
+			return vfs.ListPage{}, fmt.Errorf("sftp: invalid continuation token")
+		}
+		start = n
+	}
+	max := opts.MaxKeys
+	if max <= 0 {
+		max = 1000
+	}
+	out := vfs.ListPage{}
+	for i := start; i < len(entries) && len(out.Entries) < max; i++ {
+		e := entries[i]
+		if !strings.HasPrefix(e.Name, basePrefix) {
+			continue
+		}
+		raw := "sftp://" + u.Host + path.Join(dir, e.Name)
+		entryURI, parseErr := vfs.ParseURI(raw)
+		if parseErr != nil {
+			return vfs.ListPage{}, parseErr
+		}
+		out.Entries = append(out.Entries, vfs.ListEntry{URI: entryURI, Size: e.Info.Size, Identity: infoIdentity(e.Info)})
+		start = i + 1
+	}
+	for i := start; i < len(entries); i++ {
+		if strings.HasPrefix(entries[i].Name, basePrefix) {
+			out.Truncated = true
+			out.NextContinuationToken = strconv.Itoa(start)
+			break
+		}
+	}
+	return out, nil
+}
+func (d *Driver) ReadRange(ctx context.Context, r vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager) (vfs.RangeResult, error) {
+	if err := d.validateURI(r.URI); err != nil {
+		return vfs.RangeResult{}, err
+	}
+	if err := r.Validate(); err != nil {
+		return vfs.RangeResult{}, err
+	}
+	if scope == nil || bm == nil {
+		return vfs.RangeResult{}, errors.New("sftp: managed memory required")
+	}
+	tag := r.Tag
+	if tag == "" {
+		tag = memory.TagSFTPRead
+	}
+	buf, err := bm.Allocate(scope, tag, int(r.Length))
+	if err != nil {
+		return vfs.RangeResult{}, err
+	}
+	release := func(e error) (vfs.RangeResult, error) { buf.Release(); return vfs.RangeResult{}, e }
+	var identity vfs.ObjectIdentity
+	err = d.withSession(ctx, func(s Session) error {
+		before, e := s.Stat(ctx, uriPath(r.URI))
+		if e != nil {
+			return e
+		}
+		identity = infoIdentity(before)
+		if r.Expected != nil && !r.Expected.Matches(identity) {
+			return vfs.ErrObjectChanged
+		}
+		n, e := s.ReadAt(ctx, uriPath(r.URI), buf.Bytes(), r.Offset)
+		if e != nil && !errors.Is(e, io.EOF) {
+			return e
+		}
+		if int64(n) != r.Length {
+			return vfs.ErrShortRead
+		}
+		after, e := s.Stat(ctx, uriPath(r.URI))
+		if e != nil {
+			return e
+		}
+		if !identity.Matches(infoIdentity(after)) {
+			return vfs.ErrObjectChanged
+		}
+		return nil
+	})
+	if err != nil {
+		return release(err)
+	}
+	return vfs.RangeResult{Buffer: buf, Identity: identity}, nil
+}
