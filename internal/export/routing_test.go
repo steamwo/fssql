@@ -3,6 +3,7 @@ package export
 import (
 	"errors"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
@@ -10,7 +11,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/vector"
 )
 
-func newRoutingTestChunk(t *testing.T, schema []Column, regions []any, ids []int32) (*vector.DataChunk, *memory.Scope) {
+func newRoutingTestChunk(t testing.TB, schema []Column, regions []any, ids []int32) (*vector.DataChunk, *memory.Scope) {
 	t.Helper()
 	mm := memory.NewManager(1 << 20)
 	scope := mm.NewScope()
@@ -134,5 +135,28 @@ func TestPartitionRouterRejectsNestedDuplicateAndUnsafeSegment(t *testing.T) {
 	}()
 	if _, err := r.RouteChunk(chunk, "../x"); !errors.Is(err, ErrInvalidRouting) {
 		t.Fatal(err)
+	}
+}
+
+func BenchmarkPartitionRouting2048x64(b *testing.B) {
+	schema := []Column{{Name: "region", Type: types.LogicalType{ID: types.Varchar}}, {Name: "id", Type: types.LogicalType{ID: types.Integer}}}
+	regions := make([]any, 2048)
+	ids := make([]int32, 2048)
+	for i := range ids {
+		regions[i] = "region-" + strconv.Itoa(i%64)
+		ids[i] = int32(i)
+	}
+	chunk, scope := newRoutingTestChunk(b, schema, regions, ids)
+	defer func() { chunk.Release(); _ = scope.Close() }()
+	router, err := NewFileRouter(RoutingConfig{Mode: LayoutPartitioned, Prefix: "out", Extension: "parquet", PartitionColumns: []int{0}}, schema)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := router.RouteChunk(chunk, "segment"); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
