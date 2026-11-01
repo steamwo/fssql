@@ -72,9 +72,10 @@ func (set CapabilitySet) Intersect(other CapabilitySet) CapabilitySet { return s
 
 // ProbeResult captures endpoint-specific runtime capability knowledge and the
 // client-reuse identity that a remote driver discovered for that endpoint.
-// Known identifies capabilities that were actually probed. Supported is a
-// subset of Known for the new model. Legacy probes may leave Known empty and
-// provide a complete Supported set; ResolveEffectiveCapabilities handles both.
+// Known identifies capabilities that were actually probed. Supported must be a
+// subset of Known. Endpoint-bound legacy probes may leave Known empty and
+// provide a complete Supported set; ResolveEffectiveCapabilities handles that
+// compatibility form explicitly.
 type ProbeResult struct {
 	Known     CapabilitySet
 	Supported CapabilitySet
@@ -87,7 +88,13 @@ type ProbeResult struct {
 
 // Validate checks the internal consistency of a probe result.
 func (result ProbeResult) Validate() error {
-	if result.Known != 0 && result.Supported&^result.Known != 0 {
+	if result.Known == 0 && result.Supported != 0 {
+		if result.Endpoint == "" {
+			return fmt.Errorf("vfs: probe has supported capabilities without known set or endpoint-bound legacy identity: supported=%#x", uint64(result.Supported))
+		}
+		return nil
+	}
+	if result.Supported&^result.Known != 0 {
 		return fmt.Errorf("vfs: probe marks supported capability outside known set: supported=%#x known=%#x", uint64(result.Supported), uint64(result.Known))
 	}
 	return nil
@@ -95,7 +102,8 @@ func (result ProbeResult) Validate() error {
 
 // ResolveEffectiveCapabilities combines driver capabilities with an endpoint
 // runtime probe. Runtime knowledge may narrow, but never grant, static driver
-// capabilities. A legacy complete Supported set is intersected with static.
+// capabilities. An endpoint-bound legacy complete Supported set is intersected
+// with the static driver set.
 func ResolveEffectiveCapabilities(static CapabilitySet, probe ProbeResult) (CapabilitySet, error) {
 	if err := probe.Validate(); err != nil {
 		return 0, err
