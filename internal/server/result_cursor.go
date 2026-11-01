@@ -14,8 +14,10 @@ var (
 	ErrResultCursorClosed = errors.New("server: result cursor closed")
 	// ErrResultCursorFinished 表示 producer 已声明结果流完成，不能再 Push 新 chunk。
 	ErrResultCursorFinished = errors.New("server: result cursor finished")
-	// ErrNilResultChunk 表示调用方试图提交 nil DataChunk。
+	// ErrNilResultChunk 表示调用方试图提交或释放 nil DataChunk。
 	ErrNilResultChunk = errors.New("server: nil result chunk")
+	// ErrResultChunkNotOwned 表示 consumer 尝试释放超过 ResultCursor 已交付数量的 chunk。
+	ErrResultChunkNotOwned = errors.New("server: result chunk is not consumer-owned")
 )
 
 // ResultCursorStats 是 ResultCursor 的不可变背压状态快照。
@@ -24,6 +26,8 @@ type ResultCursorStats struct {
 	CapacityChunks int
 	// BufferedChunks 是当前尚未被 consumer 领取的 chunk 数量。
 	BufferedChunks int
+	// ConsumerOwnedChunks 是已经交给 consumer、但尚未完成 ReleaseChunk 的 chunk 数量。
+	ConsumerOwnedChunks int
 	// PeakBufferedChunks 是 cursor 生命周期内的最大排队 chunk 数。
 	PeakBufferedChunks int
 	// Finished 表示 producer 已调用 Finish。
@@ -36,17 +40,18 @@ type ResultCursorStats struct {
 //
 // Ownership 规则：
 //   - Push 成功后 chunk ownership 转移给 ResultCursor；producer 不得再次访问或 Release。
-//   - Next 成功后 chunk ownership 转移给 consumer；consumer 必须最终 Release。
+//   - Next 成功后 chunk ownership 转移给 consumer；consumer 必须最终调用 ReleaseChunk。
+//   - ReleaseChunk 先释放 DataChunk Managed Buffer，再确认 consumer ownership 已结束。
 //   - Push 失败时 ownership 仍属于 producer。
-//   - Close 会 Release 所有仍在队列中的 chunk。
+//   - Close 会 Release 所有仍在队列中的 chunk，但不会代替 consumer 释放已经由 Next 取走的 chunk。
 //
 // DataChunk payload 已经由 MemoryManager 管理，因此 Cursor 只提供“有界 chunk 数量”背压，
 // 不重复 Reserve payload bytes。大 VARCHAR 等可变长 payload 的绝对上界仍由 Query MemoryScope 约束。
-// queued chunk 不得跨越其所属 QueryContext 的终态；I-10 仍要求 Query 终态前 reservation 归零。
+// queued/in-flight chunk 不得跨越其所属 QueryContext 的终态；I-10 要求 Query 终态前 reservation 归零。
 type ResultCursor struct {
-	// mu 保护 ring、producer/consumer terminal state 和 peak 指标。
+	// mu 保护 ring、producer/consumer terminal state、consumer ownership 和 peak 指标。
 	mu sync.Mutex
-	// changed 在 Push/Next/Finish/Close 后唤醒等待方。
+	// changed 在 Push/Next/ReleaseChunk/Finish/Close 后唤醒等待方。
 	changed *sync.Cond
 	// ring 是固定大小的 chunk 指针数组，不随 slow client 持续增长。
 	ring []*vector.DataChunk
@@ -56,6 +61,10 @@ type ResultCursor struct {
 	tail int
 	// count 是当前已占用 ring 槽位数。
 	count int
+	// consumerOwned 是 Next 已交付、但尚未开始 ReleaseChunk 的 chunk 数量。
+	consumerOwned int
+	// releasing 是正在执行 DataChunk.Release 的 consumer chunk 数量；终态必须等待其归零。
+	releasing int
 	// peak 是 cursor 生命周期内最大排队数。
 	peak int
 	// finished 表示 producer 已结束；terminalErr 在队列排空后交给 consumer。
@@ -116,6 +125,7 @@ func (c *ResultCursor) Push(ctx context.Context, chunk *vector.DataChunk) error 
 
 // Next 返回下一个 native DataChunk 并把 ownership 转移给 consumer。
 // producer 成功 Finish 且队列排空后返回 io.EOF；失败 Finish 则返回对应 terminal error。
+// 每个成功返回的 chunk 都必须通过 ReleaseChunk 结束 consumer ownership。
 func (c *ResultCursor) Next(ctx context.Context) (*vector.DataChunk, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -138,6 +148,7 @@ func (c *ResultCursor) Next(ctx context.Context) (*vector.DataChunk, error) {
 		c.ring[c.head] = nil
 		c.head = (c.head + 1) % len(c.ring)
 		c.count--
+		c.consumerOwned++
 		c.changed.Broadcast()
 		return chunk, nil
 	}
@@ -148,6 +159,31 @@ func (c *ResultCursor) Next(ctx context.Context) (*vector.DataChunk, error) {
 		return nil, c.terminalErr
 	}
 	return nil, io.EOF
+}
+
+// ReleaseChunk 释放一个由 Next 交付给 consumer 的 DataChunk，并在 Managed Buffer 真正释放后结束 consumer ownership。
+// 释放顺序不能反转，否则 Query terminal 可能在 reservation 尚未归零时越过 I-10。
+func (c *ResultCursor) ReleaseChunk(chunk *vector.DataChunk) error {
+	if chunk == nil {
+		return ErrNilResultChunk
+	}
+
+	c.mu.Lock()
+	if c.consumerOwned <= 0 {
+		c.mu.Unlock()
+		return ErrResultChunkNotOwned
+	}
+	c.consumerOwned--
+	c.releasing++
+	c.mu.Unlock()
+
+	chunk.Release()
+
+	c.mu.Lock()
+	c.releasing--
+	c.changed.Broadcast()
+	c.mu.Unlock()
+	return nil
 }
 
 // Finish 结束 producer 侧结果流；已排队 chunk 仍可被 consumer 依次读取。
@@ -168,6 +204,7 @@ func (c *ResultCursor) Finish(err error) error {
 }
 
 // Close 表示 consumer 放弃剩余结果；所有 queued chunk 都会立即 Release，producer/consumer 等待者被唤醒。
+// 已经由 Next 取走的 chunk 仍属于 consumer，必须通过 ReleaseChunk 结束 ownership。
 func (c *ResultCursor) Close() {
 	var release []*vector.DataChunk
 	c.mu.Lock()
@@ -199,8 +236,12 @@ func (c *ResultCursor) Stats() ResultCursorStats {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return ResultCursorStats{
-		CapacityChunks: len(c.ring), BufferedChunks: c.count, PeakBufferedChunks: c.peak,
-		Finished: c.finished, Closed: c.closed,
+		CapacityChunks:      len(c.ring),
+		BufferedChunks:      c.count,
+		ConsumerOwnedChunks: c.consumerOwned + c.releasing,
+		PeakBufferedChunks:  c.peak,
+		Finished:            c.finished,
+		Closed:              c.closed,
 	}
 }
 
