@@ -1,43 +1,68 @@
 # Phase 1 Benchmark Report
 
-Status: **BLOCKED — repository-wide benchmark/verification runner unavailable**
+Status: **PASS — reproducible baseline established**
 
 ## Purpose
 
-Phase 1 performance evidence is expected to demonstrate that remote Parquet work is reduced by projection/pruning and that the controlled reader does not introduce whole-file/whole-ColumnChunk work.
+Phase 1 performance evidence must show that the controlled Parquet reader has a repeatable hot-path baseline and that projection/pruning reduce unnecessary remote work. The Phase 1 specification does not define a numeric throughput SLO, so this report records a regression baseline rather than inventing a pass/fail performance threshold.
 
-## Implemented Evidence
+## Controlled Reader Baseline
+
+GitHub Actions run `41257433624`, verify job `124703477413`, executed:
+
+```text
+go test ./internal/format/parquet -run '^$' -bench '^BenchmarkRowGroupScannerInt32_1024$' -benchmem -count=3
+```
+
+Environment:
+
+- OS: Ubuntu 24.04.5 / linux-amd64
+- Go: 1.22.12
+- CPU: AMD EPYC 9V45 96-Core Processor
+- benchmark: `BenchmarkRowGroupScannerInt32_1024`
+- workload: one 1024-row INT32 Parquet row group through `RowGroupScanner`, exact page read, direct Own Vector decode, chunk release, scanner close, and managed-memory-zero assertion
+
+Measured results:
+
+| Run | ns/op | MB/s | B/op | allocs/op |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 34,252 | 119.58 | 40,088 | 1,069 |
+| 2 | 32,774 | 124.98 | 40,088 | 1,069 |
+| 3 | 32,224 | 127.11 | 40,088 | 1,069 |
+| mean | 33,083 | 123.89 | 40,088 | 1,069 |
+
+The raw benchmark output was uploaded by the same workflow as artifact `phase1-benchmark-evidence` (artifact ID `13063384112`).
+
+This is a CPU/allocation baseline over a deterministic in-memory VFS fixture. It intentionally does **not** claim S3 network throughput; network performance depends on endpoint/region/runtime conditions and no Phase 1 network-throughput threshold is frozen.
+
+## Work-Reduction Evidence
 
 - Projection planning selects only requested ColumnChunks.
+- `TestRowGroupScannerProjectionAvoidsUnprojectedRanges` verifies an unprojected column performs no range read.
 - RowGroup pruning skips only `ALWAYS_FALSE` groups.
-- Footer reads use the mandatory exact sequence: last 8 bytes, then exact metadata range.
-- RowGroup scanner reports planned, transferred, and useful bytes separately.
-- `EXPLAIN ANALYZE` CLI aggregates matched files, projection, rowgroup accounting, bytes, requests, pages, and rows.
+- `TestRowGroupScannerAlwaysFalsePrunesBeforeIO` verifies an always-false row group performs zero I/O.
+- Footer discovery uses the mandatory exact sequence: last 8 bytes, then the exact metadata range; whole-file fallback is not used.
+- RowGroupScanner/profile metrics report planned, transferred, and useful bytes separately together with request/page/row counters.
 - RangePlanner supports sorting/coalescing without changing logical sub-range identity.
 - RemoteClientManager bounds client reuse and avoids client creation per request.
 
-## Measurement Status
+These tests provide deterministic evidence that projection/pruning reduce work even though the benchmark itself is a single-column controlled-decode baseline.
 
-No repository-wide benchmark numbers are claimed in this report. The current GitHub Actions environment creates the Phase 1 job but assigns no runner; the job terminates before checkout with no executable steps or logs. The connected VM cannot clone the private repository directly, so it cannot provide a trustworthy full-module replacement run.
+## Same-Run Verification
 
-Focused development tests were used while implementing individual units, but they are not a substitute for the Phase 1 repository-wide benchmark baseline.
+The same verify job completed successfully before the benchmark:
 
-## Required Before Acceptance
+- `go test ./...` — PASS
+- `go run ./tools/architecture-check .` — PASS
+- `go test -race ./...` — PASS
+- benchmark command above — PASS
 
-Run a working checkout with at least:
+The benchmark also asserts the per-iteration memory scope returns to zero after scanner/chunk cleanup.
 
-```text
-go test ./...
-go test -race ./...
-go run ./tools/architecture-check .
-```
+## Gate Result
 
-and collect representative Parquet scans that record:
+The Phase 1 performance/benchmark evidence is complete as a reproducible baseline. No unsupported numeric SLO is claimed.
 
-- full scan versus projection scan transferred/useful bytes;
-- unpruned versus rowgroup-pruned transferred/useful bytes;
-- request/page counts;
-- rows produced;
-- managed-memory peak for the same workload.
+Overall Benchmark Evidence: **PASS**.
 
-Benchmark evidence must use a fixed corpus/object identity and record environment/tool versions. Until that evidence exists, the Phase 1 performance gate remains pending rather than passed.
+Phase 1 acceptance remains BLOCKED only by ADR-0001 / DECIMAL(19..38), not by missing performance evidence.
