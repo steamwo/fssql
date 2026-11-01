@@ -98,10 +98,11 @@ func TestRowGroupScannerDecimal128ControlledDecode(t *testing.T) {
 		scanner.Close()
 		t.Fatalf("chunk cardinality=%d columns=%d", chunk.Cardinality, len(chunk.Columns))
 	}
-	if chunk.Columns[0].Type != decimal {
+	gotType := chunk.Columns[0].Type
+	if gotType.ID != coretypes.Decimal || gotType.Decimal != decimal.Decimal {
 		chunk.Release()
 		scanner.Close()
-		t.Fatalf("column type=%+v, want %+v", chunk.Columns[0].Type, decimal)
+		t.Fatalf("column type=%+v, want DECIMAL(%d,%d)", gotType, decimal.Decimal.Width, decimal.Decimal.Scale)
 	}
 	want := []coretypes.Int128{positive, negative}
 	for i, expected := range want {
