@@ -184,6 +184,10 @@ func (h *QueryHandle) Finalize(target QueryState, terminalErr error, now time.Ti
 	if h.state.Terminal() {
 		return ErrQueryTerminal
 	}
+	// 正常成功必须走完整状态链到 FINISHING；FAILED/CANCELED 可以从任何非终态收敛。
+	if target == QuerySucceeded && h.state != QueryFinishing {
+		return fmt.Errorf("%w: %s -> %s", ErrInvalidQueryTransition, h.state.String(), target.String())
+	}
 	if target == QuerySucceeded && h.cancelRequested {
 		return fmt.Errorf("%w: canceled query cannot succeed", ErrInvalidQueryTransition)
 	}
