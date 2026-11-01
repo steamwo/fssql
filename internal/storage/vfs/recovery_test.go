@@ -52,7 +52,7 @@ func TestRecoverIncompleteWritesRequiresCapability(t *testing.T) {
 	}
 }
 
-func TestRecoverIncompleteWritesRejectsRootScopeAndInvalidReport(t *testing.T) {
+func TestRecoverIncompleteWritesRejectsRootInvalidAndPartialReport(t *testing.T) {
 	d := &testRecoveryDriver{
 		testWriteDriver: testWriteDriver{testReadOnlyDriver: testReadOnlyDriver{caps: Capabilities(StreamingWrite, IncompleteWriteRecovery)}},
 		report:          RecoveryReport{Discovered: 1, Recovered: 2},
@@ -70,6 +70,11 @@ func TestRecoverIncompleteWritesRejectsRootScopeAndInvalidReport(t *testing.T) {
 	u, _ := ParseURI("test://host/staging/job-1/")
 	if _, err := r.RecoverIncompleteWrites(context.Background(), u, scope); err == nil {
 		t.Fatal("expected invalid recovery report rejection")
+	}
+
+	d.report = RecoveryReport{Discovered: 2, Recovered: 1}
+	if _, err := r.RecoverIncompleteWrites(context.Background(), u, scope); !errors.Is(err, ErrIncompleteWriteRecoveryPartial) {
+		t.Fatalf("expected partial recovery rejection, got %v", err)
 	}
 }
 
