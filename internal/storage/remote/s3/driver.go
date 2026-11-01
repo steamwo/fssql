@@ -104,10 +104,10 @@ func NewDriver(cfg Config, creds Credentials, clients *remote.ClientManager) (*D
 
 func (d *Driver) Scheme() string { return "s3" }
 
-// StaticCapabilities 只声明已经由驱动真实实现的能力；Phase 4 增加流式/multipart 写，
-// 但 dataset commit 不能借此伪造目录 rename，也暂不把条件写作为必备 capability。
+// StaticCapabilities 只声明已经由驱动真实实现的能力；Phase 4 的 ConditionalWrite
+// 在 PutObject/CompleteMultipartUpload 原子完成点映射 If-Match/If-None-Match，仍不伪造目录 rename。
 func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite, vfs.ConditionalRead, vfs.StableETag, vfs.VersionedObject, vfs.ServerSideList)
+	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject, vfs.ServerSideList)
 }
 
 func (d *Driver) Probe(context.Context) (vfs.ProbeResult, error) {
