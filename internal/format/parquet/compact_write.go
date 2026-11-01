@@ -6,9 +6,9 @@ import (
 	"fmt"
 )
 
-// compactWriter 是 Parquet footer/page header 使用的 Thrift Compact Protocol 最小受控编码器。
+// compactEncoder 是 Parquet footer/page header 使用的 Thrift Compact Protocol 最小受控编码器。
 // 它只编码本引擎 writer 需要的 parquet-format 字段，不把第三方 Thrift 类型引入核心 ABI。
-type compactWriter struct {
+type compactEncoder struct {
 	// buf 保存当前小型 metadata/header；大页 payload 不经过这里。
 	buf []byte
 }
@@ -21,7 +21,7 @@ func EncodeFileMetaData(meta FileMetaData) ([]byte, error) {
 	if meta.NumRows < 0 {
 		return nil, errors.New("parquet: negative row count")
 	}
-	w := &compactWriter{}
+	w := &compactEncoder{}
 	if err := w.fileMeta(meta); err != nil {
 		return nil, err
 	}
@@ -47,7 +47,7 @@ func EncodePageHeader(header PageHeader) ([]byte, error) {
 			return nil, errors.New("parquet: data v2 page missing header")
 		}
 	}
-	w := &compactWriter{}
+	w := &compactEncoder{}
 	if err := w.pageHeader(header); err != nil {
 		return nil, err
 	}
@@ -55,7 +55,7 @@ func EncodePageHeader(header PageHeader) ([]byte, error) {
 }
 
 // fieldHeader 写 Compact Protocol 字段头；优先使用 4-bit field-id delta 紧凑形式。
-func (w *compactWriter) fieldHeader(last, id int16, typ byte) int16 {
+func (w *compactEncoder) fieldHeader(last, id int16, typ byte) int16 {
 	delta := id - last
 	if delta > 0 && delta <= 15 {
 		w.buf = append(w.buf, byte(delta<<4)|typ)
@@ -67,10 +67,10 @@ func (w *compactWriter) fieldHeader(last, id int16, typ byte) int16 {
 }
 
 // stop 结束一个 Compact struct。
-func (w *compactWriter) stop() { w.buf = append(w.buf, ctStop) }
+func (w *compactEncoder) stop() { w.buf = append(w.buf, ctStop) }
 
 // uvarint 写 Compact Protocol 无符号 varint。
-func (w *compactWriter) uvarint(v uint64) {
+func (w *compactEncoder) uvarint(v uint64) {
 	var scratch [10]byte
 	n := binary.PutUvarint(scratch[:], v)
 	w.buf = append(w.buf, scratch[:n]...)
@@ -80,22 +80,22 @@ func (w *compactWriter) uvarint(v uint64) {
 func zigzag(v int64) uint64 { return uint64(v<<1) ^ uint64(v>>63) }
 
 // i16 写 Compact i16。
-func (w *compactWriter) i16(v int16) { w.uvarint(zigzag(int64(v))) }
+func (w *compactEncoder) i16(v int16) { w.uvarint(zigzag(int64(v))) }
 
 // i32 写 Compact i32。
-func (w *compactWriter) i32(v int32) { w.uvarint(zigzag(int64(v))) }
+func (w *compactEncoder) i32(v int32) { w.uvarint(zigzag(int64(v))) }
 
 // i64 写 Compact i64。
-func (w *compactWriter) i64(v int64) { w.uvarint(zigzag(v)) }
+func (w *compactEncoder) i64(v int64) { w.uvarint(zigzag(v)) }
 
 // binary 写 length-prefixed binary/string。
-func (w *compactWriter) binary(v []byte) {
+func (w *compactEncoder) binary(v []byte) {
 	w.uvarint(uint64(len(v)))
 	w.buf = append(w.buf, v...)
 }
 
 // listHeader 写 Compact list header，并限制集合长度避免 metadata 无界膨胀。
-func (w *compactWriter) listHeader(elemType byte, n int) error {
+func (w *compactEncoder) listHeader(elemType byte, n int) error {
 	if n < 0 || n > maxCompactCollection {
 		return fmt.Errorf("parquet: compact collection too large %d", n)
 	}
@@ -109,7 +109,7 @@ func (w *compactWriter) listHeader(elemType byte, n int) error {
 }
 
 // boolField 把 bool 值编码在字段头类型中，不额外写 payload。
-func (w *compactWriter) boolField(last, id int16, value bool) int16 {
+func (w *compactEncoder) boolField(last, id int16, value bool) int16 {
 	typ := byte(ctBoolFalse)
 	if value {
 		typ = ctBoolTrue
@@ -118,7 +118,7 @@ func (w *compactWriter) boolField(last, id int16, value bool) int16 {
 }
 
 // fileMeta 编码 FileMetaData 的 Phase 4 writer 所需字段。
-func (w *compactWriter) fileMeta(meta FileMetaData) error {
+func (w *compactEncoder) fileMeta(meta FileMetaData) error {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(meta.Version)
@@ -163,7 +163,7 @@ func (w *compactWriter) fileMeta(meta FileMetaData) error {
 }
 
 // schemaElement 编码一个扁平化 SchemaElement。
-func (w *compactWriter) schemaElement(s SchemaElement) error {
+func (w *compactEncoder) schemaElement(s SchemaElement) error {
 	if s.Name == "" {
 		return errors.New("parquet: schema element missing name")
 	}
@@ -214,7 +214,7 @@ func (w *compactWriter) schemaElement(s SchemaElement) error {
 }
 
 // logicalType 编码 parquet-format LogicalType union 中 v1 已支持的分支。
-func (w *compactWriter) logicalType(l LogicalType) error {
+func (w *compactEncoder) logicalType(l LogicalType) error {
 	last := int16(0)
 	switch l.Kind {
 	case LogicalString:
@@ -265,7 +265,7 @@ func (w *compactWriter) logicalType(l LogicalType) error {
 }
 
 // decimalLogical 编码 DecimalType(scale, precision)。
-func (w *compactWriter) decimalLogical(d DecimalLogical) {
+func (w *compactEncoder) decimalLogical(d DecimalLogical) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(d.Scale)
@@ -276,7 +276,7 @@ func (w *compactWriter) decimalLogical(d DecimalLogical) {
 }
 
 // timestampLogical 编码 TimestampType。
-func (w *compactWriter) timestampLogical(t TimestampLogical) {
+func (w *compactEncoder) timestampLogical(t TimestampLogical) {
 	last := int16(0)
 	last = w.boolField(last, 1, t.IsAdjustedToUTC)
 	last = w.fieldHeader(last, 2, ctStruct)
@@ -286,7 +286,7 @@ func (w *compactWriter) timestampLogical(t TimestampLogical) {
 }
 
 // timeLogical 编码 TimeType。
-func (w *compactWriter) timeLogical(t TimeLogical) {
+func (w *compactEncoder) timeLogical(t TimeLogical) {
 	last := int16(0)
 	last = w.boolField(last, 1, t.IsAdjustedToUTC)
 	last = w.fieldHeader(last, 2, ctStruct)
@@ -296,7 +296,7 @@ func (w *compactWriter) timeLogical(t TimeLogical) {
 }
 
 // integerLogical 编码 IntType(bitWidth, signed)。
-func (w *compactWriter) integerLogical(x IntegerLogical) {
+func (w *compactEncoder) integerLogical(x IntegerLogical) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctByte)
 	w.buf = append(w.buf, byte(x.BitWidth))
@@ -306,7 +306,7 @@ func (w *compactWriter) integerLogical(x IntegerLogical) {
 }
 
 // timeUnit 编码 TimeUnit union。
-func (w *compactWriter) timeUnit(unit TimeUnit) {
+func (w *compactEncoder) timeUnit(unit TimeUnit) {
 	id := int16(unit) + 1
 	w.fieldHeader(0, id, ctStruct)
 	w.stop()
@@ -314,7 +314,7 @@ func (w *compactWriter) timeUnit(unit TimeUnit) {
 }
 
 // rowGroup 编码 RowGroup，列块 metadata 保持在 footer 中而不是外部 sidecar。
-func (w *compactWriter) rowGroup(group RowGroup) error {
+func (w *compactEncoder) rowGroup(group RowGroup) error {
 	if group.NumRows < 0 || group.TotalByteSize < 0 {
 		return errors.New("parquet: invalid row group sizes")
 	}
@@ -350,7 +350,7 @@ func (w *compactWriter) rowGroup(group RowGroup) error {
 }
 
 // columnChunk 编码 ColumnChunk；Phase 4 不写 page/column index，因此对应 optional 字段保持省略。
-func (w *compactWriter) columnChunk(chunk ColumnChunk) error {
+func (w *compactEncoder) columnChunk(chunk ColumnChunk) error {
 	if chunk.MetaData == nil {
 		return errors.New("parquet: column chunk missing metadata")
 	}
@@ -387,7 +387,7 @@ func (w *compactWriter) columnChunk(chunk ColumnChunk) error {
 }
 
 // columnMeta 编码 ColumnMetaData required fields 与 writer 已产生的可选统计。
-func (w *compactWriter) columnMeta(meta ColumnMetaData) error {
+func (w *compactEncoder) columnMeta(meta ColumnMetaData) error {
 	if meta.NumValues < 0 || meta.TotalUncompressedSize < 0 || meta.TotalCompressedSize < 0 || meta.DataPageOffset < 0 {
 		return errors.New("parquet: invalid column metadata sizes")
 	}
@@ -439,7 +439,7 @@ func (w *compactWriter) columnMeta(meta ColumnMetaData) error {
 }
 
 // statistics 编码 footer/page statistics 中当前模型支持的字段。
-func (w *compactWriter) statistics(s Statistics) {
+func (w *compactEncoder) statistics(s Statistics) {
 	last := int16(0)
 	if s.Max != nil {
 		last = w.fieldHeader(last, 1, ctBinary)
@@ -476,7 +476,7 @@ func (w *compactWriter) statistics(s Statistics) {
 }
 
 // keyValue 编码 footer key/value metadata。
-func (w *compactWriter) keyValue(kv KeyValue) {
+func (w *compactEncoder) keyValue(kv KeyValue) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctBinary)
 	w.binary([]byte(kv.Key))
@@ -489,7 +489,7 @@ func (w *compactWriter) keyValue(kv KeyValue) {
 }
 
 // pageHeader 编码 PageHeader 以及对应的 DataPage/Dictionary/DataPageV2 子结构。
-func (w *compactWriter) pageHeader(h PageHeader) error {
+func (w *compactEncoder) pageHeader(h PageHeader) error {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(int32(h.Type))
@@ -518,7 +518,7 @@ func (w *compactWriter) pageHeader(h PageHeader) error {
 }
 
 // dataPage 编码 DataPageHeader v1。
-func (w *compactWriter) dataPage(h DataPageHeader) {
+func (w *compactEncoder) dataPage(h DataPageHeader) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(h.NumValues)
@@ -537,7 +537,7 @@ func (w *compactWriter) dataPage(h DataPageHeader) {
 }
 
 // dictionaryPage 编码 DictionaryPageHeader。
-func (w *compactWriter) dictionaryPage(h DictionaryPageHeader) {
+func (w *compactEncoder) dictionaryPage(h DictionaryPageHeader) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(h.NumValues)
@@ -549,7 +549,7 @@ func (w *compactWriter) dictionaryPage(h DictionaryPageHeader) {
 }
 
 // dataPageV2 编码 DataPageHeaderV2。
-func (w *compactWriter) dataPageV2(h DataPageHeaderV2) {
+func (w *compactEncoder) dataPageV2(h DataPageHeaderV2) {
 	last := int16(0)
 	last = w.fieldHeader(last, 1, ctI32)
 	w.i32(h.NumValues)

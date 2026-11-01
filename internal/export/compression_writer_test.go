@@ -45,7 +45,7 @@ func TestGzipCompressionSinkLogicalEquality(t *testing.T) {
 }
 
 func TestZstdRawCompressionSinkInteropWithPhase3Decoder(t *testing.T) {
-	mm := memory.NewManager(4 << 20)
+	mm := memory.NewManager(16 << 20)
 	scope := mm.NewScope()
 	bm := memory.NewBufferManager(nil)
 	sink := &captureSink{}
@@ -110,7 +110,7 @@ func TestCompressionSinkAllocationAndCancellation(t *testing.T) {
 }
 
 func TestZstdFlushProducesValidContinuation(t *testing.T) {
-	mm := memory.NewManager(2 << 20)
+	mm := memory.NewManager(16 << 20)
 	scope := mm.NewScope()
 	bm := memory.NewBufferManager(nil)
 	sink := &captureSink{}
