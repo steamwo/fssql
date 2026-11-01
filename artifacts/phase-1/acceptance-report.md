@@ -2,7 +2,7 @@
 
 Acceptance Decision: **BLOCKED — ADR-0001 ONLY**
 
-Phase 1 is intentionally not marked ACCEPTED. All executable Phase 1 implementation, repository-wide verification, failure testing, and four-engine interoperability work is complete. The sole remaining blocker is the frozen-architecture decision required for DECIMAL(19..38): ADR-0001 remains PROPOSED, so the Decimal128 Own Vector representation cannot be implemented until explicitly approved or otherwise resolved.
+Phase 1 is intentionally not marked ACCEPTED. All executable Phase 1 implementation, repository-wide verification, failure testing, benchmark evidence, and four-engine interoperability work is complete. The sole remaining blocker is the frozen-architecture decision required for DECIMAL(19..38): ADR-0001 remains PROPOSED, so the Decimal128 Own Vector representation cannot be implemented until explicitly approved or otherwise resolved.
 
 ## Scope
 
@@ -21,7 +21,7 @@ No Phase 2 join/aggregation/spill functionality is included.
 - **P1-D5 SourceSnapshot demo — PASS**: immutable ScanSet snapshots carry ObjectIdentity and DatasetFingerprint; stable identities are used for conditional reads.
 - **P1-D6 Source Introspection — PASS**: `InspectSource` and `DescribeSource` reuse the same SourceBinder; schema equality and metadata-cache reuse are regression tested.
 - **P1-D7 Nested Parquet corpus — PASS**: deterministic corpus generation covers nested, dictionary, Decimal64/Decimal128 source files, timestamp, Hive, multi-file and union-by-name cases. The corpus is materialized by the interoperability gate.
-- **P1-D8 DuckDB/PyArrow/Polars/Spark interop corpus — PASS**: GitHub Actions run `41256775324`, job `124701834272`, successfully ran the canonical corpus and a 4-producer × 4-reader matrix. Exact results and engine versions are recorded in `artifacts/phase-1/interop-output.json`.
+- **P1-D8 DuckDB/PyArrow/Polars/Spark interop corpus — PASS**: GitHub Actions run `41257433624`, job `124703770569`, successfully ran the pinned canonical corpus and a 4-producer × 4-reader matrix. Exact results and engine versions are recorded in `artifacts/phase-1/interop-output.json`.
 - **P1-D9 EXPLAIN metrics — PASS**: generic ScanProfile and Parquet aggregation report matched files, projected columns, pushed filters, rowgroups, planned/transferred/useful bytes, requests/pages/rows; metrics remain observable after resource cleanup.
 - **P1-D10 S3 fault-injection suite — PASS**: `test/fault/phase1_s3_fault_test.go` covers 503 retry, timeout, cancel, short read, object changed, and credential failure with managed-memory cleanup assertions; the suite passes under repository-wide ordinary and race runs.
 
@@ -61,9 +61,23 @@ Required scenarios all execute in the Phase 1 fault suite:
 
 Overall Failure Gate: **PASS**.
 
+## Benchmark Gate
+
+GitHub Actions run `41257433624`, verify job `124703477413`, executed the controlled 1024-row INT32 Parquet scanner benchmark three times with `-benchmem` after the full ordinary/race/architecture gates.
+
+Observed baseline:
+
+- 34,252 ns/op, 119.58 MB/s, 40,088 B/op, 1,069 allocs/op;
+- 32,774 ns/op, 124.98 MB/s, 40,088 B/op, 1,069 allocs/op;
+- 32,224 ns/op, 127.11 MB/s, 40,088 B/op, 1,069 allocs/op.
+
+Mean baseline: approximately 33,083 ns/op and 123.89 MB/s. The benchmark also asserts managed memory is fully released. Detailed scope and limitations are recorded in `benchmark-report.md`; no numeric performance SLO is invented because none is frozen for Phase 1.
+
+Overall Benchmark Evidence: **PASS**.
+
 ## Interoperability Gate
 
-GitHub Actions run `41256775324` used Python 3.12.15, Java 17.0.21+9, PyArrow 26.0.0, DuckDB 2.0.0, Polars 2.1.0, and PySpark 4.3.0.
+GitHub Actions run `41257433624`, interop job `124703770569`, used Python 3.12.15, Java 17.0.21+9, PyArrow 26.0.0, DuckDB 2.0.0, Polars 2.1.0, and PySpark 4.3.0.
 
 Canonical corpus row counts matched across all four readers:
 
@@ -78,13 +92,14 @@ Overall Interoperability Gate: **PASS**.
 
 ## Repository-wide Validation
 
-GitHub Actions run `41256775324`, verify job `124701500839`:
+GitHub Actions run `41257433624`, verify job `124703477413`:
 
 - `go test ./...` — PASS
 - `go run ./tools/architecture-check .` — PASS
 - `go test -race ./...` — PASS
+- controlled Parquet benchmark baseline — PASS
 
-The earlier no-runner infrastructure condition is resolved and is no longer an acceptance blocker.
+The dependent pinned interop job `124703770569` also completed successfully and uploaded its raw output artifact.
 
 ## Architecture Invariants
 
@@ -103,7 +118,7 @@ ADR-0001 is PROPOSED and has not been treated as approved.
 
 1. Explicitly approve or otherwise resolve ADR-0001.
 2. If approved as proposed, implement the specified `types.Int128` / PhysicalInt128 Own Vector representation, vector accessors/serialization/copy semantics, Parquet Decimal128 decode and boundary tests.
-3. Re-run the Phase 1 ordinary/race/architecture/interop gates with the Decimal128 implementation.
+3. Re-run the Phase 1 ordinary/race/architecture/benchmark/interop gates with the Decimal128 implementation.
 4. Only after those checks pass: change this decision to ACCEPTED, update machine state, and unlock Phase 2.
 
 Milestone `v0.1-parquet` must not be declared complete while this report is BLOCKED.
