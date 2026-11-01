@@ -8,17 +8,17 @@ import (
 )
 
 // BenchmarkResultCursorPushNext 覆盖 native DataChunk 在无背压情况下的 Push→Next→ReleaseChunk ownership 交接开销。
-// 使用空 DataChunk 避免把 Vector allocation 成本混入 ResultCursor hot-path baseline。
+// 复用空 DataChunk，避免把 Vector/DataChunk allocation 成本混入 ResultCursor hot-path baseline。
 func BenchmarkResultCursorPushNext(b *testing.B) {
 	cursor, err := NewResultCursor(1)
 	if err != nil {
 		b.Fatal(err)
 	}
 	ctx := context.Background()
+	chunk := &vector.DataChunk{}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		chunk := &vector.DataChunk{}
 		if err := cursor.Push(ctx, chunk); err != nil {
 			b.Fatal(err)
 		}
