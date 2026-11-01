@@ -248,7 +248,7 @@ func (d *Driver) ReadRange(ctx context.Context, r vfs.RangeRequest, scope *memor
 	}
 	identity, total, err := identityFromRangeResponse(resp, r.Offset, r.Length)
 	if err != nil {
-		return vfs.RangeResult{}, 0, err
+		return vfs.RangeResult{}, err
 	}
 	if total > 0 {
 		identity.Size = total
