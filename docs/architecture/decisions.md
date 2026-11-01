@@ -122,6 +122,7 @@ Status: FROZEN
 - ExportCoordinator + Manifest + WriterPool + Committer。
 - file-level resume。
 - incomplete file redo。
+- resumable MultiFile / Partitioned 必须使用 ADR-0003 定义的 Stable Export SegmentPlan；segment identity 属于 Export planner，不进入通用 Pipeline/Scheduler ABI。
 - S3 不伪造目录 rename。
 - staging + final manifest/success marker 定义 dataset commit。
 
