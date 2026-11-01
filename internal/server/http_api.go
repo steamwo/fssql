@@ -43,13 +43,13 @@ type HTTPAPI struct {
 
 // httpSubmitRequest 是外部 HTTP submit payload；不直接暴露内部 resource.QueryClass 数值。
 type httpSubmitRequest struct {
-	SQL             string `json:"sql"`
-	ResourceGroup   string `json:"resource_group"`
-	Class           string `json:"class,omitempty"`
-	CPUSlots        int64  `json:"cpu_slots,omitempty"`
-	MemoryBytes     int64  `json:"memory_bytes,omitempty"`
-	RemoteIOSlots   int64  `json:"remote_io_slots,omitempty"`
-	SpillIOSlots    int64  `json:"spill_io_slots,omitempty"`
+	SQL           string `json:"sql"`
+	ResourceGroup string `json:"resource_group"`
+	Class         string `json:"class,omitempty"`
+	CPUSlots      int64  `json:"cpu_slots,omitempty"`
+	MemoryBytes   int64  `json:"memory_bytes,omitempty"`
+	RemoteIOSlots int64  `json:"remote_io_slots,omitempty"`
+	SpillIOSlots  int64  `json:"spill_io_slots,omitempty"`
 }
 
 // httpSubmitResponse 返回稳定 Query ID。
@@ -140,6 +140,11 @@ func (a *HTTPAPI) handleSubmit(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 	var input httpSubmitRequest
 	if err := decoder.Decode(&input); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeHTTPError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		writeHTTPError(w, http.StatusBadRequest, "invalid JSON request")
 		return
 	}
@@ -289,14 +294,14 @@ func writeHTTPServiceError(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, ErrQueryServiceCapacity):
 		status = http.StatusTooManyRequests
-	case errors.Is(err, ErrInvalidSubmitRequest), errors.Is(err, resource.ErrInvalidRequest), errors.Is(err, resource.ErrUnknownGroup), errors.Is(err, resource.ErrRequestTooLarge), errors.Is(err, ErrQueryNotTerminal):
+	case errors.Is(err, ErrInvalidSubmitRequest), errors.Is(err, resource.ErrInvalidRequest), errors.Is(err, resource.ErrUnknownGroup), errors.Is(err, resource.ErrRequestTooLarge):
 		status = http.StatusBadRequest
+	case errors.Is(err, ErrQueryNotTerminal), errors.Is(err, ErrQueryResultsClaimed):
+		status = http.StatusConflict
 	case errors.Is(err, resource.ErrSchedulerClosed):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusRequestTimeout
-	case errors.Is(err, ErrQueryResultsClaimed):
-		status = http.StatusConflict
 	}
 	writeHTTPError(w, status, err.Error())
 }
