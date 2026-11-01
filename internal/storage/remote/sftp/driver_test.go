@@ -1,9 +1,10 @@
-package sftp
+package sftp_test
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -11,214 +12,222 @@ import (
 	"time"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/format/csv"
+	"github.com/steamwo/fssql/internal/storage/remote"
+	sftp "github.com/steamwo/fssql/internal/storage/remote/sftp"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-type fakeDialer struct {
-	key    string
-	data   []byte
-	dials  atomic.Int64
-	closed atomic.Int64
-	reset  atomic.Int64
+type fakeSession struct {
+	mu       sync.Mutex
+	data     []byte
+	failRead error
+	block    bool
+	closed   atomic.Int32
 }
 
-func (d *fakeDialer) Dial(ctx context.Context, cfg DialConfig) (DialResult, error) {
+func (s *fakeSession) Stat(ctx context.Context, path string) (sftp.FileInfo, error) {
 	if err := ctx.Err(); err != nil {
-		return DialResult{}, err
+		return sftp.FileInfo{}, err
 	}
-	d.dials.Add(1)
-	return DialResult{Session: &fakeSession{d: d}, HostKeySHA256: d.key}, nil
+	return sftp.FileInfo{Size: int64(len(s.data)), ModUnix: 1234}, nil
 }
-
-type fakeSession struct{ d *fakeDialer }
-
-func (s *fakeSession) Stat(ctx context.Context, p string) (RemoteInfo, error) {
-	if err := ctx.Err(); err != nil {
-		return RemoteInfo{}, err
-	}
-	return RemoteInfo{Path: p, Size: int64(len(s.d.data)), Modified: time.Unix(100, 0)}, nil
+func (s *fakeSession) List(ctx context.Context, path string) ([]sftp.DirEntry, error) {
+	return []sftp.DirEntry{{Name: "data.csv", Info: sftp.FileInfo{Size: int64(len(s.data)), ModUnix: 1234}}}, ctx.Err()
 }
-func (s *fakeSession) List(ctx context.Context, prefix, token string, max int) (RemotePage, error) {
-	return RemotePage{Entries: []RemoteEntry{{Path: "data.csv", Size: int64(len(s.d.data)), Modified: time.Unix(100, 0)}}}, nil
+func (s *fakeSession) ReadAt(ctx context.Context, path string, dst []byte, off int64) (int, error) {
+	if s.block {
+		<-ctx.Done()
+		return 0, ctx.Err()
+	}
+	s.mu.Lock()
+	if s.failRead != nil {
+		e := s.failRead
+		s.failRead = nil
+		s.mu.Unlock()
+		return 0, e
+	}
+	s.mu.Unlock()
+	if off >= int64(len(s.data)) {
+		return 0, io.EOF
+	}
+	n := copy(dst, s.data[off:])
+	if n < len(dst) {
+		return n, io.EOF
+	}
+	return n, nil
 }
-func (s *fakeSession) ReadAt(ctx context.Context, p string, off int64, dst []byte) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return 0, err
-	}
-	if s.d.reset.CompareAndSwap(1, 0) {
-		return 0, ErrConnectionReset
-	}
-	if off >= int64(len(s.d.data)) {
-		return 0, nil
-	}
-	return copy(dst, s.d.data[off:]), nil
-}
-func (s *fakeSession) Close() error { s.d.closed.Add(1); return nil }
-
-func config() Config {
-	return Config{Endpoint: "sftp://host.example:22", CredentialScope: "test", SecurityProfile: "strict", HostKeySHA256: "SHA256:good", MaxSessions: 2, MaxRetries: 1}
+func (s *fakeSession) Close() error { s.closed.Add(1); return nil }
+func key() remote.ClientKey {
+	return remote.ClientKey{Endpoint: "host.test:22", CredentialScope: "scope", SecurityProfile: "strict"}
 }
 func uri(t *testing.T) vfs.URI {
-	u, err := vfs.ParseURI("sftp://host.example:22/data.csv")
+	u, err := vfs.ParseURI("sftp://host.test:22/data.csv")
 	if err != nil {
 		t.Fatal(err)
 	}
 	return u
 }
 
-func TestHostKeyMismatchHardFailsAndDiscards(t *testing.T) {
-	dial := &fakeDialer{key: "SHA256:bad", data: []byte("abc")}
-	d, err := NewDriver(config(), dial)
+func TestDriverRetriesResetPoisonsSession(t *testing.T) {
+	data := []byte("abcdef")
+	var calls atomic.Int32
+	var first *fakeSession
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) {
+		n := calls.Add(1)
+		s := &fakeSession{data: data}
+		if n == 1 {
+			s.failRead = sftp.ErrConnection
+			first = s
+		}
+		return s, nil
+	})
+	mgr := sftp.NewManager(4, 1, factory)
+	d, err := sftp.NewDriver(key(), mgr, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
-	_, err = d.Stat(context.Background(), uri(t))
-	if !errors.Is(err, ErrHostKeyMismatch) {
-		t.Fatalf("err=%v", err)
-	}
-	if dial.closed.Load() != 1 {
-		t.Fatalf("closed=%d", dial.closed.Load())
-	}
-	open, leased, idle := d.PoolStats()
-	if open != 0 || leased != 0 || idle != 0 {
-		t.Fatalf("pool=%d/%d/%d", open, leased, idle)
-	}
-}
-
-func TestBoundedPoolAndCancelWait(t *testing.T) {
-	dial := &fakeDialer{key: "SHA256:good", data: []byte("abc")}
-	p := newSessionPool(1, dial, DialConfig{Endpoint: "sftp://host", CredentialScope: "x", SecurityProfile: "x"})
-	l, _, err := p.acquire(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	if _, _, err = p.acquire(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("err=%v", err)
-	}
-	l.Release()
-	open, leased, idle := p.stats()
-	if open != 1 || leased != 0 || idle != 1 {
-		t.Fatalf("stats=%d/%d/%d", open, leased, idle)
-	}
-	p.close()
-}
-
-func TestPoisonDiscardAndRetry(t *testing.T) {
-	dial := &fakeDialer{key: "SHA256:good", data: []byte("abcdef")}
-	dial.reset.Store(1)
-	d, err := NewDriver(config(), dial)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
 	m := memory.NewManager(1 << 20)
-	s := m.NewScope()
+	scope := m.NewScope()
 	bm := memory.NewBufferManager(nil)
-	r, err := d.ReadRange(context.Background(), vfs.RangeRequest{URI: uri(t), Offset: 1, Length: 3}, s, bm)
+	r, err := d.ReadRange(context.Background(), vfs.RangeRequest{URI: uri(t), Offset: 1, Length: 3, Tag: memory.TagNetworkBuffer}, scope, bm)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(r.Buffer.Bytes()) != "bcd" {
-		t.Fatalf("%q", r.Buffer.Bytes())
+		t.Fatalf("data=%q", r.Buffer.Bytes())
 	}
 	r.Buffer.Release()
-	if dial.dials.Load() != 2 || dial.closed.Load() != 1 {
-		t.Fatalf("dials=%d closed=%d", dial.dials.Load(), dial.closed.Load())
+	if first == nil || first.closed.Load() == 0 {
+		t.Fatal("reset session was not discarded")
 	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
+	p, _ := mgr.Pool(key())
+	_, leased, _ := p.Stats()
+	if leased != 0 {
+		t.Fatalf("leased=%d", leased)
+	}
+	if scope.Used() != 0 {
+		t.Fatalf("managed leak=%d", scope.Used())
 	}
 }
-
-func TestCancelAndShortReadNoLeak(t *testing.T) {
-	dial := &fakeDialer{key: "SHA256:good", data: []byte("abc")}
-	d, err := NewDriver(config(), dial)
+func TestWrongHostKeyNoRetry(t *testing.T) {
+	var calls atomic.Int32
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) {
+		calls.Add(1)
+		return nil, sftp.ErrHostKey
+	})
+	mgr := sftp.NewManager(2, 1, factory)
+	d, _ := sftp.NewDriver(key(), mgr, 5)
+	if _, err := d.Probe(context.Background()); !errors.Is(err, sftp.ErrHostKey) {
+		t.Fatalf("err=%v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("host key failure retried %d times", calls.Load())
+	}
+}
+func TestCancelReadReleasesLeaseAndManagedBuffer(t *testing.T) {
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) {
+		return &fakeSession{data: []byte("abcdef"), block: true}, nil
+	})
+	mgr := sftp.NewManager(2, 1, factory)
+	d, _ := sftp.NewDriver(key(), mgr, 2)
+	m := memory.NewManager(1 << 20)
+	scope := m.NewScope()
+	bm := memory.NewBufferManager(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := d.ReadRange(ctx, vfs.RangeRequest{URI: uri(t), Offset: 0, Length: 3, Tag: memory.TagNetworkBuffer}, scope, bm)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err=%v", err)
+	}
+	p, _ := mgr.Pool(key())
+	_, leased, _ := p.Stats()
+	if leased != 0 {
+		t.Fatalf("leased=%d", leased)
+	}
+	if scope.Used() != 0 {
+		t.Fatalf("managed leak=%d", scope.Used())
+	}
+}
+func TestEndpointMismatchRejectedBeforeDial(t *testing.T) {
+	var calls atomic.Int32
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) {
+		calls.Add(1)
+		return &fakeSession{}, nil
+	})
+	mgr := sftp.NewManager(2, 1, factory)
+	d, _ := sftp.NewDriver(key(), mgr, 2)
+	bad, _ := vfs.ParseURI("sftp://evil.test:22/data.csv")
+	if _, err := d.Stat(context.Background(), bad); err == nil {
+		t.Fatal("expected endpoint mismatch")
+	}
+	if calls.Load() != 0 {
+		t.Fatal("endpoint mismatch dialed remote")
+	}
+}
+func TestSFTPQueryDemoCSV(t *testing.T) {
+	data := []byte("id,name\n1,alpha\n2,beta\n3,gamma\n")
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) { return &fakeSession{data: data}, nil })
+	mgr := sftp.NewManager(2, 2, factory)
+	driver, _ := sftp.NewDriver(key(), mgr, 2)
+	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
-	m := memory.NewManager(1 << 20)
-	s := m.NewScope()
+	m := memory.NewManager(4 << 20)
+	scope := m.NewScope()
 	bm := memory.NewBufferManager(nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err = d.ReadRange(ctx, vfs.RangeRequest{URI: uri(t), Offset: 0, Length: 2}, s, bm); !errors.Is(err, context.Canceled) {
-		t.Fatalf("err=%v", err)
-	}
-	if _, err = d.ReadRange(context.Background(), vfs.RangeRequest{URI: uri(t), Offset: 2, Length: 3}, s, bm); !errors.Is(err, vfs.ErrShortRead) {
-		t.Fatalf("err=%v", err)
-	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
-	}
-}
-
-func TestParallelRangePoolBound(t *testing.T) {
-	data := make([]byte, 10000)
-	for i := range data {
-		data[i] = byte(i)
-	}
-	dial := &fakeDialer{key: "SHA256:good", data: data}
-	cfg := config()
-	cfg.MaxSessions = 2
-	d, err := NewDriver(cfg, dial)
+	binder, _ := csv.NewSourceBinder(registry, scope, bm)
+	binding, err := binder.Bind(context.Background(), uri(t).String(), csv.SourceBindOptions{Inference: csv.InferenceOptions{Header: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d.Close()
-	m := memory.NewManager(1 << 20)
-	s := m.NewScope()
-	bm := memory.NewBufferManager(nil)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var errs []error
-	for i := 0; i < 16; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			r, err := d.ReadRange(context.Background(), vfs.RangeRequest{URI: uri(t), Offset: int64(i * 10), Length: 10}, s, bm)
-			if err == nil {
-				r.Buffer.Release()
-			} else {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
+	src, err := csv.NewSource(context.Background(), registry, binding, csv.ScanOptions{EnableParallel: true, TargetRangeBytes: 8}, scope, bm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for {
+		chunk, ok, err := src.Next(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			break
+		}
+		for i := 0; i < chunk.Cardinality; i++ {
+			v, valid := chunk.Columns[0].Int64(i)
+			if !valid {
+				t.Fatal("null id")
 			}
-		}(i)
+			ids = append(ids, v)
+		}
+		chunk.Release()
 	}
-	wg.Wait()
-	if len(errs) > 0 {
-		t.Fatal(errs)
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	if fmt.Sprint(ids) != "[1 2 3]" {
+		t.Fatalf("ids=%v", ids)
 	}
-	if dial.dials.Load() > 2 {
-		t.Fatalf("dials=%d", dial.dials.Load())
+	if scope.Used() != 0 {
+		t.Fatalf("managed leak=%d", scope.Used())
 	}
-	if m.Used() != 0 {
-		t.Fatalf("leak=%d", m.Used())
+	p, _ := mgr.Pool(key())
+	_, leased, _ := p.Stats()
+	if leased != 0 {
+		t.Fatalf("leased=%d", leased)
 	}
 }
 
-func TestListProducesCanonicalEntries(t *testing.T) {
-	dial := &fakeDialer{key: "SHA256:good", data: []byte("abc")}
-	d, _ := NewDriver(config(), dial)
-	defer d.Close()
-	base, err := vfs.ParseURI("sftp://host.example:22/")
-	if err != nil {
-		t.Fatal(err)
+func TestParallelCapabilityRequiresPoolCapacity(t *testing.T) {
+	factory := sftp.SessionFactoryFunc(func(context.Context, remote.ClientKey) (sftp.Session, error) { return &fakeSession{}, nil })
+	one := sftp.NewManager(2, 1, factory)
+	d1, _ := sftp.NewDriver(key(), one, 1)
+	if d1.StaticCapabilities().Has(vfs.ParallelRandomRead) {
+		t.Fatal("single-session pool advertised parallel random read")
 	}
-	page, err := d.List(context.Background(), base, vfs.ListOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, entry := range page.Entries {
-		names = append(names, entry.URI.ObjectKey())
-	}
-	sort.Strings(names)
-	if fmt.Sprint(names) != "[data.csv]" {
-		t.Fatal(names)
+	many := sftp.NewManager(2, 2, factory)
+	d2, _ := sftp.NewDriver(key(), many, 1)
+	if !d2.StaticCapabilities().Has(vfs.ParallelRandomRead) {
+		t.Fatal("multi-session pool missing parallel random read")
 	}
 }
