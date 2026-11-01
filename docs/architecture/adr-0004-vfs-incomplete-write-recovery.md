@@ -1,6 +1,6 @@
 # ADR-0004 — VFS Incomplete Write Recovery for Crash-Safe Remote Export
 
-Status: PROPOSED
+Status: ACCEPTED
 
 ## Context
 
@@ -41,7 +41,7 @@ S3 CreateMultipartUpload succeeds
 
 该 upload 在重启后仍无法仅靠 journal 找回。
 
-## Decision Proposal
+## Decision
 
 ### 1. 增加协议无关的 VFS incomplete-write recovery capability
 
@@ -223,7 +223,7 @@ Negative:
 
 ## Affected Frozen Decisions
 
-若批准，本 ADR 将补充：
+本 ADR 补充：
 
 - AD-006 VFS Capability Model — 增加 `IncompleteWriteRecovery` capability 与 optional recovery contract；
 - AD-009 COPY / Export — crash-resumable remote staging 在重写 incomplete files 前必须完成 protocol-resource recovery；
@@ -235,4 +235,4 @@ Negative:
 
 ## Approval
 
-Pending project owner approval.
+Approved by the project owner on 2026-11-01.
