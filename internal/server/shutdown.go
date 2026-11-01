@@ -14,7 +14,7 @@ const shutdownPollInterval = 2 * time.Millisecond
 
 // ShutdownReport 描述一次 QueryService graceful shutdown 的最终清理结果。
 type ShutdownReport struct {
-	// CanceledQueries 是 shutdown 主动请求取消的非终态 Query 数。
+	// CanceledQueries 是 shutdown 主动请求取消的已 admission Query 数。
 	CanceledQueries int
 	// ForgottenQueries 是 shutdown 已从 Registry/runtime retention 删除的终态 Query 数。
 	ForgottenQueries int
@@ -22,7 +22,7 @@ type ShutdownReport struct {
 	RemainingQueries []QueryID
 }
 
-// Shutdown 停止新 admission、取消并等待所有已注册 Query 完成 lifecycle cleanup，随后释放 terminal retention。
+// Shutdown 停止新 admission、取消并等待所有已 admission Query 完成 lifecycle cleanup，随后释放 terminal retention。
 // 它不创建第二套 Query 生命周期；所有取消/终态发布仍复用 QueryHandle、QueryContext 与 ResultCursor。
 func (s *QueryService) Shutdown(ctx context.Context) (ShutdownReport, error) {
 	if s == nil {
@@ -35,7 +35,7 @@ func (s *QueryService) Shutdown(ctx context.Context) (ShutdownReport, error) {
 		return ShutdownReport{}, err
 	}
 
-	// 先关闭 AD-016 admission；queued waiter 会由 Scheduler.Close 唤醒并走既有 rejected-submit cleanup。
+	// 先关闭 AD-016 admission；SUBMITTED/QUEUED Query 会由 Scheduler.Close 唤醒并走既有 rejected-submit cleanup。
 	s.resources.Close()
 	report := ShutdownReport{}
 	canceled := make(map[QueryID]struct{})
@@ -54,6 +54,10 @@ func (s *QueryService) Shutdown(ctx context.Context) (ShutdownReport, error) {
 				return report, err
 			}
 			if !snapshot.State.Terminal() {
+				// 未 admission 的 Query 必须让 Scheduler.Close 负责失败唤醒，避免与 Submit 的 rejected-cleanup 竞争终态 ownership。
+				if snapshot.State == QuerySubmitted || snapshot.State == QueryQueued {
+					continue
+				}
 				if _, already := canceled[id]; !already {
 					if err := s.Cancel(id); err != nil && !errors.Is(err, ErrQueryNotFound) {
 						return report, err
