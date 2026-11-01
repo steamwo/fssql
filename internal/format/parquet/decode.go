@@ -105,9 +105,17 @@ func CopyDictionaryIndexes(dst *vector.Vector, start int, dict *vector.Vector, i
 		case coretypes.Integer, coretypes.DateType:
 			v, _ := dict.Int32(di)
 			dst.SetInt32(start+i, v)
-		case coretypes.BigInt, coretypes.Decimal, coretypes.TimestampType:
+		case coretypes.BigInt, coretypes.TimestampType:
 			v, _ := dict.Int64(di)
 			dst.SetInt64(start+i, v)
+		case coretypes.Decimal:
+			if dst.Type.Physical() == coretypes.PhysicalInt128 {
+				v, _ := dict.Int128(di)
+				dst.SetInt128(start+i, v)
+			} else {
+				v, _ := dict.Int64(di)
+				dst.SetInt64(start+i, v)
+			}
 		case coretypes.Float:
 			v, _ := dict.Float32(di)
 			dst.SetFloat32(start+i, v)
