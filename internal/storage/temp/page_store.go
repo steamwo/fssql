@@ -143,10 +143,16 @@ func rleDecode(dst, src []byte) error {
 	return nil
 }
 
+const (
+	pageDirectoryEntryWidth = 40
+	segmentMetadataBytes    = 64
+)
+
 type spillSegment struct {
-	id   uint64
-	file *File
-	live int
+	id          uint64
+	file        *File
+	live        int
+	reservation *memory.Reservation
 }
 
 type SpillablePageStore struct {
@@ -160,8 +166,10 @@ type SpillablePageStore struct {
 	nextPageID    PageID
 	nextSegmentID uint64
 	current       *spillSegment
-	segments      map[uint64]*spillSegment
-	pages         map[PageID]PageRef
+	segments      []*spillSegment
+	directory     *memory.Buffer
+	directoryCap  int
+	livePages     int
 	closed        bool
 	poisoned      error
 }
@@ -190,22 +198,109 @@ func NewSpillablePageStore(tempScope *QueryScope, memoryScope *memory.Scope, buf
 		memoryScope: memoryScope,
 		buffers:     buffers,
 		config:      config,
-		segments:    make(map[uint64]*spillSegment),
-		pages:       make(map[PageID]PageRef),
 	}, nil
 }
 
 func (s *SpillablePageStore) PageCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.pages)
+	return s.livePages
+}
+
+func (s *SpillablePageStore) ensureDirectory(entries int) error {
+	if entries <= s.directoryCap {
+		return nil
+	}
+	next := s.directoryCap
+	if next < 16 {
+		next = 16
+	}
+	for next < entries {
+		if next > int(^uint(0)>>1)/2 {
+			return errors.New("spill page directory capacity overflow")
+		}
+		next *= 2
+	}
+	bytes := next * pageDirectoryEntryWidth
+	if s.directory == nil {
+		b, err := s.buffers.Allocate(s.memoryScope, memory.TagMetadata, bytes)
+		if err != nil {
+			return err
+		}
+		s.directory = b
+	} else if err := s.directory.Resize(bytes, nil); err != nil {
+		return err
+	}
+	s.directoryCap = next
+	return nil
+}
+
+func (s *SpillablePageStore) writeRef(ref PageRef) error {
+	if ref.ID == 0 {
+		return errors.New("invalid spill page id")
+	}
+	if err := s.ensureDirectory(int(ref.ID)); err != nil {
+		return err
+	}
+	off := (int(ref.ID) - 1) * pageDirectoryEntryWidth
+	e := s.directory.Bytes()[off : off+pageDirectoryEntryWidth]
+	for i := range e {
+		e[i] = 0
+	}
+	binary.LittleEndian.PutUint64(e[0:8], ref.SegmentID)
+	binary.LittleEndian.PutUint64(e[8:16], uint64(ref.Offset))
+	binary.LittleEndian.PutUint32(e[16:20], ref.EncodedLength)
+	binary.LittleEndian.PutUint32(e[20:24], ref.RawLength)
+	binary.LittleEndian.PutUint32(e[24:28], ref.Checksum)
+	e[28] = byte(ref.Compression)
+	e[29] = 1
+	return nil
+}
+
+func (s *SpillablePageStore) pageRefLocked(id PageID) (PageRef, bool) {
+	if id == 0 || id > s.nextPageID || s.directory == nil {
+		return PageRef{}, false
+	}
+	off := (int(id) - 1) * pageDirectoryEntryWidth
+	if off < 0 || off+pageDirectoryEntryWidth > s.directory.Len() {
+		return PageRef{}, false
+	}
+	e := s.directory.Bytes()[off : off+pageDirectoryEntryWidth]
+	if e[29] == 0 {
+		return PageRef{}, false
+	}
+	return PageRef{
+		ID:            id,
+		SegmentID:     binary.LittleEndian.Uint64(e[0:8]),
+		Offset:        int64(binary.LittleEndian.Uint64(e[8:16])),
+		EncodedLength: binary.LittleEndian.Uint32(e[16:20]),
+		RawLength:     binary.LittleEndian.Uint32(e[20:24]),
+		Checksum:      binary.LittleEndian.Uint32(e[24:28]),
+		Compression:   Compression(e[28]),
+	}, true
+}
+
+func (s *SpillablePageStore) clearRef(id PageID) {
+	if id == 0 || s.directory == nil {
+		return
+	}
+	off := (int(id) - 1) * pageDirectoryEntryWidth
+	if off >= 0 && off+pageDirectoryEntryWidth <= s.directory.Len() {
+		s.directory.Bytes()[off+29] = 0
+	}
 }
 
 func (s *SpillablePageStore) Ref(id PageID) (PageRef, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ref, ok := s.pages[id]
-	return ref, ok
+	return s.pageRefLocked(id)
+}
+
+func (s *SpillablePageStore) segmentLocked(id uint64) *spillSegment {
+	if id == 0 || id > uint64(len(s.segments)) {
+		return nil
+	}
+	return s.segments[id-1]
 }
 
 func (s *SpillablePageStore) ensureWritableSegment(blockBytes int64) (*spillSegment, error) {
@@ -222,9 +317,14 @@ func (s *SpillablePageStore) ensureWritableSegment(blockBytes int64) (*spillSegm
 	if err != nil {
 		return nil, err
 	}
+	reservation, err := s.memoryScope.Reserve(memory.TagMetadata, segmentMetadataBytes)
+	if err != nil {
+		_ = f.Remove()
+		return nil, err
+	}
 	s.nextSegmentID++
-	seg := &spillSegment{id: s.nextSegmentID, file: f}
-	s.segments[seg.id] = seg
+	seg := &spillSegment{id: s.nextSegmentID, file: f, reservation: reservation}
+	s.segments = append(s.segments, seg)
 	s.current = seg
 	return seg, nil
 }
@@ -300,8 +400,7 @@ func (s *SpillablePageStore) WritePage(ctx context.Context, data []byte) (PageID
 		return 0, s.poisoned
 	}
 
-	s.nextPageID++
-	id := s.nextPageID
+	id := s.nextPageID + 1
 	ref := PageRef{
 		ID:            id,
 		SegmentID:     seg.id,
@@ -311,7 +410,12 @@ func (s *SpillablePageStore) WritePage(ctx context.Context, data []byte) (PageID
 		Checksum:      header.checksum,
 		Compression:   compression,
 	}
-	s.pages[id] = ref
+	if err := s.writeRef(ref); err != nil {
+		s.poisoned = fmt.Errorf("record spill page metadata: %w", err)
+		return 0, s.poisoned
+	}
+	s.nextPageID = id
+	s.livePages++
 	seg.live++
 	return id, nil
 }
@@ -337,11 +441,11 @@ func (s *SpillablePageStore) ReadPage(ctx context.Context, id PageID) (*memory.B
 	if s.closed {
 		return nil, ErrClosed
 	}
-	ref, ok := s.pages[id]
+	ref, ok := s.pageRefLocked(id)
 	if !ok {
 		return nil, fmt.Errorf("spill page %d not found", id)
 	}
-	seg := s.segments[ref.SegmentID]
+	seg := s.segmentLocked(ref.SegmentID)
 	if seg == nil {
 		return nil, fmt.Errorf("%w: segment %d missing", ErrCorruptSpillBlock, ref.SegmentID)
 	}
@@ -414,11 +518,11 @@ func (s *SpillablePageStore) DeletePage(id PageID) error {
 	if s.closed {
 		return ErrClosed
 	}
-	ref, ok := s.pages[id]
+	ref, ok := s.pageRefLocked(id)
 	if !ok {
 		return nil
 	}
-	seg := s.segments[ref.SegmentID]
+	seg := s.segmentLocked(ref.SegmentID)
 	if seg == nil {
 		return fmt.Errorf("%w: segment %d missing", ErrCorruptSpillBlock, ref.SegmentID)
 	}
@@ -429,14 +533,19 @@ func (s *SpillablePageStore) DeletePage(id PageID) error {
 		if err := seg.file.Remove(); err != nil {
 			return err
 		}
-		delete(s.segments, seg.id)
+		s.segments[seg.id-1] = nil
+		if seg.reservation != nil {
+			seg.reservation.Release()
+			seg.reservation = nil
+		}
 		if s.current == seg {
 			s.current = nil
 		}
 	} else {
 		seg.live--
 	}
-	delete(s.pages, id)
+	s.clearRef(id)
+	s.livePages--
 	return nil
 }
 
@@ -447,16 +556,29 @@ func (s *SpillablePageStore) Close() error {
 		return nil
 	}
 	var errs []error
-	for _, seg := range s.segments {
+	for i, seg := range s.segments {
+		if seg == nil {
+			continue
+		}
 		if err := seg.file.Sync(); err != nil && !errors.Is(err, ErrClosed) {
 			errs = append(errs, err)
 		}
 		if err := seg.file.Close(); err != nil {
 			errs = append(errs, err)
 		}
+		if seg.reservation != nil {
+			seg.reservation.Release()
+			seg.reservation = nil
+		}
+		s.segments[i] = nil
 	}
 	if len(errs) != 0 {
 		return errors.Join(errs...)
+	}
+	if s.directory != nil {
+		s.directory.Release()
+		s.directory = nil
+		s.directoryCap = 0
 	}
 	s.closed = true
 	return nil
