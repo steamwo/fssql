@@ -204,8 +204,8 @@ func (a *HTTPAPI) handleForget(w http.ResponseWriter, id QueryID) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleResults 独占 ResultCursor consumer ownership，逐 chunk 编码并立即 Release。
-// 若客户端断开或 encoder 失败，必须取消 Query，避免 producer 永久阻塞或 Managed Buffer 泄漏。
+// handleResults 独占 ResultCursor consumer ownership，逐 chunk 编码并通过 ReleaseChunk 确认 Managed Buffer 已释放。
+// 若客户端断开、encoder 或 release 失败，必须取消 Query，避免 producer 永久阻塞或 Managed Buffer 泄漏。
 func (a *HTTPAPI) handleResults(w http.ResponseWriter, r *http.Request, id QueryID) {
 	cursor, err := a.service.ClaimResults(id)
 	if err != nil {
@@ -232,8 +232,8 @@ func (a *HTTPAPI) handleResults(w http.ResponseWriter, r *http.Request, id Query
 			return
 		}
 		encodeErr := a.encoder.EncodeChunk(r.Context(), w, chunk)
-		chunk.Release()
-		if encodeErr != nil {
+		releaseErr := cursor.ReleaseChunk(chunk)
+		if encodeErr != nil || releaseErr != nil {
 			return
 		}
 		if flusher != nil {
