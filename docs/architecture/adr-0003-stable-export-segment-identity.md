@@ -1,21 +1,21 @@
 # ADR-0003 — Stable Export Segment Identity for File-Level Resume
 
-Status: PROPOSED
+Status: ACCEPTED
 
 ## Context
 
-Phase 4 requires all of the following at the same time:
+Phase 4 同时要求：
 
-- `ExportCoordinator + Manifest + WriterPool + Committer`;
-- file-level resume;
-- incomplete file redo;
-- `Kill / Restart / Resume`;
-- no duplicate completed files;
-- no missing files;
-- SingleFile / MultiFile / Partitioned export;
-- bounded writer count and managed memory.
+- `ExportCoordinator + Manifest + WriterPool + Committer`；
+- file-level resume；
+- incomplete file redo；
+- `Kill / Restart / Resume`；
+- no duplicate completed files；
+- no missing files；
+- SingleFile / MultiFile / Partitioned export；
+- bounded writer count and managed memory。
 
-The current execution contract exposes query output as concurrent `DataChunk` values:
+当前通用执行接口只传递 `DataChunk`：
 
 ```text
 Source.Next(ctx) -> DataChunk
@@ -23,11 +23,9 @@ Pipeline workers
 -> Sink.Consume(ctx, DataChunk)
 ```
 
-`DataChunk` carries no stable output segment identity. Scheduler `Task` also has no stable task/segment identifier. Under parallel execution, chunk arrival order is therefore not a durable property of the query result.
+`DataChunk` 和 Scheduler `Task` 都没有可持久化的 output segment identity。并行执行下，chunk 到达顺序、worker ID、goroutine ID、运行时 chunk 边界都不是 durable property。
 
-The Phase 4 routing implementation intentionally requires a caller-supplied stable `segmentID` for MultiFile/Partitioned output rather than manufacturing one from chunk arrival order. The current execution layer has no contract capable of supplying such an ID for an arbitrary query, especially after joins, aggregates, sorts, or other operators that can change chunk boundaries and worker scheduling.
-
-A naive implementation such as:
+因此以下做法不能用于可恢复多文件导出：
 
 ```text
 first chunk  -> part-000001
@@ -35,115 +33,95 @@ second chunk -> part-000002
 ...
 ```
 
-is not restart-safe. After a process restart, a different parallel schedule can assign different rows to the same ordinal file. Preserving the previous `COMPLETE part-000001` and skipping the new `part-000001` would then cause duplicate or missing rows, violating the Phase 4 Failure Gate.
+重启后调度顺序可能变化；保留旧的 `COMPLETE part-000001` 并跳过新的同名文件，可能造成重复或缺失数据。
 
-This is an architecture-level gap. It cannot be repaired inside `DatasetWriter` without defining a durable mapping from logical query output rows to export files.
+这是 AD-009 `file-level resume` 缺失的 durable file identity 定义，需要通过 ADR 补全。
 
-## Proposed Decision
+## Decision
 
-Introduce an export-specific **Stable Export Segment Plan**. It is separate from generic Pipeline task identity and is persisted in the Export Manifest before output files become COMPLETE.
+### 1. Stable Export SegmentPlan
 
-### 1. Persisted SegmentPlan
+所有声明 **resumable** 的 MultiFile / Partitioned export 必须绑定一个 export-specific `SegmentPlan`。
 
-A resumable MultiFile/Partitioned export records at least:
-
-```text
-SegmentStrategy = ROW_HASH_V1
-HashVersion
-BucketCount
-PartitionColumns
-SchemaFingerprint
-```
-
-The SegmentPlan is part of the export job identity. Resume MUST reject a manifest if the query/schema/segment-plan identity differs from the restarted job.
-
-SingleFile does not require row-hash segmentation because its only file is either COMPLETE or redone in full.
-
-### 2. Stable row-to-segment mapping
-
-For MultiFile:
+`SegmentPlan` 至少包含：
 
 ```text
-segment = HashCanonicalRow(row, HashVersion) % BucketCount
+Strategy
+Version
+PlannerFingerprint
 ```
 
-For Partitioned:
+并作为 Manifest job identity 的一部分持久化。
 
-```text
-partition = CanonicalPartitionTuple(row)
-segment   = HashCanonicalRow(row, HashVersion) % BucketCount
-file id   = partition + segment
-```
+Resume MUST 验证重启后的 `QueryFingerprint`、`SourceSnapshot` 和 `SegmentPlan` 与原作业一致；任一不一致都必须拒绝恢复。
 
-The mapping MUST depend only on bound logical values and the persisted SegmentPlan, never on:
+### 2. Segment identity 必须独立于运行时调度
 
-- worker ID;
-- goroutine ID;
-- chunk arrival order;
-- runtime chunk boundaries;
-- retry attempt number.
+稳定 segment identity 不得依赖：
 
-Hash collisions are harmless because the hash is used only for deterministic bucket routing, not for row deduplication.
+- worker ID；
+- goroutine ID；
+- chunk 到达顺序；
+- runtime chunk boundaries；
+- retry attempt number。
 
-The row hash MUST reuse the shared core hash semantics governed by AD-033 and preserve the existing property:
+具体如何产生稳定 segment ID 属于 **Export planner implementation**，不是通用 Pipeline/Scheduler ABI。
 
-```text
-Equals(a,b) => Hash(a)==Hash(b)
-```
+通用 `DataChunk`、Pipeline `Sink`、Scheduler `Task` 本 ADR 均不增加 export-specific 字段。
 
-Nested LIST/STRUCT support must use canonical logical-value hashing rather than format-specific bytes.
+### 3. Phase 4 初始策略：Explicit Stable SegmentPlan
 
-### 3. Resume semantics
+Phase 4 首个实现采用 `EXPLICIT_V1`：
 
-On restart:
+- Export planner 向 DatasetWriter 提供稳定 `segmentID`；
+- `segmentID` 必须在同一 QueryFingerprint + SourceSnapshot + PlannerFingerprint 下可确定重建；
+- DatasetWriter 不制造 segment ID，只验证和消费它；
+- MultiFile / Partitioned 文件路径由稳定 `segmentID` 与稳定 partition value 组合得到；
+- Manifest 中已 `COMPLETE` 的同一稳定文件在 resume 时直接跳过；
+- `PLANNED` / `WRITING` / `FAILED` 文件按整文件重做。
+
+若某个 Export planner 无法证明重启后能产生相同稳定 segment identity，则该 planner **不得声明 resumable MultiFile / Partitioned**。
+
+SingleFile 不需要 segment planner：未完成文件整文件重做即可满足 v1 file-level resume。
+
+### 4. 具体 segmentation 算法不冻结
+
+本 ADR **不规定**以下任一算法为冻结架构：
+
+- canonical row hash；
+- local spool；
+- worker-per-file；
+- ordered row ordinal；
+- source-file/row-group segment；
+- 其他未来 planner。
+
+这些都可以作为 Export planner 的实现策略单独评估，只要满足 Stable Segment Identity contract。
+
+因此，批准本 ADR 不等于批准 row-hash 或 local spool。
+
+### 5. Resume semantics
+
+恢复流程为：
 
 ```text
 load Manifest
 -> validate QueryFingerprint
 -> validate SourceSnapshot
 -> validate SegmentPlan
--> rerun query against the same SourceSnapshot
--> route every row using the same stable segment mapping
+-> convert stale WRITING files to redoable incomplete state
+-> rerun using the same Export SegmentPlan
+-> preserve COMPLETE files
+-> redo incomplete files
+-> commit only after every planned file is COMPLETE
 ```
 
-For a `COMPLETE` segment file, routed rows are discarded from the new attempt because that complete segment already contains the full logical bucket.
+`COMPLETE` 文件不可回退或覆盖。
 
-For `PLANNED` / `WRITING` / `FAILED` segment files, the segment is rebuilt from the rerun and the old incomplete remote object is discarded/replaced according to the destination capability contract.
+任何旧 attempt 遗留的 `WRITING` 文件都视为 incomplete，恢复时必须整文件重做。
 
-This preserves the required v1 resume granularity:
+### 6. Dataset commit 不变
 
-```text
-completed file -> preserve
-incomplete file -> redo
-```
-
-without relying on deterministic execution scheduling.
-
-### 4. Bounded local spool for remote streaming destinations
-
-A stable segment can receive rows at arbitrary times during the query. S3/SFTP streaming writers cannot in general be closed and later reopened for append, and Partitioned export may have unbounded partition cardinality.
-
-Therefore resumable MultiFile/Partitioned export requires a **bounded local export spool** before final remote file encoding/upload:
-
-```text
-Query DataChunk
--> stable segment router
--> bounded local segment spool
--> bounded WriterPool
--> Format Writer
--> Compression
--> VFS remote staging file
-```
-
-The local spool is query-temporary data governed by `TemporaryStorageManager` quotas and lifecycle. It is **not** remote export staging and must remain separate from the remote dataset commit domain, preserving AD-023.
-
-Only a bounded number of segment writers/finalizers may be active simultaneously. Segment payloads and spool pages must follow MemoryManager / TemporaryStorageManager accounting and Query Lifecycle cleanup rules.
-
-A process restart may discard the local spool; incomplete segments are rebuilt from the same SourceSnapshot. Remote COMPLETE segment files remain authoritative through the Manifest.
-
-### 5. Dataset commit remains unchanged
-
-This proposal does not change AD-009 dataset commit semantics:
+本 ADR 不改变 AD-009 的提交语义：
 
 ```text
 remote staging complete files
@@ -151,105 +129,78 @@ remote staging complete files
 -> COMMITTED dataset
 ```
 
-S3 still MUST NOT emulate atomic directory rename.
-
-The final manifest becomes visible only after every planned segment is COMPLETE.
+S3 仍不得伪造目录 rename。
 
 ## Alternatives
 
-### A. Use runtime chunk ordinal as file identity
+### A. Runtime chunk ordinal
 
-Rejected.
+Rejected。并行调度与 chunk 边界在 restart 后不稳定。
 
-Parallel scheduling and operator chunk boundaries are not stable across restart. This can preserve a filename while changing its row membership, directly violating the Phase 4 no-duplicate/no-missing requirement.
+### B. Worker/task ID
 
-### B. Add worker/task ID to Pipeline Sink and use one file per worker
+Rejected。row-to-worker assignment 在 join/aggregate/work stealing/retry/worker-count 变化后不稳定，同时会把 export recovery 泄漏进通用 Scheduler ABI。
 
-Rejected as insufficient.
+### C. 强制 row hash + local spool
 
-A stable worker identifier does not make row-to-worker assignment stable after joins, aggregates, work stealing, retry, or different worker counts. It also couples export recovery semantics to Scheduler implementation details, conflicting with the generic Task boundary.
+Not selected as frozen architecture。
 
-### C. Require `ORDER BY` and segment by row ordinal
+它可以成为未来具体 planner，但会引入额外 hash semantics、volatile expression、nested value hashing、local temp lifecycle 与性能成本。当前不需要把这些实现细节冻结为 AD-009 的唯一答案。
 
-Rejected as the general Phase 4 contract.
+### D. Require ORDER BY + row ordinal
 
-It would silently narrow COPY/Export to ordered queries, add a potentially global sort solely for recovery, and SQL `ORDER BY` with ties still does not guarantee a total order unless extra tie-break semantics are introduced. That would be a separate SQL semantic change.
-
-### D. Keep one remote writer open per partition/segment
-
-Rejected.
-
-Partition cardinality can be unbounded and would violate WriterPool/resource limits. SFTP session count, file handles, remote requests, and writer buffers must remain bounded.
-
-### E. Reopen closed remote files and append
-
-Rejected as a generic contract.
-
-`StreamingWrite` does not imply append or random-write capability. S3 multipart and SFTP streaming semantics differ, and introducing hidden whole-file rewrite/append fallback would violate the VFS capability model.
+Rejected as general contract。会收窄 COPY 行为并引入额外 SQL/ordering 语义。
 
 ## Consequences
 
 Positive:
 
-- Makes completed-file resume independent of query scheduling and chunk boundaries.
-- Provides a proof path for `no duplicate completed files` and `no missing files` after Kill/Restart/Resume.
-- Preserves Protocol × Compression × Format orthogonality.
-- Keeps writer/session count bounded even with high partition cardinality.
-- Does not require deterministic Scheduler execution.
+- 补全 AD-009 file-level resume 所需的 durable identity。
+- 不修改 Own Vector / DataChunk ABI。
+- 不修改 Pipeline / Scheduler 通用 ABI。
+- 保持 Protocol × Compression × Format 正交。
+- 允许未来为不同执行计划选择更适合的 deterministic segment planner。
 
 Negative:
 
-- Adds a persisted SegmentPlan to the Manifest contract for resumable MultiFile/Partitioned jobs.
-- Adds a local temporary-spool stage before final remote encoding/upload for these layouts.
-- Requires stable canonical row hashing for every Phase 4 exportable logical type, including LIST/STRUCT.
-- Adds local temp I/O and a second pass over incomplete segment payloads before remote finalization.
-- Requires new failure/leak tests for spool cleanup, crash recovery, completed-segment skipping, and writer finalization.
+- Manifest 需要持久化 SegmentPlan identity。
+- resumable MultiFile / Partitioned 只有在 planner 能证明 stable segment identity 时才能启用。
+- Phase 4 需要新增 resume validation 与 stale incomplete-file recovery 测试。
 
 ## Compatibility Impact
 
-No Stable SQL result semantics are changed. The proposal affects internal export planning and persisted export-job metadata.
+不改变 SQL 查询结果语义。
 
-Existing SingleFile behavior remains valid: an incomplete single file is redone in full.
+不要求 DuckDB 的 COPY 文件命名或线程调度行为成为恢复契约；本项目的 file-level resume 是 AD-009 已有的额外工程保证。
 
-MultiFile/Partitioned manifests created before acceptance of this ADR must not be treated as resumable unless they contain a compatible SegmentPlan. Because Phase 4 is not yet ACCEPTED/released, the exact Manifest version migration can be chosen during implementation after approval.
+Phase 4 尚未 ACCEPTED，因此 Manifest v1 可在本阶段加入 SegmentPlan 字段而不产生已发布格式迁移问题。
 
-## Required Tests After Approval
+## Required Tests
 
-At minimum:
+至少包括：
 
-1. Same logical rows with different chunk boundaries produce identical segment membership.
-2. Same logical rows with different worker schedules produce identical segment membership.
-3. Kill after a subset of segment files become COMPLETE, restart, and resume:
-   - COMPLETE files are not rewritten;
-   - incomplete files are redone;
-   - final logical multiset equals a clean export;
-   - no duplicate completed files;
-   - no missing rows/files.
-4. High-cardinality partition export respects WriterPool, memory, temp quota, and file-handle limits.
-5. Cancel/failure leaves:
-   - active tasks = 0;
-   - query reservations = 0;
-   - query temp ownership = 0;
-   - client/session leases = 0;
-   - incomplete multipart = 0.
-6. Property tests verify stable hash routing across FLAT / CONSTANT / DICTIONARY vector representations.
-7. Performance regression benchmark covers stable routing + spool + finalization.
+1. 同一 QueryFingerprint + SourceSnapshot + SegmentPlan 可重复接受；任一 identity 漂移拒绝 resume。
+2. `COMPLETE` 文件 resume 时不重写。
+3. `WRITING` / `FAILED` 文件 resume 时整文件重做。
+4. 重启恢复后无 duplicate completed file、无 missing file。
+5. Cancel/failure 后 writer、reservation、client/session lease、incomplete multipart 归零。
+6. SingleFile incomplete restart 全文件重做。
+7. 非 stable planner 不得启用 resumable MultiFile / Partitioned。
 
 ## Affected Frozen Decisions
 
-Approval would clarify/extend implementation requirements under these existing frozen decisions; this ADR does not modify them by itself:
+本 ADR 是对以下冻结决策的批准补充：
 
-- AD-003 Execution Model — keeps generic Pipeline DAG unchanged; stable segmentation remains export-specific.
-- AD-009 COPY / Export — supplies the missing durable file identity required by file-level resume.
-- AD-014 Query Lifecycle — local spool ownership remains inside QueryContext until files are finalized or aborted.
-- AD-021 Consistency Domains — Statement SourceSnapshot and Export Manifest Commit remain separate domains.
-- AD-023 Temporary Storage — local spool uses query temporary storage and remains distinct from remote export staging.
-- AD-031 Go Runtime / Buffer Ownership — segment buffers remain managed/bounded.
-- AD-033 Hash / Row Infrastructure — canonical row hashing is reused rather than adding export-specific hash semantics.
-- I-04 Managed Memory and I-10 Lifecycle Protocol remain mandatory.
+- AD-003 Execution Model — 通用 Pipeline DAG 保持不变；
+- AD-009 COPY / Export — 补全 file-level resume 的 durable file identity；
+- AD-014 Query Lifecycle — resume attempt 的资源仍归 QueryContext 管理；
+- AD-021 Consistency Domains — Statement SourceSnapshot 与 Export Manifest Commit 仍分离；
+- AD-031 Go Runtime / Buffer Ownership — 不引入无界未管理 buffer；
+- I-07 Statement ScanSet/SourceSnapshot frozen；
+- I-10 Lifecycle Protocol 继续强制执行。
 
 ## Approval
 
-Not approved. Phase 4 P4-D6 implementation is blocked at this point.
+Approved by the project owner on 2026-11-01.
 
-No Pipeline ABI, Scheduler ABI, Manifest SegmentPlan, or local spool behavior is authorized until the project owner accepts this ADR (or selects another explicitly documented alternative).
+批准范围仅为 Stable Export SegmentPlan contract 与 `EXPLICIT_V1` 初始策略；row-hash、local spool、Pipeline ABI、Scheduler ABI 均未被本 ADR 批准为冻结实现。
