@@ -14,7 +14,10 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Gofmt check
-        run: test -z "$(gofmt -l internal/introspection internal/format/csv internal/format/parquet internal/server)"
+        run: |
+          files="$(gofmt -l internal/introspection internal/format/csv internal/format/parquet internal/server)"
+          printf '%s\n' "$files"
+          test -z "$files"
       - name: Source inspect tests
         run: go test -count=1 ./internal/introspection ./internal/format/csv ./internal/format/parquet ./internal/server
       - name: Source inspect race tests
