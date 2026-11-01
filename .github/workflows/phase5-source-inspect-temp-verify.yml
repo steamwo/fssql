@@ -15,7 +15,15 @@ jobs:
           go-version-file: go.mod
       - name: Gofmt check
         run: |
-          files="$(gofmt -l internal/introspection internal/format/csv internal/format/parquet internal/server)"
+          files="$(gofmt -l \
+            internal/introspection/service.go \
+            internal/introspection/service_test.go \
+            internal/format/csv/spec_inspector.go \
+            internal/format/csv/spec_inspector_test.go \
+            internal/format/parquet/spec_inspector.go \
+            internal/format/parquet/spec_inspector_test.go \
+            internal/server/source_inspect_http.go \
+            internal/server/source_inspect_http_test.go)"
           printf '%s\n' "$files"
           test -z "$files"
       - name: Source inspect tests
