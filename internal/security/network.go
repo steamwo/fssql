@@ -69,43 +69,76 @@ func (p *NetworkPolicy) WithResolver(resolver Resolver) *NetworkPolicy {
 	return p
 }
 
+// ValidatedEndpoint 保存一次 NetworkPolicy 校验绑定的 URL、端口和解析地址。
+// 调用方应只拨号 IPs 中的地址，避免校验后再次 DNS 解析产生 rebinding 窗口。
+type ValidatedEndpoint struct {
+	// URL 是通过协议、主机和端口策略检查后的规范 URL。
+	URL *url.URL
+	// Port 是实际连接端口。
+	Port int
+	// IPs 是本次安全检查通过的解析结果快照。
+	IPs []net.IP
+}
+
+// DialAddresses 返回可直接传给 net.Dialer 的已校验 IP:port 列表。
+func (e ValidatedEndpoint) DialAddresses() []string {
+	out := make([]string, 0, len(e.IPs))
+	for _, ip := range e.IPs {
+		out = append(out, net.JoinHostPort(ip.String(), strconv.Itoa(e.Port)))
+	}
+	return out
+}
+
 // ValidateURL 校验协议、端口及解析出的全部 IP，任何一个地址越界都会拒绝整个 endpoint。
 func (p *NetworkPolicy) ValidateURL(ctx context.Context, raw string) (*url.URL, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("%w: parse url: %v", ErrEndpointDenied, err)
-	}
-	if u.Scheme == "" || u.Host == "" || u.Hostname() == "" {
-		return nil, fmt.Errorf("%w: url must include scheme and host", ErrEndpointDenied)
-	}
-	scheme := strings.ToLower(u.Scheme)
-	if scheme == "ftp" && !p.AllowPlainFTP {
-		return nil, ErrPlainFTPForbidden
-	}
-	port, err := endpointPort(u)
+	endpoint, err := p.ResolveURL(ctx, raw)
 	if err != nil {
 		return nil, err
 	}
+	return endpoint.URL, nil
+}
+
+// ResolveURL 在完成安全校验后返回与本次 DNS 结果绑定的 endpoint 快照。
+func (p *NetworkPolicy) ResolveURL(ctx context.Context, raw string) (ValidatedEndpoint, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ValidatedEndpoint{}, fmt.Errorf("%w: parse url: %v", ErrEndpointDenied, err)
+	}
+	if u.Scheme == "" || u.Host == "" || u.Hostname() == "" {
+		return ValidatedEndpoint{}, fmt.Errorf("%w: url must include scheme and host", ErrEndpointDenied)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme == "ftp" && !p.AllowPlainFTP {
+		return ValidatedEndpoint{}, ErrPlainFTPForbidden
+	}
+	port, err := endpointPort(u)
+	if err != nil {
+		return ValidatedEndpoint{}, err
+	}
 	if len(p.allowedPorts) > 0 {
 		if _, ok := p.allowedPorts[port]; !ok {
-			return nil, fmt.Errorf("%w: %d", ErrForbiddenPort, port)
+			return ValidatedEndpoint{}, fmt.Errorf("%w: %d", ErrForbiddenPort, port)
 		}
 	}
 
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	if isMetadataHostname(host) {
-		return nil, fmt.Errorf("%w: metadata hostname %s", ErrEndpointDenied, host)
+		return ValidatedEndpoint{}, fmt.Errorf("%w: metadata hostname %s", ErrEndpointDenied, host)
 	}
 	ips, err := p.resolve(ctx, host)
 	if err != nil {
-		return nil, fmt.Errorf("%w: resolve %s: %v", ErrEndpointDenied, host, err)
+		return ValidatedEndpoint{}, fmt.Errorf("%w: resolve %s: %v", ErrEndpointDenied, host, err)
 	}
 	for _, ip := range ips {
 		if err := p.validateIP(ip); err != nil {
-			return nil, err
+			return ValidatedEndpoint{}, err
 		}
 	}
-	return u, nil
+	bound := make([]net.IP, len(ips))
+	for i, ip := range ips {
+		bound[i] = append(net.IP(nil), ip...)
+	}
+	return ValidatedEndpoint{URL: u, Port: port, IPs: bound}, nil
 }
 
 // ValidateRedirect 重新校验 redirect 目标，并禁止 TLS/安全协议降级。
