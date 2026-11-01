@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 
 	coretypes "github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
@@ -198,10 +199,9 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		v := int32(binary.LittleEndian.Uint32(s.data[s.off : s.off+4]))
 		s.off += 4
 		if dst.Type.ID == coretypes.Decimal {
-			dst.SetInt64(row, int64(v))
-		} else {
-			dst.SetInt32(row, v)
+			return setDecimalFromInt64(dst, row, int64(v), 9)
 		}
+		dst.SetInt32(row, v)
 		return nil
 	case TypeInt64:
 		if s.off+8 > len(s.data) {
@@ -209,17 +209,28 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		}
 		v := int64(binary.LittleEndian.Uint64(s.data[s.off : s.off+8]))
 		s.off += 8
+		if dst.Type.ID == coretypes.Decimal {
+			return setDecimalFromInt64(dst, row, v, 18)
+		}
 		if s.leaf != nil {
 			e := s.leaf.Element
 			if e.Logical != nil && e.Logical.Kind == LogicalTimestamp && e.Logical.Timestamp != nil {
 				switch e.Logical.Timestamp.Unit {
 				case UnitMillis:
-					v *= 1000
+					var err error
+					v, err = checkedMul1000(v)
+					if err != nil {
+						return err
+					}
 				case UnitNanos:
 					v /= 1000
 				}
 			} else if e.Converted != nil && *e.Converted == ConvertedTimestampMillis {
-				v *= 1000
+				var err error
+				v, err = checkedMul1000(v)
+				if err != nil {
+					return err
+				}
 			}
 		}
 		dst.SetInt64(row, v)
@@ -261,12 +272,7 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		value := s.data[s.off : s.off+n]
 		s.off += n
 		if dst.Type.ID == coretypes.Decimal {
-			v, err := decodeDecimal64BigEndian(value, dst.Type)
-			if err != nil {
-				return err
-			}
-			dst.SetInt64(row, v)
-			return nil
+			return setDecimalBigEndian(dst, row, value)
 		}
 		return dst.SetStringBytes(row, value)
 	case TypeFixedLenByteArray:
@@ -282,15 +288,87 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		if dst.Type.ID != coretypes.Decimal {
 			return errors.New("parquet: FIXED_LEN_BYTE_ARRAY requires supported logical type")
 		}
-		v, err := decodeDecimal64BigEndian(value, dst.Type)
-		if err != nil {
-			return err
-		}
-		dst.SetInt64(row, v)
-		return nil
+		return setDecimalBigEndian(dst, row, value)
 	default:
 		return fmt.Errorf("parquet: physical value stream %d not implemented", s.physical)
 	}
+}
+
+type uint128Magnitude struct {
+	hi uint64
+	lo uint64
+}
+
+var decimalPow10 = buildDecimalPow10()
+
+func buildDecimalPow10() [39]uint128Magnitude {
+	var result [39]uint128Magnitude
+	result[0] = uint128Magnitude{lo: 1}
+	for i := 1; i < len(result); i++ {
+		loCarry, lo := bits.Mul64(result[i-1].lo, 10)
+		hiCarry, hiLow := bits.Mul64(result[i-1].hi, 10)
+		hi, carry := bits.Add64(loCarry, hiLow, 0)
+		if hiCarry != 0 || carry != 0 {
+			panic("parquet: internal decimal power table overflow")
+		}
+		result[i] = uint128Magnitude{hi: hi, lo: lo}
+	}
+	return result
+}
+
+func int128Magnitude(value coretypes.Int128) uint128Magnitude {
+	if value.Hi >= 0 {
+		return uint128Magnitude{hi: uint64(value.Hi), lo: value.Lo}
+	}
+	lo := ^value.Lo + 1
+	hi := ^uint64(value.Hi)
+	if lo == 0 {
+		hi++
+	}
+	return uint128Magnitude{hi: hi, lo: lo}
+}
+
+func decimalFitsPrecision(value coretypes.Int128, precision uint8) bool {
+	if precision == 0 || precision > 38 {
+		return false
+	}
+	magnitude := int128Magnitude(value)
+	limit := decimalPow10[precision]
+	return magnitude.hi < limit.hi || magnitude.hi == limit.hi && magnitude.lo < limit.lo
+}
+
+func setDecimalFromInt64(dst *vector.Vector, row int, value int64, maxPhysicalPrecision uint8) error {
+	if dst.Type.ID != coretypes.Decimal || dst.Type.Decimal.Width == 0 || dst.Type.Decimal.Width > maxPhysicalPrecision {
+		return fmt.Errorf("parquet: INT decimal physical type cannot represent DECIMAL(%d,%d)", dst.Type.Decimal.Width, dst.Type.Decimal.Scale)
+	}
+	if !decimalFitsPrecision(coretypes.Int128FromInt64(value), dst.Type.Decimal.Width) {
+		return fmt.Errorf("parquet: decimal value exceeds declared precision %d", dst.Type.Decimal.Width)
+	}
+	dst.SetInt64(row, value)
+	return nil
+}
+
+func setDecimalBigEndian(dst *vector.Vector, row int, src []byte) error {
+	if dst.Type.ID != coretypes.Decimal || dst.Type.Decimal.Width == 0 || dst.Type.Decimal.Width > 38 {
+		return fmt.Errorf("parquet: invalid DECIMAL(%d,%d) destination", dst.Type.Decimal.Width, dst.Type.Decimal.Scale)
+	}
+	if dst.Type.Physical() == coretypes.PhysicalInt128 {
+		value, err := coretypes.Int128FromBigEndianTwosComplement(src)
+		if err != nil {
+			return fmt.Errorf("parquet: decimal128 decode: %w", err)
+		}
+		if !decimalFitsPrecision(value, dst.Type.Decimal.Width) {
+			return fmt.Errorf("parquet: decimal value exceeds declared precision %d", dst.Type.Decimal.Width)
+		}
+		dst.SetInt128(row, value)
+		return nil
+	}
+	value, err := decodeDecimal64BigEndian(src, dst.Type)
+	if err != nil {
+		return err
+	}
+	dst.SetInt64(row, value)
+	return nil
 }
 
 func decodeDecimal64BigEndian(src []byte, typ coretypes.LogicalType) (int64, error) {
@@ -311,14 +389,27 @@ func decodeDecimal64BigEndian(src []byte, typ coretypes.LogicalType) (int64, err
 		}
 		src = src[1:]
 	}
-	var bits uint64
+	var raw uint64
 	for _, b := range src {
-		bits = bits<<8 | uint64(b)
+		raw = raw<<8 | uint64(b)
 	}
 	if negative && len(src) < 8 {
-		bits |= ^uint64(0) << uint(len(src)*8)
+		raw |= ^uint64(0) << uint(len(src)*8)
 	}
-	return int64(bits), nil
+	value := int64(raw)
+	if !decimalFitsPrecision(coretypes.Int128FromInt64(value), typ.Decimal.Width) {
+		return 0, fmt.Errorf("parquet: decimal value exceeds declared precision %d", typ.Decimal.Width)
+	}
+	return value, nil
+}
+
+func checkedMul1000(value int64) (int64, error) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	const minInt64 = -maxInt64 - 1
+	if value > maxInt64/1000 || value < minInt64/1000 {
+		return 0, errors.New("parquet: timestamp conversion overflows microseconds")
+	}
+	return value * 1000, nil
 }
 
 type dictionaryIndexStream struct {
