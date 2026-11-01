@@ -70,6 +70,38 @@ case "$phase" in
     # P4-D4/P4-D9/P4-D3 的性能关键路径只记录本机 baseline，不作为跨机器绝对阈值。
     go test -run '^$' -bench 'Benchmark(WriterPoolAcquireRelease|PartitionRouting2048x64|ParquetWriterInteger1024)$' -benchmem -benchtime=100ms ./internal/export
     ;;
+  phase-5|5)
+    # Phase 5 Production Candidate 必须先证明全仓普通、race、vet 与架构边界全部成立。
+    go test ./...
+    go test -race ./...
+    go vet ./...
+    go run ./tools/architecture-check .
+
+    # 生命周期、security/credential、配置兼容和长期稳定性使用已独立验收的真实组件 gate。
+    bash ./scripts/phase5-cancellation-leak.sh
+    bash ./scripts/phase5-security.sh
+    bash ./scripts/phase5-config-compatibility.sh
+    bash ./scripts/phase5-stability.sh
+
+    # Server/Resource/remote packages 单独重跑，确保最终组合状态仍满足 Query API、Inspect、shutdown 与远端 driver 契约。
+    go test -count=1 \
+      ./internal/server \
+      ./internal/resource \
+      ./internal/security \
+      ./internal/settings \
+      ./internal/storage/remote \
+      ./internal/storage/remote/ftp \
+      ./internal/storage/remote/webdav \
+      ./internal/storage/remote/sftp \
+      ./internal/storage/remote/s3
+
+    # Phase 5 hot paths 记录本机 baseline，不使用跨机器绝对阈值。
+    go test -run '^$' -bench 'Benchmark' -benchmem -benchtime=100ms \
+      ./internal/server \
+      ./internal/profile \
+      ./internal/storage/remote/ftp \
+      ./internal/storage/remote/webdav
+    ;;
   *)
     echo "unsupported acceptance phase: $phase" >&2
     exit 2
