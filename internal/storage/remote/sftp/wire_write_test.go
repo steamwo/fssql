@@ -3,7 +3,6 @@ package sftp
 import (
 	"context"
 	"encoding/binary"
-	"io"
 	"net"
 	"testing"
 )
@@ -61,6 +60,8 @@ func serveSFTPWrite(t *testing.T, c net.Conn, written chan<- []byte, removed cha
 				file = next
 			}
 			copy(file[int(off):], data)
+			// 先记录观测值再发送 response，确保 WriteAt 返回时测试一定能读到本次写入结果。
+			written <- append([]byte(nil), file...)
 			_ = srvWrite(c, fxpStatus, statusPayload(id, fxOK))
 		case fxpClose:
 			_ = srvWrite(c, fxpStatus, statusPayload(id, fxOK))
@@ -78,17 +79,13 @@ func serveSFTPWrite(t *testing.T, c net.Conn, written chan<- []byte, removed cha
 			t.Errorf("unexpected request %d", typ)
 			return
 		}
-		select {
-		case written <- append([]byte(nil), file...):
-		default:
-		}
 	}
 }
 
 // TestWireSessionWriteAtAndRemove 验证真正 wireSession 实现 WritableSession，而不是仅 driver mock 可写。
 func TestWireSessionWriteAtAndRemove(t *testing.T) {
 	client, server := net.Pipe()
-	written := make(chan []byte, 8)
+	written := make(chan []byte, 2)
 	removed := make(chan string, 1)
 	go serveSFTPWrite(t, server, written, removed)
 	sessI, err := NewWireSession(client)
@@ -105,10 +102,8 @@ func TestWireSessionWriteAtAndRemove(t *testing.T) {
 	if n, err := ws.WriteAt(context.Background(), "/out", []byte("def"), 3, false); err != nil || n != 3 {
 		t.Fatalf("write2 n=%d err=%v", n, err)
 	}
-	var latest []byte
-	for len(written) > 0 {
-		latest = <-written
-	}
+	<-written
+	latest := <-written
 	if string(latest) != "abcdef" {
 		t.Fatalf("wire data=%q", latest)
 	}
@@ -149,5 +144,3 @@ func TestWireSessionWriteCancellation(t *testing.T) {
 	}
 	_ = ws.Close()
 }
-
-var _ io.ReadWriteCloser = (net.Conn)(nil)
