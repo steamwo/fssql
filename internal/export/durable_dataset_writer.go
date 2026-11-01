@@ -3,6 +3,8 @@ package export
 import (
 	"context"
 	"errors"
+
+	"github.com/steamwo/fssql/internal/core/vector"
 )
 
 var (
@@ -21,21 +23,8 @@ type DurableDatasetWriter struct {
 }
 
 // NewDurableResumableDatasetWriter 创建同时满足 ADR-0003 stable segment 与 durable restart state 的 writer。
+// 生产路径仍由 NewResumableDatasetWriter 强制经过 FileWriterFactory/VFS capability gate。
 func NewDurableResumableDatasetWriter(manifest *Manifest, router *FileRouter, factory *FileWriterFactory, store ManifestStore) (*DurableDatasetWriter, error) {
-	if factory == nil {
-		return nil, errors.New("export: durable dataset writer requires file writer factory")
-	}
-	return newDurableResumableDatasetWriter(manifest, router, func(ctx context.Context, uriURI interfaceURI, opts interfaceWriteOptions) (FormatWriter, error) {
-		return nil, errors.New("export: unreachable durable dataset writer adapter")
-	}, store)
-}
-
-// interfaceURI/interfaceWriteOptions 仅用于避免暴露额外 public adapter；生产构造器在 initDurableDatasetWriter 中直接绑定 factory。
-type interfaceURI = struct{}
-type interfaceWriteOptions = struct{}
-
-// initDurableDatasetWriter 是生产路径，保持所有远端打开仍经过 FileWriterFactory/VFS capability gate。
-func initDurableDatasetWriter(manifest *Manifest, router *FileRouter, factory *FileWriterFactory, store ManifestStore) (*DurableDatasetWriter, error) {
 	if store == nil {
 		return nil, errors.New("export: durable dataset writer requires manifest store")
 	}
@@ -46,7 +35,7 @@ func initDurableDatasetWriter(manifest *Manifest, router *FileRouter, factory *F
 	return &DurableDatasetWriter{inner: inner, store: store}, nil
 }
 
-// newDurableResumableDatasetWriter 是测试注入点；生产代码不得绕过 initDurableDatasetWriter 的 FileWriterFactory。
+// newDurableResumableDatasetWriter 是测试注入点；生产代码不得绕过 NewDurableResumableDatasetWriter 的 FileWriterFactory。
 func newDurableResumableDatasetWriter(manifest *Manifest, router *FileRouter, open fileOpenFunc, store ManifestStore) (*DurableDatasetWriter, error) {
 	if store == nil {
 		return nil, errors.New("export: durable dataset writer requires manifest store")
