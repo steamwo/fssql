@@ -286,8 +286,15 @@ func (c *ResultCursor) Stats() ResultCursorStats {
 	}
 }
 
+// noopResultCursorStop 是 non-cancelable context hot path 的无分配 stop callback。
+func noopResultCursorStop() {}
+
 // broadcastOnCancel 让 context cancellation 唤醒 sync.Cond 等待者；不创建常驻 goroutine。
+// context.Background/TODO 的 Done 为 nil，直接跳过 AfterFunc，避免每个 chunk 交接产生 heap allocation。
 func (c *ResultCursor) broadcastOnCancel(ctx context.Context) func() {
+	if ctx.Done() == nil {
+		return noopResultCursorStop
+	}
 	stopAfterFunc := context.AfterFunc(ctx, func() {
 		c.mu.Lock()
 		c.changed.Broadcast()
