@@ -20,9 +20,9 @@ func (a PrometheusAdapter) WriteText(w io.Writer) error {
 	}
 	s := a.Metrics.Snapshot()
 	metrics := []struct {
-		name string
-		help string
-		kind string
+		name  string
+		help  string
+		kind  string
 		value int64
 	}{
 		{"fssql_queries_submitted_total", "Queries admitted to the server registry.", "counter", s.QueriesSubmitted},
