@@ -18,9 +18,9 @@ func TestQueryServiceSuccessWaitsForResultDrainBeforeTerminal(t *testing.T) {
 		if sql != "SELECT 1" {
 			return nil, errors.New("unexpected sql")
 		}
-		queryScope = queryContext.Memory()
+		queryScope = queryContext.Memory
 		return preparedQueryFunc(func(queryContext *querypkg.Context, cursor *ResultCursor) error {
-			chunk := testResultChunk(t, queryContext.Memory(), memory.NewBufferManager(nil), 1)
+			chunk := testResultChunk(t, queryContext.Memory, memory.NewBufferManager(nil), 1)
 			if err := cursor.Push(queryContext.Context(), chunk); err != nil {
 				chunk.Release()
 				return err
@@ -102,15 +102,15 @@ func TestQueryServiceCancelUnblocksSlowProducerAndReleasesManagedChunks(t *testi
 	var scope *memory.Scope
 	secondPushStarted := make(chan struct{})
 	engine := fakeQueryEngine{plan: func(queryContext *querypkg.Context, _ string) (PreparedQuery, error) {
-		scope = queryContext.Memory()
+		scope = queryContext.Memory
 		return preparedQueryFunc(func(queryContext *querypkg.Context, cursor *ResultCursor) error {
 			bm := memory.NewBufferManager(nil)
-			first := testResultChunk(t, queryContext.Memory(), bm, 1)
+			first := testResultChunk(t, queryContext.Memory, bm, 1)
 			if err := cursor.Push(queryContext.Context(), first); err != nil {
 				first.Release()
 				return err
 			}
-			second := testResultChunk(t, queryContext.Memory(), bm, 2)
+			second := testResultChunk(t, queryContext.Memory, bm, 2)
 			close(secondPushStarted)
 			if err := cursor.Push(queryContext.Context(), second); err != nil {
 				second.Release()
