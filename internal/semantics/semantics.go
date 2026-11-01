@@ -7,6 +7,8 @@ import (
 
 var ErrOverflow = errors.New("numeric overflow")
 
+const nullHashSeed uint64 = 0x9ae16a3b2f90404f
+
 func EqualInt64(a, b int64) bool { return a == b }
 func CompareInt64(a, b int64) int {
 	if a < b {
@@ -23,13 +25,24 @@ func EqualFloat64(a, b float64) bool {
 	return a == b
 }
 
-func HashInt64(v int64) uint64   { return mix64(uint64(v)) }
+func HashNull() uint64          { return mix64(nullHashSeed) }
+func HashInt64(v int64) uint64  { return mix64(uint64(v)) }
 func HashUint64(v uint64) uint64 { return mix64(v) }
 func HashBool(v bool) uint64 {
 	if v {
 		return mix64(1)
 	}
 	return mix64(0)
+}
+func HashFloat32(v float32) uint64 {
+	bits := math.Float32bits(v)
+	if v == 0 {
+		bits = 0
+	}
+	if math.IsNaN(float64(v)) {
+		bits = 0x7fc00000
+	}
+	return mix64(uint64(bits))
 }
 func HashFloat64(v float64) uint64 {
 	bits := math.Float64bits(v)
@@ -40,6 +53,9 @@ func HashFloat64(v float64) uint64 {
 		bits = 0x7ff8000000000000
 	}
 	return mix64(bits)
+}
+func HashInt128(lo uint64, hi int64) uint64 {
+	return CombineHash(HashUint64(lo), HashInt64(hi))
 }
 func HashString(s string) uint64 {
 	const offset = uint64(14695981039346656037)
@@ -58,6 +74,9 @@ func HashBytes(b []byte) uint64 {
 		h = (h ^ uint64(c)) * prime
 	}
 	return mix64(h)
+}
+func CombineHash(seed, value uint64) uint64 {
+	return mix64(seed ^ (value + 0x9e3779b97f4a7c15 + (seed << 6) + (seed >> 2)))
 }
 func mix64(x uint64) uint64 {
 	x ^= x >> 30
