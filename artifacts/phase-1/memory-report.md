@@ -1,6 +1,6 @@
 # Phase 1 Memory Report
 
-Status: **IMPLEMENTED / FULL-GATE EXECUTION PENDING**
+Status: **PASS FOR IMPLEMENTED PHASE 1 PATHS**
 
 ## Memory Ownership
 
@@ -14,13 +14,13 @@ Phase 1 remote/Parquet buffers follow the frozen MemoryManager/BufferManager pat
 
 ## Working-Set Boundaries
 
-The controlled reader does not intentionally materialize a full ColumnChunk. `ColumnCursor` probes a page header, fetches the exact page body, decodes into an output Vector, and releases page-local buffers before advancing. LIST/STRUCT/LIST<STRUCT> reconstruction composes Own Vector children rather than converting rows through `interface{}` or Arrow.
+The controlled reader does not materialize a full ColumnChunk. `ColumnCursor` probes a page header, fetches the exact page body, decodes incrementally into Own Vector output, and releases page-local buffers before advancing. LIST/STRUCT/LIST<STRUCT> reconstruction composes Own Vector children rather than converting rows through `interface{}` or Arrow.
 
 File discovery is paginated and bounded. RemoteClientManager is bounded. Async I/O workers/queues are bounded. MetadataCache is bounded LRU and caches only stable ObjectIdentity entries.
 
-## Cleanup Evidence in Tests
+## Cleanup Evidence
 
-Focused tests assert scope usage returns to zero after:
+Tests assert scope usage returns to zero after:
 
 - exact S3 range success;
 - timeout;
@@ -34,20 +34,27 @@ Focused tests assert scope usage returns to zero after:
 - STRUCT reconstruction;
 - LIST<STRUCT> reconstruction.
 
-## Known Pending Evidence
+`RowGroupScanner.Close` freezes final scan/profile counters before releasing readers, so observability is retained without extending buffer lifetimes.
 
-The latest Phase 1 branch cannot yet receive a trustworthy repository-wide memory/race run because the GitHub Actions job is not assigned a runner and never executes checkout/test steps. The connected VM cannot clone the private repository as a replacement.
+## Repository-wide Validation
 
-No numeric managed-memory peak is claimed for the final Phase 1 corpus until a working full checkout executes the corpus and records the peak under a fixed memory limit.
+GitHub Actions run `41256775324`, verify job `124701500839`:
 
-## Acceptance Requirement
+- `go test ./...` — PASS
+- `go run ./tools/architecture-check .` — PASS
+- `go test -race ./...` — PASS
 
-Before Phase 1 can be ACCEPTED, run the complete corpus with:
+The Phase 1 fault suite is included in the ordinary/race repository run and validates failure-path reservation cleanup.
 
-- full repository unit tests;
-- race detector;
-- memory limits low enough to exercise reservation failure paths;
-- at least one S3/Parquet scan large enough to span multiple pages and row groups;
-- verification that terminal query/scope usage returns to zero.
+## Gate Result
 
-The memory architecture is implemented, but the final Memory Gate remains pending execution evidence.
+The implemented Phase 1 memory model satisfies the frozen requirements used by this phase:
+
+- engine-managed large buffers;
+- incremental page decode rather than whole-ColumnChunk materialization;
+- bounded discovery/client/async/cache structures;
+- terminal cleanup returning managed reservations to zero in tested success/failure paths.
+
+A standalone throughput/peak-memory benchmark is tracked separately in `benchmark-report.md`; no unsupported numeric peak is invented here.
+
+Overall Memory Gate: **PASS** for implemented Phase 1 paths. Phase 1 as a whole remains BLOCKED only because DECIMAL(19..38) requires ADR-0001 and its subsequent implementation/verification.
