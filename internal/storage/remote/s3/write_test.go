@@ -7,28 +7,26 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-// multipartTestServer 记录 S3 multipart 请求，验证条件提交、Abort 与 retry 行为。
+// multipartTestServer 记录 S3 multipart 请求，验证 streaming/multipart、Abort 与 retry 行为。
 type multipartTestServer struct {
-	mu            sync.Mutex
-	parts         [][]byte
-	aborts        int
-	completes     int
-	initiate      int
-	partFailures  int
-	completeCode  int
-	ifNoneMatch   string
-	ifMatch       string
-	stored        []byte
-	finalETag     string
-	versionID     string
+	mu           sync.Mutex
+	parts        [][]byte
+	aborts       int
+	completes    int
+	initiate     int
+	partFailures int
+	completeCode int
+	stored       []byte
+	finalETag    string
+	versionID    string
 }
 
 // handler 实现测试所需的最小 S3 path-style API。
@@ -53,8 +51,6 @@ func (s *multipartTestServer) handler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	case r.Method == http.MethodPost && q.Get("uploadId") != "":
 		s.completes++
-		s.ifNoneMatch = r.Header.Get("If-None-Match")
-		s.ifMatch = r.Header.Get("If-Match")
 		if s.completeCode != 0 && s.completeCode != http.StatusOK {
 			w.WriteHeader(s.completeCode)
 			return
@@ -69,8 +65,6 @@ func (s *multipartTestServer) handler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPut:
 		body, _ := io.ReadAll(r.Body)
-		s.ifNoneMatch = r.Header.Get("If-None-Match")
-		s.ifMatch = r.Header.Get("If-Match")
 		s.stored = append([]byte(nil), body...)
 		w.Header().Set("ETag", `"empty-etag"`)
 		w.WriteHeader(http.StatusOK)
@@ -115,8 +109,22 @@ func newMultipartTestDriver(t *testing.T, state *multipartTestServer) (*Driver, 
 	return d, server
 }
 
-// TestS3MultipartWriteManagedConditionalCommit 验证小对象也通过 multipart 完成点做条件提交并释放所有 managed memory。
-func TestS3MultipartWriteManagedConditionalCommit(t *testing.T) {
+// TestS3WriteCapabilities 只允许声明已实现能力；ConditionalWrite/AtomicRename 不得提前暴露。
+func TestS3WriteCapabilities(t *testing.T) {
+	state := &multipartTestServer{}
+	d, server := newMultipartTestDriver(t, state)
+	defer server.Close()
+	caps := d.StaticCapabilities()
+	if !caps.Has(vfs.StreamingWrite) || !caps.Has(vfs.MultipartWrite) {
+		t.Fatalf("missing write capabilities: %#x", uint64(caps))
+	}
+	if caps.Has(vfs.ConditionalWrite) || caps.Has(vfs.AtomicRename) {
+		t.Fatalf("advertised unimplemented commit capability: %#x", uint64(caps))
+	}
+}
+
+// TestS3MultipartWriteManaged 验证小对象通过真实 multipart 完成，并释放所有 managed memory。
+func TestS3MultipartWriteManaged(t *testing.T) {
 	state := &multipartTestServer{versionID: "v7"}
 	d, server := newMultipartTestDriver(t, state)
 	defer server.Close()
@@ -128,7 +136,7 @@ func TestS3MultipartWriteManagedConditionalCommit(t *testing.T) {
 	mm := memory.NewManager(32 << 20)
 	scope := mm.NewScope()
 	bm := memory.NewBufferManager(nil)
-	h, err := registry.OpenWrite(context.Background(), u, vfs.WriteOptions{IfNoneMatch: true}, scope, bm)
+	h, err := registry.OpenWrite(context.Background(), u, vfs.WriteOptions{}, scope, bm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,11 +150,10 @@ func TestS3MultipartWriteManagedConditionalCommit(t *testing.T) {
 	}
 	state.mu.Lock()
 	stored := string(state.stored)
-	ifNone := state.ifNoneMatch
 	initiates, completes := state.initiate, state.completes
 	state.mu.Unlock()
-	if stored != string(payload) || ifNone != "*" || initiates != 1 || completes != 1 {
-		t.Fatalf("stored=%q if-none-match=%q initiate=%d complete=%d", stored, ifNone, initiates, completes)
+	if stored != string(payload) || initiates != 1 || completes != 1 {
+		t.Fatalf("stored=%q initiate=%d complete=%d", stored, initiates, completes)
 	}
 	if identity.Size != int64(len(payload)) || identity.VersionID != "v7" {
 		t.Fatalf("identity=%+v", identity)
@@ -213,21 +220,21 @@ func TestS3MultipartRetryAndAbort(t *testing.T) {
 	}
 }
 
-// TestS3ConditionalCompleteFailureRemainsAbortable 验证 412 不会丢失 uploadID，随后 Abort 能清理 incomplete multipart。
-func TestS3ConditionalCompleteFailureRemainsAbortable(t *testing.T) {
-	state := &multipartTestServer{completeCode: http.StatusPreconditionFailed}
+// TestS3CompleteFailureRemainsAbortable 验证完成请求失败后 uploadID 仍归当前 handle，随后 Abort 可清理 incomplete multipart。
+func TestS3CompleteFailureRemainsAbortable(t *testing.T) {
+	state := &multipartTestServer{completeCode: http.StatusBadRequest}
 	d, server := newMultipartTestDriver(t, state)
 	defer server.Close()
-	u, _ := vfs.ParseURI("s3://bucket/out/manifest.json")
+	u, _ := vfs.ParseURI("s3://bucket/out/data.bin")
 	mm := memory.NewManager(32 << 20)
 	scope := mm.NewScope()
-	h, err := d.OpenWrite(context.Background(), u, vfs.WriteOptions{IfNoneMatch: true}, scope, memory.NewBufferManager(nil))
+	h, err := d.OpenWrite(context.Background(), u, vfs.WriteOptions{}, scope, memory.NewBufferManager(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = h.Write(context.Background(), []byte(`{"job":"x"}`))
-	if _, err := h.Close(context.Background()); !errors.Is(err, vfs.ErrObjectChanged) {
-		t.Fatalf("expected conditional conflict, got %v", err)
+	_, _ = h.Write(context.Background(), []byte("payload"))
+	if _, err := h.Close(context.Background()); err == nil {
+		t.Fatal("expected complete failure")
 	}
 	if err := h.Abort(context.Background()); err != nil {
 		t.Fatal(err)
@@ -240,15 +247,16 @@ func TestS3ConditionalCompleteFailureRemainsAbortable(t *testing.T) {
 	}
 }
 
-// TestS3EmptyObjectUsesAtomicPut 验证空文件不创建 multipart，条件语义直接应用到 PutObject。
+// TestS3EmptyObjectUsesAtomicPut 验证空文件不创建 multipart，避免遗留无意义 upload ownership。
 func TestS3EmptyObjectUsesAtomicPut(t *testing.T) {
 	state := &multipartTestServer{}
 	d, server := newMultipartTestDriver(t, state)
 	defer server.Close()
+	registry, _ := vfs.NewRegistry(d)
 	u, _ := vfs.ParseURI("s3://bucket/out/empty")
 	mm := memory.NewManager(16 << 20)
 	scope := mm.NewScope()
-	h, err := d.OpenWrite(context.Background(), u, vfs.WriteOptions{Expected: &vfs.ObjectIdentity{ETag: "old"}}, scope, memory.NewBufferManager(nil))
+	h, err := registry.OpenWrite(context.Background(), u, vfs.WriteOptions{}, scope, memory.NewBufferManager(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,22 +264,9 @@ func TestS3EmptyObjectUsesAtomicPut(t *testing.T) {
 		t.Fatal(err)
 	}
 	state.mu.Lock()
-	ifMatch, initiates := state.ifMatch, state.initiate
+	initiates := state.initiate
 	state.mu.Unlock()
-	if ifMatch != `"old"` || initiates != 0 {
-		t.Fatalf("if-match=%q initiates=%d", ifMatch, initiates)
-	}
-}
-
-// TestS3ExpectedWithoutETagIsRejected 确保 VersionID-only identity 不会被静默忽略为无条件写。
-func TestS3ExpectedWithoutETagIsRejected(t *testing.T) {
-	state := &multipartTestServer{}
-	d, server := newMultipartTestDriver(t, state)
-	defer server.Close()
-	u, _ := vfs.ParseURI("s3://bucket/out/data")
-	mm := memory.NewManager(16 << 20)
-	_, err := d.OpenWrite(context.Background(), u, vfs.WriteOptions{Expected: &vfs.ObjectIdentity{VersionID: "v1"}}, mm.NewScope(), memory.NewBufferManager(nil))
-	if !errors.Is(err, vfs.ErrWriteUnsupported) || !strings.Contains(err.Error(), "ETag") {
-		t.Fatalf("expected ETag requirement, got %v", err)
+	if initiates != 0 || scope.Used() != 0 {
+		t.Fatalf("initiates=%d used=%d", initiates, scope.Used())
 	}
 }
