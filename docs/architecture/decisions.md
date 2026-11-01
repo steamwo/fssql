@@ -155,6 +155,8 @@ Status: FROZEN
 - 强类型 Binder。
 - SQLNULL 仅 binding。
 - DECIMAL 是正式 v1 类型。
+- HUGEINT 是正式 v1 logical numeric type，复用 `PhysicalInt128` / `types.Int128`；当前 Stable SQL surface 仅按 ADR-0002 用于 DuckDB-compatible aggregate result semantics 及其结果传递。
+- DECIMAL 与 HUGEINT 保持不同 logical identity，即使二者可共享 `PhysicalInt128`。
 - Compare/Hash/Group 共用语义基础设施。
 
 ## AD-013 Optimizer
