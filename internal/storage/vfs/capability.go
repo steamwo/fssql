@@ -3,7 +3,7 @@ package vfs
 import "fmt"
 
 // Capability describes one operation or consistency guarantee exposed by a VFS driver.
-// Capabilities are intentionally format-agnostic; VFS must not know about Parquet/CSV/JSON.
+// Values are bit flags so CapabilitySet can be combined without translation.
 type Capability uint64
 
 const (
@@ -21,6 +21,22 @@ const (
 	CapabilityServerSideList
 )
 
+// Compatibility aliases keep the Phase 1 storage implementations on one capability model.
+const (
+	RandomRead         = CapabilityRandomRead
+	ParallelRandomRead = CapabilityParallelRandomRead
+	StreamingRead      = CapabilityStreamingRead
+	StreamingWrite     = CapabilityStreamingWrite
+	RandomWrite        = CapabilityRandomWrite
+	MultipartWrite     = CapabilityMultipartWrite
+	AtomicRename       = CapabilityAtomicRename
+	ConditionalRead    = CapabilityConditionalRead
+	ConditionalWrite   = CapabilityConditionalWrite
+	StableETag         = CapabilityStableETag
+	VersionedObject    = CapabilityVersionedObject
+	ServerSideList     = CapabilityServerSideList
+)
+
 // CapabilitySet is a compact immutable-style bitset used to advertise VFS capabilities.
 type CapabilitySet uint64
 
@@ -32,6 +48,9 @@ func NewCapabilitySet(capabilities ...Capability) CapabilitySet {
 	}
 	return set
 }
+
+// Capabilities is the compatibility constructor used by storage drivers.
+func Capabilities(capabilities ...Capability) CapabilitySet { return NewCapabilitySet(capabilities...) }
 
 // Has reports whether every bit in capability is present in the set.
 func (set CapabilitySet) Has(capability Capability) bool {
@@ -49,32 +68,51 @@ func (set CapabilitySet) Without(capability Capability) CapabilitySet {
 }
 
 // Intersect returns the capabilities present in both sets.
-func (set CapabilitySet) Intersect(other CapabilitySet) CapabilitySet {
-	return set & other
-}
+func (set CapabilitySet) Intersect(other CapabilitySet) CapabilitySet { return set & other }
 
-// ProbeResult captures endpoint-specific runtime capability knowledge.
-// Known identifies capabilities that were actually probed. Supported is a subset of Known.
-// Capabilities outside Known retain their static driver value.
+// ProbeResult captures endpoint-specific runtime capability knowledge and the
+// client-reuse identity that a remote driver discovered for that endpoint.
+// Known identifies capabilities that were actually probed. Supported must be a
+// subset of Known. Endpoint-bound legacy probes may leave Known empty and
+// provide a complete Supported set; ResolveEffectiveCapabilities handles that
+// compatibility form explicitly.
 type ProbeResult struct {
 	Known     CapabilitySet
 	Supported CapabilitySet
+
+	Endpoint          string
+	CredentialScope   string
+	CredentialVersion string
+	SecurityProfile   string
 }
 
 // Validate checks the internal consistency of a probe result.
 func (result ProbeResult) Validate() error {
+	if result.Known == 0 && result.Supported != 0 {
+		if result.Endpoint == "" {
+			return fmt.Errorf("vfs: probe has supported capabilities without known set or endpoint-bound legacy identity: supported=%#x", uint64(result.Supported))
+		}
+		return nil
+	}
 	if result.Supported&^result.Known != 0 {
-		return fmt.Errorf("vfs: probe marks unsupported-as-known capability bits: supported=%#x known=%#x", uint64(result.Supported), uint64(result.Known))
+		return fmt.Errorf("vfs: probe marks supported capability outside known set: supported=%#x known=%#x", uint64(result.Supported), uint64(result.Known))
 	}
 	return nil
 }
 
-// ResolveEffectiveCapabilities combines driver capabilities with an endpoint runtime probe.
-// Runtime probing may remove a statically advertised capability, but can never grant a
-// capability the driver itself does not implement.
+// ResolveEffectiveCapabilities combines driver capabilities with an endpoint
+// runtime probe. Runtime knowledge may narrow, but never grant, static driver
+// capabilities. An endpoint-bound legacy complete Supported set is intersected
+// with the static driver set.
 func ResolveEffectiveCapabilities(static CapabilitySet, probe ProbeResult) (CapabilitySet, error) {
 	if err := probe.Validate(); err != nil {
 		return 0, err
+	}
+	if probe.Known == 0 {
+		if probe.Supported == 0 {
+			return static, nil
+		}
+		return static.Intersect(probe.Supported), nil
 	}
 	unsupported := probe.Known &^ probe.Supported
 	return static &^ unsupported, nil

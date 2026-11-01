@@ -12,10 +12,17 @@ import (
 func serializedChunkSize(c *DataChunk) (int, error) {
 	size := 4
 	for _, v := range c.Columns {
-		if v.Type.ID != types.BigInt && v.Type.ID != types.Varchar && v.Type.ID != types.Boolean {
+		switch v.Type.ID {
+		case types.BigInt, types.Varchar, types.Boolean, types.Decimal:
+		default:
 			return 0, fmt.Errorf("serialization unsupported type %v", v.Type.ID)
 		}
 		size++
+		if v.Type.ID == types.Decimal {
+			// DECIMAL serialization is type-aware because width determines
+			// whether the payload is the 8-byte Decimal64 or 16-byte Int128 ABI.
+			size += 2
+		}
 		for i := 0; i < c.Cardinality; i++ {
 			size++
 			if !v.IsValid(i) {
@@ -29,6 +36,12 @@ func serializedChunkSize(c *DataChunk) (int, error) {
 			case types.Varchar:
 				r, _, _ := v.StringRefAt(i)
 				size += 4 + int(r.Length)
+			case types.Decimal:
+				if v.Type.Physical() == types.PhysicalInt128 {
+					size += 16
+				} else {
+					size += 8
+				}
 			}
 		}
 	}
@@ -53,6 +66,11 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 	for _, v := range c.Columns {
 		dst[pos] = byte(v.Type.ID)
 		pos++
+		if v.Type.ID == types.Decimal {
+			dst[pos] = v.Type.Decimal.Width
+			dst[pos+1] = v.Type.Decimal.Scale
+			pos += 2
+		}
 		for i := 0; i < c.Cardinality; i++ {
 			if !v.IsValid(i) {
 				dst[pos] = 0
@@ -86,6 +104,17 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 				}
 				copy(dst[pos:pos+len(src)], src)
 				pos += len(src)
+			case types.Decimal:
+				if v.Type.Physical() == types.PhysicalInt128 {
+					x, _ := v.Int128(i)
+					binary.LittleEndian.PutUint64(dst[pos:pos+8], x.Lo)
+					binary.LittleEndian.PutUint64(dst[pos+8:pos+16], uint64(x.Hi))
+					pos += 16
+				} else {
+					x, _ := v.Int64(i)
+					binary.LittleEndian.PutUint64(dst[pos:pos+8], uint64(x))
+					pos += 8
+				}
 			}
 		}
 	}
@@ -120,7 +149,21 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 		}
 		id := types.LogicalTypeID(data[pos])
 		pos++
-		v, err := NewFlat(scope, bm, types.LogicalType{ID: id}, card)
+		typ := types.LogicalType{ID: id}
+		if id == types.Decimal {
+			if err := need(2); err != nil {
+				cleanup()
+				return nil, err
+			}
+			var err error
+			typ, err = types.NewDecimal(data[pos], data[pos+1])
+			if err != nil {
+				cleanup()
+				return nil, err
+			}
+			pos += 2
+		}
+		v, err := NewFlat(scope, bm, typ, card)
 		if err != nil {
 			cleanup()
 			return nil, err
@@ -168,6 +211,25 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 					return nil, err
 				}
 				pos += n
+			case types.Decimal:
+				if typ.Physical() == types.PhysicalInt128 {
+					if err := need(16); err != nil {
+						cleanup()
+						return nil, err
+					}
+					v.SetInt128(i, types.Int128{
+						Lo: binary.LittleEndian.Uint64(data[pos : pos+8]),
+						Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16])),
+					})
+					pos += 16
+				} else {
+					if err := need(8); err != nil {
+						cleanup()
+						return nil, err
+					}
+					v.SetInt64(i, int64(binary.LittleEndian.Uint64(data[pos:pos+8])))
+					pos += 8
+				}
 			default:
 				cleanup()
 				return nil, fmt.Errorf("unsupported type %d", id)
