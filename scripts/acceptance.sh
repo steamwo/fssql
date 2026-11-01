@@ -32,6 +32,22 @@ case "$phase" in
     go test -run '^$' -bench 'Benchmark(ExternalSortForcedSpill|TopN)$' -benchmem -benchtime=100ms ./internal/execution/sort
     go run ./cmd/phase2-metrics >/dev/null
     ;;
+  phase-3|3)
+    go test ./...
+    go test -race ./...
+    go vet ./...
+    go run ./tools/architecture-check .
+    go test -count=1 ./internal/format/csv -run 'TestParallelCSVEqualsSequentialCSV|TestParallelRequestFallsBackToSequentialWithoutParallelRandomRead|TestSourceBindingAndInspectionShareInference'
+    go test -count=1 ./internal/format/json -run 'TestTypedNestedProjection|TestInferNested|TestMalformedJSON|TestAllocationFailureNoLeak|TestParallelNDJSONEqualsSequential'
+    go test -count=1 ./internal/format/compression -run 'TestGzipAndZstdLogicalResultEqualsPlain|TestGzipCorruptionAndLimitReleaseMemory|TestCompressionCapabilityComposition'
+    go test -count=1 ./internal/storage/remote/sftp -run 'TestDriverRetriesResetPoisonsSession|TestWrongHostKeyNoRetry|TestCancelReadReleasesLeaseAndManagedBuffer|TestEndpointMismatchRejectedBeforeDial|TestSFTPQueryDemoCSV|TestParallelCapabilityRequiresPoolCapacity|TestPoolBoundedCancelReuseAndPoison|TestPoolFactoryFailureRollsBackSlot|TestWireSessionStatReadList|TestOpenSSH'
+    go test -count=1 ./test/interop/phase3 -run 'TestDuckDBV200Golden'
+    go test -run '^$' -bench 'Benchmark' -benchmem -benchtime=100ms ./internal/format/csv
+    go test -run '^$' -bench 'BenchmarkTypedDecode1024' -benchmem -benchtime=100ms ./internal/format/json
+    go test -run '^$' -bench 'Benchmark(GzipDecode|ZstdDecode)' -benchmem -benchtime=100ms ./internal/format/compression
+    go test -run '^$' -bench 'BenchmarkPoolAcquireRelease' -benchmem -benchtime=100ms ./internal/storage/remote/sftp
+    go run ./cmd/phase3-metrics >/dev/null
+    ;;
   *)
     echo "unsupported acceptance phase: $phase" >&2
     exit 2
