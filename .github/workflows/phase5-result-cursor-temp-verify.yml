@@ -1,0 +1,25 @@
+name: phase5-result-cursor-temp-verify
+
+on:
+  push:
+    branches:
+      - phase-5-result-cursor
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Gofmt check
+        run: test -z "$(gofmt -l internal/server)"
+      - name: Result cursor tests
+        run: go test -count=1 ./internal/server ./internal/query
+      - name: Result cursor race tests
+        run: go test -race -count=1 ./internal/server ./internal/query
+      - name: Result cursor benchmark
+        run: go test -run '^$' -bench BenchmarkResultCursorPushNext -benchmem -count=1 ./internal/server
+      - name: Architecture boundary check
+        run: go run ./tools/architecture-check
