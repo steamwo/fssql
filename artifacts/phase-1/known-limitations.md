@@ -1,12 +1,8 @@
 # Phase 1 Known Limitations
 
-Status: **ACTIVE — Phase 1 blocked only by ADR-0001**
+Status: **ACCEPTED — no Phase 1 acceptance blocker remains**
 
-## Acceptance Blocker
-
-1. **DECIMAL(19..38)** is not implemented. `core/types` maps these widths to PhysicalInt128, but the frozen Own Vector ABI has no approved canonical Int128 representation/accessors. ADR-0001 is PROPOSED and must be explicitly approved or otherwise resolved before implementation.
-
-Repository-wide unit/race/architecture verification and the DuckDB/PyArrow/Polars/Spark interoperability matrix now pass; they are no longer acceptance blockers.
+Phase 1 is accepted. ADR-0001 is accepted and DECIMAL(19..38) is implemented through the canonical PhysicalInt128 Own Vector representation. The limitations below are intentional Phase 1 scope boundaries, not failed acceptance criteria.
 
 ## Supported Nested Scope
 
@@ -17,13 +13,15 @@ The controlled reader supports the Phase 1 standard paths implemented in this br
 - non-repeated STRUCT with primitive direct children;
 - standard three-level LIST whose element is a non-repeated STRUCT with primitive direct children.
 
-It intentionally rejects ambiguous/legacy LIST layouts and deeper arbitrary recursive combinations that have not been defined by a frozen contract. In particular, explicit dotted projection of an individual leaf inside a LIST<STRUCT> is not a supported output-shape contract; projecting the top-level LIST preserves the nested value.
+It intentionally rejects ambiguous/legacy LIST layouts and deeper arbitrary recursive combinations that have not been defined by a frozen contract. Explicit dotted projection of an individual leaf inside a LIST<STRUCT> is not a supported output-shape contract; projecting the top-level LIST preserves the nested value.
 
 ## DECIMAL Scope
 
-DECIMAL widths 1..18 use Decimal64 scaled signed integer storage and support Parquet INT32, INT64, BYTE_ARRAY, and FIXED_LEN_BYTE_ARRAY representations with checked conversion. Widths 19..38 are rejected explicitly; values are not truncated, coerced to strings, or approximated.
+DECIMAL widths 1..18 use Decimal64 scaled signed integer storage and support Parquet INT32, INT64, BYTE_ARRAY, and FIXED_LEN_BYTE_ARRAY representations with checked conversion.
 
-The interoperability corpus includes a Decimal128 file and confirms that PyArrow, DuckDB, Polars, and Spark agree on its row count. That external compatibility evidence does not substitute for the missing Own Vector Int128 ABI inside fssql.
+DECIMAL widths 19..38 use the ADR-0001 `types.Int128` / PhysicalInt128 representation. The controlled reader accepts BYTE_ARRAY and FIXED_LEN_BYTE_ARRAY big-endian two's-complement unscaled integers, sign-extends into Int128, preserves declared scale, and rejects signed-128 or declared-precision overflow. Dictionary copy and Vector serialization preserve Decimal128 without string coercion or approximation.
+
+Parquet INT32 and INT64 DECIMAL encodings remain bounded by the precision those physical types can represent; incompatible declared high precision is rejected explicitly rather than reinterpreted.
 
 ## Codec / Parquet Surface
 
@@ -41,15 +39,16 @@ MetadataCache is a bounded in-process cache keyed by stable object identity. Pha
 
 ## Verification Status
 
-GitHub Actions run `41256775324` provides repository-wide evidence:
+Final GitHub Actions run `41259459358` provides repository-wide Phase 1 evidence:
 
 - `go test ./...` — PASS;
 - `go run ./tools/architecture-check .` — PASS;
 - `go test -race ./...` — PASS;
-- four-engine interoperability runner — PASS.
+- controlled Parquet benchmark — PASS;
+- pinned four-engine interoperability runner — PASS.
 
-Exact interoperability engine versions/results are recorded in `artifacts/phase-1/interop-output.json`.
+Corresponding Phase 0 compatibility run `41259459399` also passes ordinary, race, and architecture verification.
 
 ## Phase Boundary
 
-No external join, aggregate spill, sort spill, or other Phase 2 functionality is included. Phase 2 must remain LOCKED until ADR-0001 is resolved, DECIMAL(19..38) is implemented according to the approved design, final Phase 1 gates pass again, and Phase 1 acceptance is changed to ACCEPTED.
+No external join, aggregate spill, sort spill, or other Phase 2 functionality is included in this Phase 1 implementation. Phase 2 may begin only after the machine state records Phase 1 as ACCEPTED; that state transition does not retroactively add Phase 2 code to this branch.
