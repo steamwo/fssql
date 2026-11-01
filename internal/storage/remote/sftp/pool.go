@@ -3,138 +3,216 @@ package sftp
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"sync"
+
+	"github.com/steamwo/fssql/internal/storage/remote"
 )
 
-var ErrPoolClosed = errors.New("sftp: session pool closed")
+var (
+	ErrPoolClosed = errors.New("sftp: session pool closed")
+	ErrHostKey    = errors.New("sftp: host-key verification failed")
+	ErrConnection = errors.New("sftp: connection failure")
+)
 
+type FileInfo struct {
+	Size    int64
+	ModUnix int64
+	IsDir   bool
+}
+type DirEntry struct {
+	Name string
+	Info FileInfo
+}
 type Session interface {
-	Stat(context.Context, string) (RemoteInfo, error)
-	List(context.Context, string, string, int) (RemotePage, error)
-	ReadAt(context.Context, string, int64, []byte) (int, error)
+	Stat(context.Context, string) (FileInfo, error)
+	List(context.Context, string) ([]DirEntry, error)
+	ReadAt(context.Context, string, []byte, int64) (int, error)
 	Close() error
 }
+type SessionFactory interface {
+	Dial(context.Context, remote.ClientKey) (Session, error)
+}
+type SessionFactoryFunc func(context.Context, remote.ClientKey) (Session, error)
 
-type DialResult struct {
-	Session       Session
-	HostKeySHA256 string
+func (f SessionFactoryFunc) Dial(ctx context.Context, k remote.ClientKey) (Session, error) {
+	return f(ctx, k)
 }
 
-type Dialer interface {
-	Dial(context.Context, DialConfig) (DialResult, error)
+type Pool struct {
+	key     remote.ClientKey
+	factory SessionFactory
+	max     int
+	mu      sync.Mutex
+	idle    []Session
+	total   int
+	leased  int
+	closed  bool
+	notify  chan struct{}
 }
 
-type DialConfig struct {
-	Endpoint          string
-	CredentialScope   string
-	CredentialVersion string
-	SecurityProfile   string
-}
-
-type sessionPool struct {
-	dialer Dialer
-	cfg    DialConfig
-	max    int
-	slots  chan struct{}
-
-	mu     sync.Mutex
-	idle   []Session
-	open   int
-	leased int
-	closed bool
-}
-
-func newSessionPool(max int, dialer Dialer, cfg DialConfig) *sessionPool {
+func NewPool(key remote.ClientKey, max int, f SessionFactory) (*Pool, error) {
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
 	if max <= 0 {
-		max = 8
+		max = 4
 	}
-	return &sessionPool{dialer: dialer, cfg: cfg, max: max, slots: make(chan struct{}, max)}
+	if f == nil {
+		return nil, errors.New("sftp: nil session factory")
+	}
+	return &Pool{key: key, factory: f, max: max, notify: make(chan struct{})}, nil
 }
-
-type lease struct {
-	pool     *sessionPool
-	session  Session
-	poisoned bool
-	once     sync.Once
-}
-
-func (p *sessionPool) acquire(ctx context.Context) (*lease, string, error) {
-	select {
-	case p.slots <- struct{}{}:
-	case <-ctx.Done():
-		return nil, "", ctx.Err()
-	}
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		<-p.slots
-		return nil, "", ErrPoolClosed
-	}
-	if n := len(p.idle); n > 0 {
-		s := p.idle[n-1]
-		p.idle = p.idle[:n-1]
-		p.leased++
-		p.mu.Unlock()
-		return &lease{pool: p, session: s}, "", nil
-	}
-	p.open++
-	p.leased++
-	p.mu.Unlock()
-
-	result, err := p.dialer.Dial(ctx, p.cfg)
-	if err != nil || result.Session == nil {
+func (p *Pool) signal() { close(p.notify); p.notify = make(chan struct{}) }
+func (p *Pool) Acquire(ctx context.Context) (Session, error) {
+	for {
 		p.mu.Lock()
-		p.open--
-		p.leased--
-		p.mu.Unlock()
-		<-p.slots
-		if err == nil {
-			err = errors.New("sftp: dialer returned nil session")
+		if p.closed {
+			p.mu.Unlock()
+			return nil, ErrPoolClosed
 		}
-		return nil, result.HostKeySHA256, err
+		n := len(p.idle)
+		if n > 0 {
+			s := p.idle[n-1]
+			p.idle = p.idle[:n-1]
+			p.leased++
+			p.mu.Unlock()
+			return s, nil
+		}
+		if p.total < p.max {
+			p.total++
+			p.leased++
+			p.mu.Unlock()
+			s, err := p.factory.Dial(ctx, p.key)
+			if err != nil {
+				p.mu.Lock()
+				p.total--
+				p.leased--
+				p.signal()
+				p.mu.Unlock()
+				return nil, err
+			}
+			if s == nil {
+				p.mu.Lock()
+				p.total--
+				p.leased--
+				p.signal()
+				p.mu.Unlock()
+				return nil, errors.New("sftp: factory returned nil session")
+			}
+			return s, nil
+		}
+		ch := p.notify
+		p.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ch:
+		}
 	}
-	return &lease{pool: p, session: result.Session}, result.HostKeySHA256, nil
 }
-
-func (l *lease) Poison() { l.poisoned = true }
-
-func (l *lease) Release() {
-	l.once.Do(func() {
-		p := l.pool
-		p.mu.Lock()
-		p.leased--
-		closed := p.closed
-		if l.poisoned || closed {
-			p.open--
-		} else {
-			p.idle = append(p.idle, l.session)
-		}
-		p.mu.Unlock()
-		if l.poisoned || closed {
-			_ = l.session.Close()
-		}
-		<-p.slots
-	})
-}
-
-func (p *sessionPool) close() {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
+func (p *Pool) Release(s Session, poison bool) {
+	if s == nil {
 		return
 	}
-	p.closed = true
-	idle := append([]Session(nil), p.idle...)
-	p.open -= len(idle)
-	p.idle = nil
-	p.mu.Unlock()
-	for _, s := range idle {
-		_ = s.Close()
+	p.mu.Lock()
+	if p.leased > 0 {
+		p.leased--
 	}
+	if p.closed || poison {
+		if p.total > 0 {
+			p.total--
+		}
+		p.signal()
+		p.mu.Unlock()
+		_ = s.Close()
+		return
+	}
+	p.idle = append(p.idle, s)
+	p.signal()
+	p.mu.Unlock()
 }
-
-func (p *sessionPool) stats() (open, leased, idle int) {
+func (p *Pool) Close() error {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	idle := p.idle
+	p.idle = nil
+	p.total -= len(idle)
+	p.signal()
+	p.mu.Unlock()
+	var first error
+	for _, s := range idle {
+		if err := s.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+func (p *Pool) Stats() (total, leased, idle int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.open, p.leased, len(p.idle)
+	return p.total, p.leased, len(p.idle)
 }
+
+type Manager struct {
+	mu                    sync.Mutex
+	pools                 map[remote.ClientKey]*Pool
+	maxPools, maxSessions int
+	factory               SessionFactory
+}
+
+func NewManager(maxPools, maxSessions int, f SessionFactory) *Manager {
+	if maxPools <= 0 {
+		maxPools = 32
+	}
+	if maxSessions <= 0 {
+		maxSessions = 4
+	}
+	return &Manager{pools: map[remote.ClientKey]*Pool{}, maxPools: maxPools, maxSessions: maxSessions, factory: f}
+}
+func (m *Manager) Pool(key remote.ClientKey) (*Pool, error) {
+	if err := key.Validate(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.pools[key]; p != nil {
+		return p, nil
+	}
+	if len(m.pools) >= m.maxPools {
+		return nil, fmt.Errorf("sftp: pool limit reached")
+	}
+	p, err := NewPool(key, m.maxSessions, m.factory)
+	if err != nil {
+		return nil, err
+	}
+	m.pools[key] = p
+	return p, nil
+}
+func (m *Manager) Close() error {
+	m.mu.Lock()
+	ps := make([]*Pool, 0, len(m.pools))
+	for _, p := range m.pools {
+		ps = append(ps, p)
+	}
+	m.pools = map[remote.ClientKey]*Pool{}
+	m.mu.Unlock()
+	var first error
+	for _, p := range ps {
+		if err := p.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+func IsRetryable(err error) bool {
+	return errors.Is(err, ErrConnection) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)
+}
+
+func (m *Manager) MaxSessions() int { return m.maxSessions }
