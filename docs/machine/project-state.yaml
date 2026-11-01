@@ -9,7 +9,7 @@ phase_status:
   phase_2: ACCEPTED
   phase_3: ACCEPTED
   phase_4: ACCEPTED
-  phase_5: IN_PROGRESS
+  phase_5: ACCEPTED
   phase_6: LOCKED
 rules:
   next_phase_requires_previous_acceptance: true
