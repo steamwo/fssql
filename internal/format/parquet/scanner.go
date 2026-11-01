@@ -43,16 +43,18 @@ func (r *scalarColumnReader) Metrics() ColumnCursorMetrics { return r.cursor.Met
 func (r *scalarColumnReader) RowPosition() int64           { return r.cursor.Consumed() }
 
 type RowGroupScanner struct {
-	tree         *SchemaTree
-	rowGroup     RowGroup
-	plan         ProjectionPlan
-	prune        PruneResult
-	readers      []projectedColumnReader
-	batchSize    int
-	position     int64
-	rowsProduced int64
-	skipped      bool
-	closed       bool
+	tree          *SchemaTree
+	rowGroup      RowGroup
+	plan          ProjectionPlan
+	prune         PruneResult
+	readers       []projectedColumnReader
+	batchSize     int
+	position      int64
+	rowsProduced  int64
+	skipped       bool
+	closed        bool
+	finalMetrics  RowGroupScanMetrics
+	metricsFrozen bool
 }
 
 func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, tree *SchemaTree, rg RowGroup, requested []string, filters []scan.Filter, scope *memory.Scope, bm *memory.BufferManager, batchSize int) (*RowGroupScanner, error) {
@@ -289,7 +291,7 @@ func (s *RowGroupScanner) Next(ctx context.Context) (*vector.DataChunk, error) {
 	return chunk, nil
 }
 
-func (s *RowGroupScanner) Metrics() RowGroupScanMetrics {
+func (s *RowGroupScanner) collectMetrics() RowGroupScanMetrics {
 	var m RowGroupScanMetrics
 	if s == nil {
 		return m
@@ -317,10 +319,25 @@ func (s *RowGroupScanner) Metrics() RowGroupScanMetrics {
 	return m
 }
 
+func (s *RowGroupScanner) Metrics() RowGroupScanMetrics {
+	if s == nil {
+		return RowGroupScanMetrics{}
+	}
+	if s.metricsFrozen {
+		return s.finalMetrics
+	}
+	return s.collectMetrics()
+}
+
 func (s *RowGroupScanner) Close() {
 	if s == nil || s.closed {
 		return
 	}
+	// Freeze observable scan/profile evidence before releasing the readers. The
+	// resource lifecycle still closes every reader before terminal return, while
+	// EXPLAIN/acceptance callers retain stable post-close metrics.
+	s.finalMetrics = s.collectMetrics()
+	s.metricsFrozen = true
 	s.closed = true
 	for _, reader := range s.readers {
 		reader.Close()
