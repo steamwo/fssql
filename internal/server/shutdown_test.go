@@ -56,8 +56,7 @@ func TestQueryServiceShutdownCancelsRunningQueryAndReleasesOwnership(t *testing.
 		}), nil
 	}}
 	service, scheduler, manager := newQueryServiceHarness(t, engine, QueryServiceConfig{})
-	response, err := service.Submit(context.Background(), defaultSubmitRequest("SELECT running"))
-	if err != nil {
+	if _, err := service.Submit(context.Background(), defaultSubmitRequest("SELECT running")); err != nil {
 		t.Fatal(err)
 	}
 	<-started
@@ -86,7 +85,6 @@ func TestQueryServiceShutdownCancelsRunningQueryAndReleasesOwnership(t *testing.
 	if service.registry.Count() != 0 {
 		t.Fatalf("rejected post-shutdown submit leaked registry entry: %d", service.registry.Count())
 	}
-	_ = response
 }
 
 func TestQueryServiceShutdownReleasesQueuedAdmissionWithoutCompetingTerminalOwner(t *testing.T) {
@@ -234,7 +232,7 @@ func TestQueryServiceShutdownIsIdempotentWhenAlreadyDrained(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if report != (ShutdownReport{}) {
+		if report.CanceledQueries != 0 || report.ForgottenQueries != 0 || len(report.RemainingQueries) != 0 {
 			t.Fatalf("idempotent shutdown report=%+v", report)
 		}
 	}
