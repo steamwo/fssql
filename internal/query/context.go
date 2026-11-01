@@ -16,6 +16,8 @@ type Context struct {
 	Temp   *storagetemp.QueryScope
 	active atomic.Int64
 	closed atomic.Bool
+	// sourceSnapshot 在第一次绑定后保持不可变，确保同一 Statement 的导出不会读取漂移的数据集。
+	sourceSnapshot atomic.Pointer[SourceSnapshot]
 }
 
 func New(parent context.Context, m *memory.Manager) *Context {
