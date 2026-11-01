@@ -38,7 +38,14 @@ def count_pyarrow(pa, pq, path: Path) -> int:
 
 def count_duckdb(duckdb, path: Path) -> int:
     query_path = str(path / "*.parquet") if path.is_dir() else str(path)
-    return int(duckdb.sql("select count(*) from read_parquet(?)", params=[query_path]).fetchone()[0])
+    conn = duckdb.connect()
+    try:
+        row = conn.execute("select count(*) from read_parquet(?)", [query_path]).fetchone()
+        if row is None:
+            raise AssertionError(f"duckdb returned no count row for {query_path}")
+        return int(row[0])
+    finally:
+        conn.close()
 
 
 def count_polars(pl, path: Path) -> int:
@@ -92,7 +99,7 @@ def main() -> None:
         hive_root = generated / "hive"
         hive_counts = {
             "pyarrow": pq.ParquetDataset(hive_root).read().num_rows,
-            "duckdb": int(duckdb.sql("select count(*) from read_parquet(?)", params=[str(hive_root / "**" / "*.parquet")]).fetchone()[0]),
+            "duckdb": count_duckdb(duckdb, hive_root / "**" / "*.parquet"),
             "polars": int(pl.scan_parquet(str(hive_root / "**" / "*.parquet")).collect().height),
             "spark": int(spark.read.option("basePath", str(hive_root)).parquet(str(hive_root / "year=2026" / "*" / "*.parquet")).count()),
         }
@@ -108,9 +115,14 @@ def main() -> None:
             pq.write_table(pa.table({"id": [r[0] for r in rows], "name": [r[1] for r in rows]}), pyarrow_path)
 
             duckdb_path = temp_root / "duckdb.parquet"
-            duckdb.sql("create table phase1_interop(id bigint, name varchar)")
-            duckdb.sql("insert into phase1_interop values (1, 'alpha'), (2, 'beta'), (3, NULL)")
-            duckdb.sql(f"copy phase1_interop to '{duckdb_path.as_posix()}' (format parquet)")
+            duck_conn = duckdb.connect()
+            try:
+                duck_conn.execute("create table phase1_interop(id bigint, name varchar)")
+                duck_conn.execute("insert into phase1_interop values (1, 'alpha'), (2, 'beta'), (3, NULL)")
+                target = duckdb_path.as_posix().replace("'", "''")
+                duck_conn.execute(f"copy phase1_interop to '{target}' (format parquet)")
+            finally:
+                duck_conn.close()
 
             polars_path = temp_root / "polars.parquet"
             pl.DataFrame({"id": [1, 2, 3], "name": ["alpha", "beta", None]}).write_parquet(polars_path)
