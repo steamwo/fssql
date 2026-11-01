@@ -206,9 +206,10 @@ func (c *ResultCursor) Stats() ResultCursorStats {
 
 // broadcastOnCancel 让 context cancellation 唤醒 sync.Cond 等待者；不创建常驻 goroutine。
 func (c *ResultCursor) broadcastOnCancel(ctx context.Context) func() {
-	return context.AfterFunc(ctx, func() {
+	stopAfterFunc := context.AfterFunc(ctx, func() {
 		c.mu.Lock()
 		c.changed.Broadcast()
 		c.mu.Unlock()
 	})
+	return func() { stopAfterFunc() }
 }
