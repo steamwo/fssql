@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -11,48 +12,121 @@ import (
 	"github.com/steamwo/fssql/internal/semantics"
 )
 
+func hashValue(v *vector.Vector, row int) (uint64, error) {
+	if !v.IsValid(row) {
+		return semantics.HashNull(), nil
+	}
+	switch v.Type.ID {
+	case types.Boolean:
+		x, _ := v.Bool(row)
+		return semantics.HashBool(x), nil
+	case types.TinyInt:
+		x, _ := v.Int8(row)
+		return semantics.HashInt64(int64(x)), nil
+	case types.SmallInt:
+		x, _ := v.Int16(row)
+		return semantics.HashInt64(int64(x)), nil
+	case types.Integer, types.DateType:
+		x, _ := v.Int32(row)
+		return semantics.HashInt64(int64(x)), nil
+	case types.BigInt, types.TimestampType:
+		x, _ := v.Int64(row)
+		return semantics.HashInt64(x), nil
+	case types.HugeInt:
+		x, _ := v.Int128(row)
+		return semantics.HashInt128(x.Lo, x.Hi), nil
+	case types.Float:
+		x, _ := v.Float32(row)
+		return semantics.HashFloat32(x), nil
+	case types.Double:
+		x, _ := v.Float64(row)
+		return semantics.HashFloat64(x), nil
+	case types.Decimal:
+		if v.Type.Decimal.Width <= 18 {
+			x, _ := v.Int64(row)
+			return semantics.HashInt64(x), nil
+		}
+		x, _ := v.Int128(row)
+		return semantics.HashInt128(x.Lo, x.Hi), nil
+	case types.Varchar:
+		r, heap, _ := v.StringRefAt(row)
+		if r.External {
+			return semantics.HashBytes(heap.ExternalBytes(r)), nil
+		}
+		return semantics.HashBytes(r.Inline[:r.Length]), nil
+	default:
+		return 0, fmt.Errorf("hash unsupported type %v", v.Type.ID)
+	}
+}
+
 func VectorHash(v *vector.Vector, out []uint64) error {
 	if len(out) < v.Count() {
 		return errors.New("hash output too small")
 	}
 	for i := 0; i < v.Count(); i++ {
-		if !v.IsValid(i) {
-			out[i] = semantics.HashUint64(0x9ae16a3b2f90404f)
-			continue
+		h, err := hashValue(v, i)
+		if err != nil {
+			return err
 		}
-		switch v.Type.ID {
-		case types.BigInt:
-			x, _ := v.Int64(i)
-			out[i] = semantics.HashInt64(x)
-		case types.Boolean:
-			x, _ := v.Bool(i)
-			out[i] = semantics.HashBool(x)
-		case types.Varchar:
-			r, heap, _ := v.StringRefAt(i)
-			var data []byte
-			if r.External {
-				data = heap.ExternalBytes(r)
-			} else {
-				data = r.Inline[:r.Length]
+		out[i] = h
+	}
+	return nil
+}
+
+// HashChunk hashes one or more key columns using the centralized semantic hashes.
+// A one-column key is byte-for-byte equivalent to VectorHash for that column.
+func HashChunk(chunk *vector.DataChunk, keyColumns []int, out []uint64) error {
+	if chunk == nil {
+		return errors.New("nil chunk")
+	}
+	if len(out) < chunk.Cardinality {
+		return errors.New("hash output too small")
+	}
+	for _, col := range keyColumns {
+		if col < 0 || col >= len(chunk.Columns) {
+			return fmt.Errorf("key column %d out of range", col)
+		}
+	}
+	if len(keyColumns) == 0 {
+		for i := 0; i < chunk.Cardinality; i++ {
+			out[i] = semantics.HashUint64(0)
+		}
+		return nil
+	}
+	for row := 0; row < chunk.Cardinality; row++ {
+		h, err := hashValue(chunk.Columns[keyColumns[0]], row)
+		if err != nil {
+			return err
+		}
+		for _, col := range keyColumns[1:] {
+			part, err := hashValue(chunk.Columns[col], row)
+			if err != nil {
+				return err
 			}
-			out[i] = semantics.HashBytes(data)
-		default:
-			return fmt.Errorf("hash unsupported type %v", v.Type.ID)
+			h = semantics.CombineHash(h, part)
 		}
+		out[row] = h
 	}
 	return nil
 }
 
 type ColumnLayout struct {
-	Type   types.LogicalType
-	Offset int
-	Width  int
-}
-type RowLayout struct {
-	Columns  []ColumnLayout
-	RowWidth int
+	Type     types.LogicalType
+	Offset   int
+	Width    int
+	Variable bool
 }
 
+type RowLayout struct {
+	Columns         []ColumnLayout
+	RowWidth        int // legacy fixed-width layout width
+	NullBytes       int
+	FixedWidth      int // relocatable-row fixed prefix width
+	VariableColumns int
+	relocatable     bool
+}
+
+// NewRowLayout preserves the Phase 0 fixed-width row ABI.
 func NewRowLayout(ts []types.LogicalType) (RowLayout, error) {
 	l := RowLayout{}
 	for _, t := range ts {
@@ -63,14 +137,180 @@ func NewRowLayout(ts []types.LogicalType) (RowLayout, error) {
 		l.Columns = append(l.Columns, ColumnLayout{Type: t, Offset: l.RowWidth, Width: w})
 		l.RowWidth += w
 	}
+	l.FixedWidth = l.RowWidth
 	return l, nil
 }
 
+// NewRelocatableRowLayout creates the pointer-free row representation used by
+// Phase 2 hash/join/aggregate spill paths. VARCHAR values use an 8-byte
+// offset/length descriptor whose offset is relative to the beginning of row.
+func NewRelocatableRowLayout(ts []types.LogicalType) (RowLayout, error) {
+	l := RowLayout{NullBytes: (len(ts) + 7) / 8, relocatable: true}
+	off := l.NullBytes
+	for _, t := range ts {
+		w, ok := t.FixedSize()
+		variable := false
+		if t.ID == types.Varchar {
+			w, ok, variable = 8, true, true
+		}
+		if !ok {
+			return RowLayout{}, fmt.Errorf("relocatable row layout unsupported type %v", t.ID)
+		}
+		l.Columns = append(l.Columns, ColumnLayout{Type: t, Offset: off, Width: w, Variable: variable})
+		off += w
+		if variable {
+			l.VariableColumns++
+		}
+	}
+	l.FixedWidth = off
+	l.RowWidth = off
+	return l, nil
+}
+
+func (l RowLayout) Relocatable() bool { return l.relocatable }
+
+func (l RowLayout) RowSize(chunk *vector.DataChunk, row int) (int, error) {
+	if !l.relocatable {
+		return l.RowWidth, nil
+	}
+	if chunk == nil || row < 0 || row >= chunk.Cardinality {
+		return 0, errors.New("row out of range")
+	}
+	if len(chunk.Columns) != len(l.Columns) {
+		return 0, errors.New("row layout column count mismatch")
+	}
+	size := l.FixedWidth
+	for i, col := range l.Columns {
+		if !col.Variable || !chunk.Columns[i].IsValid(row) {
+			continue
+		}
+		r, _, ok := chunk.Columns[i].StringRefAt(row)
+		if !ok {
+			continue
+		}
+		if uint64(size)+uint64(r.Length) > uint64(math.MaxInt) {
+			return 0, errors.New("row size overflow")
+		}
+		size += int(r.Length)
+	}
+	return size, nil
+}
+
+func setNullBit(dst []byte, column int) { dst[column>>3] |= byte(1 << uint(column&7)) }
+func (l RowLayout) IsNull(row []byte, column int) bool {
+	if !l.relocatable || column < 0 || column >= len(l.Columns) || len(row) < l.NullBytes {
+		return false
+	}
+	return row[column>>3]&(byte(1)<<uint(column&7)) != 0
+}
+
+func (l RowLayout) ColumnData(row []byte, column int) ([]byte, bool, error) {
+	if column < 0 || column >= len(l.Columns) {
+		return nil, false, errors.New("column out of range")
+	}
+	col := l.Columns[column]
+	if l.relocatable && l.IsNull(row, column) {
+		return nil, false, nil
+	}
+	if col.Offset < 0 || col.Offset+col.Width > len(row) {
+		return nil, false, errors.New("short row")
+	}
+	if !col.Variable {
+		return row[col.Offset : col.Offset+col.Width], true, nil
+	}
+	off := int(binary.LittleEndian.Uint32(row[col.Offset : col.Offset+4]))
+	length := int(binary.LittleEndian.Uint32(row[col.Offset+4 : col.Offset+8]))
+	if off < l.FixedWidth || length < 0 || off > len(row) || length > len(row)-off {
+		return nil, false, errors.New("invalid variable row descriptor")
+	}
+	return row[off : off+length], true, nil
+}
+
+func (l RowLayout) WriteRow(chunk *vector.DataChunk, row int, dst []byte) (int, error) {
+	if !l.relocatable {
+		return 0, errors.New("WriteRow requires relocatable layout")
+	}
+	need, err := l.RowSize(chunk, row)
+	if err != nil {
+		return 0, err
+	}
+	if len(dst) < need {
+		return 0, errors.New("row destination too small")
+	}
+	for i := 0; i < need; i++ {
+		dst[i] = 0
+	}
+	varOff := l.FixedWidth
+	for i, col := range l.Columns {
+		v := chunk.Columns[i]
+		if !v.IsValid(row) {
+			setNullBit(dst, i)
+			continue
+		}
+		d := dst[col.Offset : col.Offset+col.Width]
+		switch col.Type.ID {
+		case types.Boolean:
+			x, _ := v.Bool(row)
+			if x {
+				d[0] = 1
+			}
+		case types.TinyInt:
+			x, _ := v.Int8(row)
+			d[0] = byte(x)
+		case types.SmallInt:
+			x, _ := v.Int16(row)
+			binary.LittleEndian.PutUint16(d, uint16(x))
+		case types.Integer, types.DateType:
+			x, _ := v.Int32(row)
+			binary.LittleEndian.PutUint32(d, uint32(x))
+		case types.BigInt, types.TimestampType:
+			x, _ := v.Int64(row)
+			binary.LittleEndian.PutUint64(d, uint64(x))
+		case types.HugeInt:
+			x, _ := v.Int128(row)
+			binary.LittleEndian.PutUint64(d[:8], x.Lo)
+			binary.LittleEndian.PutUint64(d[8:16], uint64(x.Hi))
+		case types.Float:
+			x, _ := v.Float32(row)
+			binary.LittleEndian.PutUint32(d, math.Float32bits(x))
+		case types.Double:
+			x, _ := v.Float64(row)
+			binary.LittleEndian.PutUint64(d, math.Float64bits(x))
+		case types.Decimal:
+			if col.Type.Decimal.Width <= 18 {
+				x, _ := v.Int64(row)
+				binary.LittleEndian.PutUint64(d, uint64(x))
+			} else {
+				x, _ := v.Int128(row)
+				binary.LittleEndian.PutUint64(d[:8], x.Lo)
+				binary.LittleEndian.PutUint64(d[8:16], uint64(x.Hi))
+			}
+		case types.Varchar:
+			r, heap, _ := v.StringRefAt(row)
+			var src []byte
+			if r.External {
+				src = heap.ExternalBytes(r)
+			} else {
+				src = r.Inline[:r.Length]
+			}
+			binary.LittleEndian.PutUint32(d[:4], uint32(varOff))
+			binary.LittleEndian.PutUint32(d[4:8], uint32(len(src)))
+			copy(dst[varOff:varOff+len(src)], src)
+			varOff += len(src)
+		default:
+			return 0, fmt.Errorf("row encoding unsupported type %v", col.Type.ID)
+		}
+	}
+	return need, nil
+}
+
 type TupleDataCollection struct {
-	scope                     *memory.Scope
-	bm                        *memory.BufferManager
-	buf                       *memory.Buffer
-	rowWidth, count, capacity int
+	scope                           *memory.Scope
+	bm                              *memory.BufferManager
+	buf                             *memory.Buffer
+	offsets                         *memory.Buffer
+	layout                          *RowLayout
+	rowWidth, count, capacity, used int
 }
 
 func NewTupleDataCollection(scope *memory.Scope, bm *memory.BufferManager, rowWidth, capacity int) (*TupleDataCollection, error) {
@@ -86,7 +326,35 @@ func NewTupleDataCollection(scope *memory.Scope, bm *memory.BufferManager, rowWi
 	}
 	return &TupleDataCollection{scope: scope, bm: bm, buf: b, rowWidth: rowWidth, capacity: capacity}, nil
 }
+
+func NewTupleDataCollectionForLayout(scope *memory.Scope, bm *memory.BufferManager, layout RowLayout, capacity int) (*TupleDataCollection, error) {
+	if !layout.relocatable {
+		return nil, errors.New("tuple layout must be relocatable")
+	}
+	if capacity < 1 {
+		capacity = 1
+	}
+	dataCap := layout.FixedWidth * capacity
+	if dataCap < 64 {
+		dataCap = 64
+	}
+	data, err := bm.Allocate(scope, memory.TagHashTable, dataCap)
+	if err != nil {
+		return nil, err
+	}
+	offsets, err := bm.Allocate(scope, memory.TagHashTable, (capacity+1)*4)
+	if err != nil {
+		data.Release()
+		return nil, err
+	}
+	copyLayout := layout
+	return &TupleDataCollection{scope: scope, bm: bm, buf: data, offsets: offsets, layout: &copyLayout, capacity: capacity}, nil
+}
+
 func (c *TupleDataCollection) Append(row []byte) error {
+	if c.layout != nil {
+		return errors.New("raw append not allowed for layout collection")
+	}
 	if len(row) != c.rowWidth {
 		return errors.New("row width mismatch")
 	}
@@ -101,11 +369,111 @@ func (c *TupleDataCollection) Append(row []byte) error {
 	c.count++
 	return nil
 }
+
+func (c *TupleDataCollection) growRows(nextCount int) error {
+	if nextCount <= c.capacity {
+		return nil
+	}
+	next := c.capacity * 2
+	if next < nextCount {
+		next = nextCount
+	}
+	if err := c.offsets.Resize((next+1)*4, nil); err != nil {
+		return err
+	}
+	c.capacity = next
+	return nil
+}
+func (c *TupleDataCollection) growData(need int) error {
+	if need <= c.buf.Len() {
+		return nil
+	}
+	next := c.buf.Len() * 2
+	if next < need {
+		next = need
+	}
+	return c.buf.Resize(next, nil)
+}
+
+func (c *TupleDataCollection) AppendChunkRow(chunk *vector.DataChunk, row int) error {
+	if c.layout == nil {
+		return errors.New("collection has no row layout")
+	}
+	size, err := c.layout.RowSize(chunk, row)
+	if err != nil {
+		return err
+	}
+	if uint64(c.used)+uint64(size) > uint64(math.MaxUint32) {
+		return errors.New("tuple data exceeds 4GiB offset range")
+	}
+	if err := c.growRows(c.count + 1); err != nil {
+		return err
+	}
+	if err := c.growData(c.used + size); err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	n, err := c.layout.WriteRow(chunk, row, c.buf.Bytes()[c.used:c.used+size])
+	if err != nil {
+		return err
+	}
+	c.used += n
+	c.count++
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	return nil
+}
+func (c *TupleDataCollection) AppendEncodedRow(row []byte) error {
+	if c.layout == nil {
+		return errors.New("collection has no row layout")
+	}
+	if len(row) < c.layout.FixedWidth {
+		return errors.New("encoded row too short")
+	}
+	if uint64(c.used)+uint64(len(row)) > uint64(math.MaxUint32) {
+		return errors.New("tuple data exceeds 4GiB offset range")
+	}
+	if err := c.growRows(c.count + 1); err != nil {
+		return err
+	}
+	if err := c.growData(c.used + len(row)); err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	copy(c.buf.Bytes()[c.used:c.used+len(row)], row)
+	c.used += len(row)
+	c.count++
+	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	return nil
+}
 func (c *TupleDataCollection) Count() int { return c.count }
+func (c *TupleDataCollection) AllocatedBytes() int {
+	if c == nil {
+		return 0
+	}
+	n := 0
+	if c.buf != nil {
+		n += c.buf.Len()
+	}
+	if c.offsets != nil {
+		n += c.offsets.Len()
+	}
+	return n
+}
 func (c *TupleDataCollection) Row(i int) []byte {
-	return c.buf.Bytes()[i*c.rowWidth : (i+1)*c.rowWidth]
+	if i < 0 || i >= c.count {
+		return nil
+	}
+	if c.layout == nil {
+		return c.buf.Bytes()[i*c.rowWidth : (i+1)*c.rowWidth]
+	}
+	start := int(binary.LittleEndian.Uint32(c.offsets.Bytes()[i*4 : i*4+4]))
+	end := int(binary.LittleEndian.Uint32(c.offsets.Bytes()[(i+1)*4 : (i+1)*4+4]))
+	return c.buf.Bytes()[start:end]
 }
 func (c *TupleDataCollection) Serialize() (*memory.Buffer, error) {
+	if c.layout != nil {
+		return nil, errors.New("relocatable collection serialization is handled by spill page consumers")
+	}
 	out, err := c.bm.Allocate(c.scope, memory.TagHashTable, 8+c.count*c.rowWidth)
 	if err != nil {
 		return nil, err
@@ -122,7 +490,8 @@ func Deserialize(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*T
 	}
 	w := int(binary.LittleEndian.Uint32(data[:4]))
 	n := int(binary.LittleEndian.Uint32(data[4:8]))
-	if w <= 0 || len(data) != 8+w*n {
+	payload := len(data) - 8
+	if w <= 0 || payload%w != 0 || payload/w != n {
 		return nil, errors.New("invalid tuple data")
 	}
 	c, err := NewTupleDataCollection(scope, bm, w, n)
@@ -137,6 +506,10 @@ func (c *TupleDataCollection) Release() {
 	if c.buf != nil {
 		c.buf.Release()
 		c.buf = nil
+	}
+	if c.offsets != nil {
+		c.offsets.Release()
+		c.offsets = nil
 	}
 }
 
@@ -221,3 +594,13 @@ func NewRadixPartitioner(bits uint8) (RadixPartitioner, error) {
 }
 func (r RadixPartitioner) Partition(hash uint64) int { return int(hash & r.mask) }
 func (r RadixPartitioner) Count() int                { return 1 << r.bits }
+func (r RadixPartitioner) PartitionAtDepth(hash uint64, depth int) (int, error) {
+	if depth < 0 {
+		return 0, errors.New("negative radix depth")
+	}
+	shift := int(r.bits) * depth
+	if shift >= 64 {
+		return 0, errors.New("radix depth exceeds hash width")
+	}
+	return int((hash >> shift) & r.mask), nil
+}

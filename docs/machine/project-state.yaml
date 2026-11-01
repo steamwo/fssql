@@ -6,7 +6,7 @@ current_phase: 2
 phase_status:
   phase_0: ACCEPTED
   phase_1: ACCEPTED
-  phase_2: IN_PROGRESS
+  phase_2: ACCEPTED
   phase_3: LOCKED
   phase_4: LOCKED
   phase_5: LOCKED

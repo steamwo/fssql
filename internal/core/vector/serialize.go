@@ -13,14 +13,12 @@ func serializedChunkSize(c *DataChunk) (int, error) {
 	size := 4
 	for _, v := range c.Columns {
 		switch v.Type.ID {
-		case types.BigInt, types.Varchar, types.Boolean, types.Decimal:
+		case types.BigInt, types.HugeInt, types.Varchar, types.Boolean, types.Decimal:
 		default:
 			return 0, fmt.Errorf("serialization unsupported type %v", v.Type.ID)
 		}
 		size++
 		if v.Type.ID == types.Decimal {
-			// DECIMAL serialization is type-aware because width determines
-			// whether the payload is the 8-byte Decimal64 or 16-byte Int128 ABI.
 			size += 2
 		}
 		for i := 0; i < c.Cardinality; i++ {
@@ -31,6 +29,8 @@ func serializedChunkSize(c *DataChunk) (int, error) {
 			switch v.Type.ID {
 			case types.BigInt:
 				size += 8
+			case types.HugeInt:
+				size += 16
 			case types.Boolean:
 				size++
 			case types.Varchar:
@@ -47,7 +47,6 @@ func serializedChunkSize(c *DataChunk) (int, error) {
 	}
 	return size, nil
 }
-
 func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager) (*memory.Buffer, error) {
 	n, err := serializedChunkSize(c)
 	if err != nil {
@@ -84,12 +83,15 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 				x, _ := v.Int64(i)
 				binary.LittleEndian.PutUint64(dst[pos:pos+8], uint64(x))
 				pos += 8
+			case types.HugeInt:
+				x, _ := v.Int128(i)
+				binary.LittleEndian.PutUint64(dst[pos:pos+8], x.Lo)
+				binary.LittleEndian.PutUint64(dst[pos+8:pos+16], uint64(x.Hi))
+				pos += 16
 			case types.Boolean:
 				x, _ := v.Bool(i)
 				if x {
 					dst[pos] = 1
-				} else {
-					dst[pos] = 0
 				}
 				pos++
 			case types.Varchar:
@@ -120,7 +122,6 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 	}
 	return out, nil
 }
-
 func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*DataChunk, error) {
 	if len(data) < 4 {
 		return nil, errors.New("short chunk")
@@ -188,6 +189,13 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 				}
 				v.SetInt64(i, int64(binary.LittleEndian.Uint64(data[pos:pos+8])))
 				pos += 8
+			case types.HugeInt:
+				if err := need(16); err != nil {
+					cleanup()
+					return nil, err
+				}
+				v.SetInt128(i, types.Int128{Lo: binary.LittleEndian.Uint64(data[pos : pos+8]), Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16]))})
+				pos += 16
 			case types.Boolean:
 				if err := need(1); err != nil {
 					cleanup()
@@ -217,10 +225,7 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 						cleanup()
 						return nil, err
 					}
-					v.SetInt128(i, types.Int128{
-						Lo: binary.LittleEndian.Uint64(data[pos : pos+8]),
-						Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16])),
-					})
+					v.SetInt128(i, types.Int128{Lo: binary.LittleEndian.Uint64(data[pos : pos+8]), Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16]))})
 					pos += 16
 				} else {
 					if err := need(8); err != nil {

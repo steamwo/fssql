@@ -1,0 +1,55 @@
+name: phase2
+
+on:
+  push:
+    branches: ["phase2-olap-spill"]
+    paths-ignore:
+      - "docs/**"
+      - "artifacts/**"
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Phase 2 acceptance
+        run: ./scripts/acceptance.sh 2
+      - name: Capture Phase 2 memory evidence
+        run: |
+          mkdir -p artifacts/phase-2/runtime
+          go run ./cmd/phase2-metrics | tee artifacts/phase-2/runtime/memory-metrics.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase2-runtime-evidence
+          path: artifacts/phase-2/runtime
+          if-no-files-found: error
+
+  duckdb-differential:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - name: Install pinned DuckDB 2.0.0
+        run: python -m pip install duckdb==2.0.0
+      - name: Phase 2 DuckDB differential
+        run: |
+          mkdir -p artifacts/phase-2/runtime
+          python test/interop/phase2/run.py | tee artifacts/phase-2/runtime/duckdb-differential.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phase2-duckdb-differential
+          path: artifacts/phase-2/runtime/duckdb-differential.json
+          if-no-files-found: error

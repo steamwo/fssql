@@ -1,13 +1,39 @@
 #!/usr/bin/env bash
 set -euo pipefail
 phase="${1:-phase-0}"
-if [[ "$phase" != "phase-0" && "$phase" != "0" ]]; then
-  echo "only phase-0 is implemented by this acceptance script" >&2
-  exit 2
-fi
-go test ./...
-go test -race ./...
-go run ./tools/architecture-check .
-go test -run '^$' -bench 'BenchmarkNumericAdd2048' -benchmem ./internal/execution/expression
-go test -run '^$' -bench 'Benchmark(VectorHashInt64|VectorHashVarchar|HashTableLookup)' -benchmem ./internal/execution/hash
-go test -run '^$' -bench 'BenchmarkPushPipeline100K' -benchmem ./internal/demo/phase0
+case "$phase" in
+  phase-0|0)
+    go test ./...
+    go test -race ./...
+    go run ./tools/architecture-check .
+    go test -run '^$' -bench 'BenchmarkNumericAdd2048' -benchmem ./internal/execution/expression
+    go test -run '^$' -bench 'Benchmark(VectorHashInt64|VectorHashVarchar|HashTableLookup)' -benchmem ./internal/execution/hash
+    go test -run '^$' -bench 'BenchmarkPushPipeline100K' -benchmem ./internal/demo/phase0
+    ;;
+  phase-2|2)
+    go test ./...
+    go test -race ./...
+    go vet ./...
+    go run ./tools/architecture-check .
+    go test -count=1 ./internal/execution/join -run 'TestExternalForcedSpillMatchesInMemory|TestExternalSkewFallsBackToBoundedTerminalJoin'
+    go test -count=1 ./internal/execution/aggregate -run 'TestExternalAggregateForcedSpillEqualsInMemory'
+    go test -count=1 ./internal/execution/distinct -run 'TestExternalDistinctForcedSpillEqualsInMemory'
+    go test -count=1 ./internal/execution/sort -run 'TestExternalSortForcedSpillEqualsInMemory|TestTopNMatchesFullSortLimit'
+    go test -count=1 ./internal/storage/temp -run 'TestCreatePermissionDeniedHasNoOwnershipLeak|TestDiskFullRollsBackReservation|TestShortWriteAccountsOnlyWrittenBytes|TestCleanupFailureRetainsOwnershipForRetry|TestSpillablePageStoreDetectsCorruption|TestSpillablePageStoreReadAllocationFailureHasNoLeak|TestSpillablePageStoreShortWritePoisonsStoreAndCleansUp|TestSpillablePageStoreCanceledReadDoesNotAllocate'
+    go test -count=1 ./internal/execution/hash -run 'TestSkewDetectorSyntheticDataset|TestSameKeySkewMakesNoProgressAcrossDepth'
+    go test -count=1 ./internal/execution/join -run 'TestExternalCancelDuringSpillReleasesManagedState'
+    go test -count=1 ./internal/execution/aggregate -run 'TestExternalAggregateTempQuotaFailureCleansUp|TestExternalAggregateCancelAfterSpillCleansUp'
+    go test -count=1 ./internal/execution/sort -run 'TestExternalSortTempQuotaFailure|TestExternalSortCancelAfterSpillCleansUp'
+    go test -run '^$' -bench 'Benchmark(TemporaryQuotaReserveRelease|RLEEncode|SpillPageStoreRoundTrip)$' -benchmem -benchtime=100ms ./internal/storage/temp
+    go test -run '^$' -bench 'Benchmark(HashChunkBigIntVarchar|PartitionHistogramAddHash)$' -benchmem -benchtime=100ms ./internal/execution/hash
+    go test -run '^$' -bench 'Benchmark(InnerHashJoin2048|ExternalHashJoinForcedSpill)$' -benchmem -benchtime=100ms ./internal/execution/join
+    go test -run '^$' -bench 'Benchmark(HashAggregateBigInt|ExternalAggregateForcedSpill)$' -benchmem -benchtime=100ms ./internal/execution/aggregate
+    go test -run '^$' -bench 'BenchmarkExternalDistinct$' -benchmem -benchtime=100ms ./internal/execution/distinct
+    go test -run '^$' -bench 'Benchmark(ExternalSortForcedSpill|TopN)$' -benchmem -benchtime=100ms ./internal/execution/sort
+    go run ./cmd/phase2-metrics >/dev/null
+    ;;
+  *)
+    echo "unsupported acceptance phase: $phase" >&2
+    exit 2
+    ;;
+esac

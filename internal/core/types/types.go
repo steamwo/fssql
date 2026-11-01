@@ -19,6 +19,8 @@ const (
 	TimestampType
 	List
 	Struct
+	// HugeInt is appended to preserve the numeric IDs of the pre-ADR-0002 logical types.
+	HugeInt
 )
 
 type PhysicalType uint8
@@ -42,12 +44,10 @@ type DecimalInfo struct {
 	Width uint8
 	Scale uint8
 }
-
 type StructField struct {
 	Name string
 	Type LogicalType
 }
-
 type LogicalType struct {
 	ID      LogicalTypeID
 	Decimal DecimalInfo
@@ -61,17 +61,10 @@ func NewDecimal(width, scale uint8) (LogicalType, error) {
 	}
 	return LogicalType{ID: Decimal, Decimal: DecimalInfo{Width: width, Scale: scale}}, nil
 }
-
-func NewList(child LogicalType) LogicalType {
-	c := child
-	return LogicalType{ID: List, Child: &c}
-}
-
+func NewList(child LogicalType) LogicalType { c := child; return LogicalType{ID: List, Child: &c} }
 func NewStruct(fields ...StructField) LogicalType {
-	copyFields := append([]StructField(nil), fields...)
-	return LogicalType{ID: Struct, Fields: copyFields}
+	return LogicalType{ID: Struct, Fields: append([]StructField(nil), fields...)}
 }
-
 func (t LogicalType) Physical() PhysicalType {
 	switch t.ID {
 	case Boolean:
@@ -84,6 +77,8 @@ func (t LogicalType) Physical() PhysicalType {
 		return PhysicalInt32
 	case BigInt, TimestampType:
 		return PhysicalInt64
+	case HugeInt:
+		return PhysicalInt128
 	case Float:
 		return PhysicalFloat32
 	case Double:
@@ -103,7 +98,6 @@ func (t LogicalType) Physical() PhysicalType {
 		return PhysicalInvalid
 	}
 }
-
 func (t LogicalType) FixedSize() (int, bool) {
 	switch t.Physical() {
 	case PhysicalBool, PhysicalInt8:
@@ -120,26 +114,17 @@ func (t LogicalType) FixedSize() (int, bool) {
 		return 0, false
 	}
 }
-
 func (t LogicalType) IsNumeric() bool {
 	switch t.ID {
-	case TinyInt, SmallInt, Integer, BigInt, Float, Double, Decimal:
+	case TinyInt, SmallInt, Integer, BigInt, HugeInt, Float, Double, Decimal:
 		return true
-	default:
-		return false
 	}
+	return false
 }
 
-// Date stores days since the Unix epoch.
 type Date int32
-
-// Timestamp stores microseconds since the Unix epoch.
 type Timestamp int64
-
-// Decimal64 stores a scaled signed integer for DECIMAL values up to width 18.
 type Decimal64 int64
-
-// TypeOperations centralizes physical mapping and layout queries for logical types.
 type TypeOperations struct{}
 
 func (TypeOperations) Physical(t LogicalType) PhysicalType { return t.Physical() }
