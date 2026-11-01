@@ -208,6 +208,7 @@ func (r *Reservation) Release() {
 
 type FileHandle interface {
 	io.Writer
+	io.ReaderAt
 	Sync() error
 	Close() error
 	Name() string
@@ -397,6 +398,15 @@ func (f *File) WriteContext(ctx context.Context, p []byte) (int, error) {
 		writeErr = err
 	}
 	return n, writeErr
+}
+
+func (f *File) ReadAt(p []byte, off int64) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closed || f.removed {
+		return 0, ErrClosed
+	}
+	return f.handle.ReadAt(p, off)
 }
 
 func (f *File) Sync() error {
