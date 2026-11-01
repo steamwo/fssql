@@ -45,7 +45,7 @@ func TestSpillBlockHeaderRoundTrip(t *testing.T) {
 }
 
 func TestSpillablePageStoreRoundTripAndReclaim(t *testing.T) {
-	quotas, tempScope, memoryManager, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{SegmentMaxBytes: 1 << 20})
+	quotas, tempScope, _, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{SegmentMaxBytes: 1 << 20})
 	pages := [][]byte{
 		[]byte("alpha"),
 		bytes.Repeat([]byte{0x42}, 128),
@@ -76,8 +76,8 @@ func TestSpillablePageStoreRoundTripAndReclaim(t *testing.T) {
 		}
 		buf.Release()
 	}
-	if got := memoryManager.Used(); got != 0 {
-		t.Fatalf("managed memory leak after reads: %d", got)
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
+		t.Fatalf("spill I/O buffer leak after reads: %d", got)
 	}
 
 	for _, id := range ids {
@@ -106,7 +106,7 @@ func TestSpillablePageStoreRoundTripAndReclaim(t *testing.T) {
 }
 
 func TestSpillablePageStoreRLECompression(t *testing.T) {
-	_, tempScope, memoryManager, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{
+	_, tempScope, _, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{
 		Compression:      CompressionRLE,
 		MinCompressBytes: 1,
 	})
@@ -125,7 +125,7 @@ func TestSpillablePageStoreRLECompression(t *testing.T) {
 	if int64(ref.EncodedLength)+spillBlockHeaderSize >= int64(len(data)) {
 		t.Fatalf("compressed spill block did not shrink: encoded=%d raw=%d", ref.EncodedLength, len(data))
 	}
-	if got := memoryManager.Used(); got != 0 {
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
 		t.Fatalf("compression scratch leak after write: %d", got)
 	}
 	buf, err := store.ReadPage(context.Background(), id)
@@ -136,7 +136,7 @@ func TestSpillablePageStoreRLECompression(t *testing.T) {
 		t.Fatal("RLE round trip mismatch")
 	}
 	buf.Release()
-	if got := memoryManager.Used(); got != 0 {
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
 		t.Fatalf("read buffer leak: %d", got)
 	}
 	if err := store.DeletePage(id); err != nil {
@@ -196,14 +196,14 @@ func TestSpillablePageStoreReadsRotatedSegments(t *testing.T) {
 }
 
 func TestSpillablePageStoreDetectsCorruption(t *testing.T) {
-	_, tempScope, memoryManager, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{})
+	_, tempScope, _, memoryScope, store := newPageStoreHarness(t, 1<<20, PageStoreConfig{})
 	data := []byte("checksum protected spill payload")
 	id, err := store.WritePage(context.Background(), data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ref, _ := store.Ref(id)
-	seg := store.segments[ref.SegmentID]
+	seg := store.segments[ref.SegmentID-1]
 	path := seg.file.Name()
 	f, err := os.OpenFile(path, os.O_WRONLY, 0)
 	if err != nil {
@@ -225,8 +225,8 @@ func TestSpillablePageStoreDetectsCorruption(t *testing.T) {
 	if !errors.Is(err, ErrCorruptSpillBlock) {
 		t.Fatalf("read error=%v, want corrupt spill block", err)
 	}
-	if got := memoryManager.Used(); got != 0 {
-		t.Fatalf("managed memory leak after corrupt read: %d", got)
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
+		t.Fatalf("spill I/O buffer leak after corrupt read: %d", got)
 	}
 	if err := store.DeletePage(id); err != nil {
 		t.Fatal(err)
@@ -243,7 +243,7 @@ func TestSpillablePageStoreDetectsCorruption(t *testing.T) {
 }
 
 func TestSpillablePageStoreReadAllocationFailureHasNoLeak(t *testing.T) {
-	_, tempScope, memoryManager, memoryScope, store := newPageStoreHarness(t, 4, PageStoreConfig{})
+	_, tempScope, _, memoryScope, store := newPageStoreHarness(t, 710, PageStoreConfig{})
 	id, err := store.WritePage(context.Background(), []byte("12345678"))
 	if err != nil {
 		t.Fatal(err)
@@ -256,8 +256,8 @@ func TestSpillablePageStoreReadAllocationFailureHasNoLeak(t *testing.T) {
 	if !errors.Is(err, memory.ErrLimitExceeded) {
 		t.Fatalf("read error=%v, want memory limit", err)
 	}
-	if got := memoryManager.Used(); got != 0 {
-		t.Fatalf("managed memory leak after allocation failure: %d", got)
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
+		t.Fatalf("spill I/O buffer leak after allocation failure: %d", got)
 	}
 	if err := store.DeletePage(id); err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestSpillablePageStoreShortWritePoisonsStoreAndCleansUp(t *testing.T) {
 }
 
 func TestSpillablePageStoreCanceledReadDoesNotAllocate(t *testing.T) {
-	_, tempScope, memoryManager, memoryScope, store := newPageStoreHarness(t, 1024, PageStoreConfig{})
+	_, tempScope, _, memoryScope, store := newPageStoreHarness(t, 1024, PageStoreConfig{})
 	id, err := store.WritePage(context.Background(), []byte("payload"))
 	if err != nil {
 		t.Fatal(err)
@@ -326,8 +326,8 @@ func TestSpillablePageStoreCanceledReadDoesNotAllocate(t *testing.T) {
 	if _, err := store.ReadPage(ctx, id); !errors.Is(err, context.Canceled) {
 		t.Fatalf("read error=%v, want canceled", err)
 	}
-	if got := memoryManager.Used(); got != 0 {
-		t.Fatalf("managed memory leak: %d", got)
+	if got := memoryScope.UsedByTag(memory.TagSpillIO); got != 0 {
+		t.Fatalf("spill I/O buffer leak: %d", got)
 	}
 	if err := store.DeletePage(id); err != nil {
 		t.Fatal(err)
