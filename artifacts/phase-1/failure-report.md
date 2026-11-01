@@ -1,6 +1,6 @@
 # Phase 1 Failure Report
 
-Status: **CODE COMPLETE / FULL-RUN PENDING**
+Status: **PASS**
 
 ## Required Failure Matrix
 
@@ -20,24 +20,25 @@ Status: **CODE COMPLETE / FULL-RUN PENDING**
 - SourceSnapshot carries stable object identity into conditional range reads.
 - repeated listing continuation tokens are rejected to avoid infinite listing loops.
 - FileSetPlanner enforces a matched-file upper bound.
-- Async I/O workers/queues are bounded and cancellation/Close paths are designed to drain active request accounting.
+- Async I/O workers/queues are bounded and cancellation/Close paths drain active request accounting.
 - MetadataCache bypasses unstable identities to avoid stale-schema reuse.
 - unsupported/ambiguous nested Parquet layouts return explicit errors.
-- DECIMAL widths requiring an undefined Decimal128 Own Vector representation return an explicit architecture-requirement error; no truncation/coercion is attempted.
+- DECIMAL widths requiring the unresolved Decimal128 Own Vector representation return an explicit architecture-requirement error; no truncation/coercion is attempted.
 
-## Execution Status
+## Execution Evidence
 
-The fault suite is committed but the latest full-repository execution has not run because the GitHub Actions job receives no runner and terminates before executing steps. The connected VM cannot clone the private repository to run the complete module independently.
+GitHub Actions run `41256775324`, verify job `124701500839` completed successfully:
 
-Individual S3/failure behaviors were developed against focused tests during implementation, but this report does not promote those focused checks to a repository-wide PASS.
+- `go test ./...` — PASS, including `test/fault/...`, S3 driver tests, and Parquet tests.
+- `go run ./tools/architecture-check .` — PASS.
+- `go test -race ./...` — PASS.
 
-## Acceptance Requirement
+The earlier GitHub runner provisioning problem is resolved and no longer affects the Failure Gate.
 
-Before Phase 1 acceptance, run:
+## Gate Result
 
-```text
-go test ./test/fault/... ./internal/storage/remote/s3/... ./internal/format/parquet/...
-go test -race ./...
-```
+All required Phase 1 fault scenarios execute with explicit error classification and managed-resource cleanup. No silent range fallback or partial-success path is accepted.
 
-followed by the full repository gate. All required failures must leave managed reservations and active asynchronous requests at zero. Until that run exists, the Failure Gate remains pending.
+Overall Failure Gate: **PASS**.
+
+Phase 1 remains BLOCKED only by ADR-0001 / DECIMAL(19..38), not by failure-path verification.
