@@ -14,6 +14,7 @@ import (
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/export"
 	csvformat "github.com/steamwo/fssql/internal/format/csv"
 	"github.com/steamwo/fssql/internal/storage/remote"
@@ -22,20 +23,20 @@ import (
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-// protocolS3Server 提供 interop 测试所需的最小 S3 range-read + multipart-write 语义。
+// protocolS3Server 实现 interop 测试实际需要的 S3 Range Read 与 Multipart Write。
 type protocolS3Server struct {
 	mu sync.Mutex
-	// objects 保存已经提交的对象；key 使用 bucket/key 形式。
+	// objects 保存已提交对象，key 使用 bucket/object 形式。
 	objects map[string][]byte
-	// uploads 保存 multipart upload 的 part payload。
+	// uploads 保存 uploadID -> partNumber -> payload。
 	uploads map[string]map[int][]byte
-	// uploadKeys 保存 uploadID 对应的 bucket/key。
+	// uploadKeys 保存 uploadID 对应的目标对象。
 	uploadKeys map[string]string
-	// nextUpload 生成稳定 upload ID。
+	// nextUpload 生成稳定测试 uploadID。
 	nextUpload int
 }
 
-// handler 实现 Phase 4 协议转换测试实际经过的 S3 HTTP 请求。
+// handler 处理 S3 adapter 发出的真实 HTTP 请求。
 func (s *protocolS3Server) handler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -119,16 +120,16 @@ func (s *protocolS3Server) handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// protocolSFTPSession 是 interop 测试使用的共享内存 SFTP session，同时实现读写扩展。
-type protocolSFTPSession struct {
-	// store 在不同 pool session 之间共享远端对象。
-	store *protocolSFTPStore
-}
-
-// protocolSFTPStore 保存 SFTP endpoint 的对象与固定 mtime。
+// protocolSFTPStore 保存测试 SFTP endpoint 的共享对象状态。
 type protocolSFTPStore struct {
 	mu    sync.Mutex
 	files map[string][]byte
+}
+
+// protocolSFTPSession 同时实现只读 Session 与 WritableSession。
+type protocolSFTPSession struct {
+	// store 在不同 pool lease 间共享。
+	store *protocolSFTPStore
 }
 
 func (s *protocolSFTPSession) Stat(_ context.Context, path string) (sftp.FileInfo, error) {
@@ -191,12 +192,12 @@ func newProtocolSFTPDriver(t *testing.T, store *protocolSFTPStore) (*sftp.Driver
 	}))
 	driver, err := sftp.NewDriver(key, manager, 2)
 	if err != nil {
-		manager.Close()
+		_ = manager.Close()
 		t.Fatal(err)
 	}
 	pool, err := manager.Pool(key)
 	if err != nil {
-		manager.Close()
+		_ = manager.Close()
 		t.Fatal(err)
 	}
 	return driver, manager, pool
@@ -207,14 +208,8 @@ func newProtocolS3Driver(t *testing.T, state *protocolS3Server) (*s3.Driver, *ht
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(state.handler))
 	driver, err := s3.NewDriver(s3.Config{
-		Endpoint:          server.URL,
-		Region:            "test-region",
-		ForcePathStyle:    true,
-		AllowInsecureHTTP: true,
-		CredentialScope:   "scope",
-		CredentialVersion: "v1",
-		SecurityProfile:   "strict",
-		MaxRetries:        1,
+		Endpoint: server.URL, Region: "test-region", ForcePathStyle: true, AllowInsecureHTTP: true,
+		CredentialScope: "scope", CredentialVersion: "v1", SecurityProfile: "strict", MaxRetries: 1,
 	}, s3.Credentials{AccessKey: "access", SecretKey: "secret"}, nil)
 	if err != nil {
 		server.Close()
@@ -226,11 +221,10 @@ func newProtocolS3Driver(t *testing.T, state *protocolS3Server) (*s3.Driver, *ht
 // protocolSchema 返回转换测试的固定 Own Vector schema。
 func protocolSchema() ([]types.LogicalType, []export.Column) {
 	typesOnly := []types.LogicalType{{ID: types.Integer}, {ID: types.Varchar}}
-	columns := []export.Column{{Name: "id", Type: typesOnly[0]}, {Name: "name", Type: typesOnly[1]}}
-	return typesOnly, columns
+	return typesOnly, []export.Column{{Name: "id", Type: typesOnly[0]}, {Name: "name", Type: typesOnly[1]}}
 }
 
-// decodeRemoteCSV 使用真实 VFS driver 的 Stat/ReadRange 后直接解码进 Own DataChunk。
+// decodeRemoteCSV 使用真实 VFS driver 的 Stat/ReadRange 后直接解码到 Own DataChunk。
 func decodeRemoteCSV(t *testing.T, driver vfs.Driver, uri vfs.URI, scope *memory.Scope, bm *memory.BufferManager) *vector.DataChunk {
 	t.Helper()
 	info, err := driver.Stat(context.Background(), uri)
@@ -254,7 +248,7 @@ func decodeRemoteCSV(t *testing.T, driver vfs.Driver, uri vfs.URI, scope *memory
 	return chunk
 }
 
-// writeProtocolCSV 写一个 DataChunk 到真实 FileWriterFactory，验证 Format → VFS 组合而不绕过 WriterPool。
+// writeProtocolCSV 通过真实 FileWriterFactory 与 WriterPool 写一个 DataChunk。
 func writeProtocolCSV(t *testing.T, registry *vfs.Registry, uri vfs.URI, chunk *vector.DataChunk, scope *memory.Scope, bm *memory.BufferManager) {
 	t.Helper()
 	_, columns := protocolSchema()
@@ -262,7 +256,7 @@ func writeProtocolCSV(t *testing.T, registry *vfs.Registry, uri vfs.URI, chunk *
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory, err := export.NewFileWriterFactory(export.FileWriterConfig{Schema: columns, Format: export.FormatCSV, Compression: "identity", CSV: export.CSVWriteOptions{}}, registry, scope, bm, pool)
+	factory, err := export.NewFileWriterFactory(export.FileWriterConfig{Schema: columns, Format: export.FormatCSV, Compression: "identity"}, registry, scope, bm, pool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -291,8 +285,7 @@ func TestS3ToSFTPProtocolConversion(t *testing.T) {
 	sftpDriver, sftpManager, sftpPool := newProtocolSFTPDriver(t, sftpStore)
 	defer sftpManager.Close()
 
-	mm := memory.NewManager(32 << 20)
-	scope := mm.NewScope()
+	scope := memory.NewManager(32 << 20).NewScope()
 	bm := memory.NewBufferManager(nil)
 	source, _ := vfs.ParseURI("s3://bucket/input/data.csv")
 	chunk := decodeRemoteCSV(t, s3Driver, source, scope, bm)
@@ -308,12 +301,9 @@ func TestS3ToSFTPProtocolConversion(t *testing.T) {
 	sftpStore.mu.Lock()
 	got := string(sftpStore.files["/out/data.csv"])
 	sftpStore.mu.Unlock()
-	if got != input {
-		t.Fatalf("S3->SFTP output=%q", got)
-	}
 	_, leased, _ := sftpPool.Stats()
-	if leased != 0 || scope.Used() != 0 {
-		t.Fatalf("S3->SFTP leak leased=%d memory=%d", leased, scope.Used())
+	if got != input || leased != 0 || scope.Used() != 0 {
+		t.Fatalf("S3->SFTP output=%q leased=%d memory=%d", got, leased, scope.Used())
 	}
 }
 
@@ -326,8 +316,7 @@ func TestSFTPToS3ProtocolConversion(t *testing.T) {
 	s3Driver, s3Server := newProtocolS3Driver(t, s3State)
 	defer s3Server.Close()
 
-	mm := memory.NewManager(32 << 20)
-	scope := mm.NewScope()
+	scope := memory.NewManager(32 << 20).NewScope()
 	bm := memory.NewBufferManager(nil)
 	source, _ := vfs.ParseURI("sftp://host:22/input/data.csv")
 	chunk := decodeRemoteCSV(t, sftpDriver, source, scope, bm)
@@ -344,11 +333,8 @@ func TestSFTPToS3ProtocolConversion(t *testing.T) {
 	got := string(s3State.objects["bucket/out/data.csv"])
 	remainingUploads := len(s3State.uploads)
 	s3State.mu.Unlock()
-	if got != input {
-		t.Fatalf("SFTP->S3 output=%q", got)
-	}
 	_, leased, _ := sftpPool.Stats()
-	if leased != 0 || remainingUploads != 0 || scope.Used() != 0 {
-		t.Fatalf("SFTP->S3 leak leased=%d multipart=%d memory=%d", leased, remainingUploads, scope.Used())
+	if got != input || leased != 0 || remainingUploads != 0 || scope.Used() != 0 {
+		t.Fatalf("SFTP->S3 output=%q leased=%d multipart=%d memory=%d", got, leased, remainingUploads, scope.Used())
 	}
 }
