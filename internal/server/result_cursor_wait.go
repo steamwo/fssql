@@ -30,12 +30,12 @@ func (c *ResultCursor) WaitDrained(ctx context.Context) error {
 	return nil
 }
 
-// WaitConsumerReleased 等待所有由 Next 交付给 consumer 的 chunk 完成 ReleaseChunk。
+// WaitConsumerReleased 等待所有由 Next 交付给 consumer 的固定容量 in-flight chunk 完成 ReleaseChunk。
 // QueryService 在发布任何 terminal state 前必须调用它，保证 Managed Buffer reservation 已真正归零。
 func (c *ResultCursor) WaitConsumerReleased(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.consumerOwned == 0 && c.releasing == 0 {
+	if c.inflightCount == 0 {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
@@ -43,7 +43,7 @@ func (c *ResultCursor) WaitConsumerReleased(ctx context.Context) error {
 	}
 	stop := c.broadcastOnCancel(ctx)
 	defer stop()
-	for c.consumerOwned > 0 || c.releasing > 0 {
+	for c.inflightCount > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
