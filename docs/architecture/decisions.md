@@ -86,6 +86,9 @@ Capabilities 至少：
 - StableETag
 - VersionedObject
 - ServerSideList
+- IncompleteWriteRecovery
+
+`IncompleteWriteRecovery` 按 ADR-0004 定义：driver 可在调用方独占的 staging URI scope 中发现并清理跨进程遗留的隐藏远端写 ownership；protocol token 不进入 Export/core ABI。
 
 禁止 silent whole-file fallback。
 
@@ -122,6 +125,8 @@ Status: FROZEN
 - ExportCoordinator + Manifest + WriterPool + Committer。
 - file-level resume。
 - incomplete file redo。
+- resumable MultiFile / Partitioned 必须使用 ADR-0003 定义的 Stable Export SegmentPlan；segment identity 属于 Export planner，不进入通用 Pipeline/Scheduler ABI。
+- crash-resumable remote staging 按 ADR-0004：在 redo incomplete files 前必须完成 job-exclusive staging scope 的 incomplete-write recovery；recovery 失败则 Resume 必须停止。
 - S3 不伪造目录 rename。
 - staging + final manifest/success marker 定义 dataset commit。
 

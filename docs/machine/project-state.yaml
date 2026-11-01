@@ -8,7 +8,7 @@ phase_status:
   phase_1: ACCEPTED
   phase_2: ACCEPTED
   phase_3: ACCEPTED
-  phase_4: IN_PROGRESS
+  phase_4: ACCEPTED
   phase_5: LOCKED
   phase_6: LOCKED
 rules:

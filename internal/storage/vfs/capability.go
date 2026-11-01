@@ -19,22 +19,25 @@ const (
 	CapabilityStableETag
 	CapabilityVersionedObject
 	CapabilityServerSideList
+	// CapabilityIncompleteWriteRecovery 表示驱动可在 job 独占 staging scope 内发现并清理跨进程遗留的隐藏写 ownership。
+	CapabilityIncompleteWriteRecovery
 )
 
 // Compatibility aliases keep the Phase 1 storage implementations on one capability model.
 const (
-	RandomRead         = CapabilityRandomRead
-	ParallelRandomRead = CapabilityParallelRandomRead
-	StreamingRead      = CapabilityStreamingRead
-	StreamingWrite     = CapabilityStreamingWrite
-	RandomWrite        = CapabilityRandomWrite
-	MultipartWrite     = CapabilityMultipartWrite
-	AtomicRename       = CapabilityAtomicRename
-	ConditionalRead    = CapabilityConditionalRead
-	ConditionalWrite   = CapabilityConditionalWrite
-	StableETag         = CapabilityStableETag
-	VersionedObject    = CapabilityVersionedObject
-	ServerSideList     = CapabilityServerSideList
+	RandomRead              = CapabilityRandomRead
+	ParallelRandomRead      = CapabilityParallelRandomRead
+	StreamingRead           = CapabilityStreamingRead
+	StreamingWrite          = CapabilityStreamingWrite
+	RandomWrite             = CapabilityRandomWrite
+	MultipartWrite          = CapabilityMultipartWrite
+	AtomicRename            = CapabilityAtomicRename
+	ConditionalRead         = CapabilityConditionalRead
+	ConditionalWrite        = CapabilityConditionalWrite
+	StableETag              = CapabilityStableETag
+	VersionedObject         = CapabilityVersionedObject
+	ServerSideList          = CapabilityServerSideList
+	IncompleteWriteRecovery = CapabilityIncompleteWriteRecovery
 )
 
 // CapabilitySet is a compact immutable-style bitset used to advertise VFS capabilities.

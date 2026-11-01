@@ -48,6 +48,28 @@ case "$phase" in
     go test -run '^$' -bench 'BenchmarkPoolAcquireRelease' -benchmem -benchtime=100ms ./internal/storage/remote/sftp
     go run ./cmd/phase3-metrics >/dev/null
     ;;
+  phase-4|4)
+    # Phase 4 全仓 gate：不得用 targeted PASS 替代普通/race/vet/架构检查。
+    go test ./...
+    go test -race ./...
+    go vet ./...
+    go run ./tools/architecture-check .
+
+    # Export/VFS/remote packages 分别重跑，固定 Manifest/Resume/Commit/WriterLimit/协议恢复 failure matrix。
+    go test -count=1 ./internal/export
+    go test -count=1 ./internal/storage/vfs
+    go test -count=1 ./internal/storage/remote/s3
+    go test -count=1 ./internal/storage/remote/sftp
+
+    # P4-D2 必须真实经过 S3/SFTP driver、CSV decode、Own DataChunk 与 Export writer。
+    go test -count=1 ./test/interop/phase4 -run 'Test(S3ToSFTP|SFTPToS3)ProtocolConversion$'
+
+    # P4-D3 DuckDB reader interop：Python module 或 CLI 至少一个必须存在；PyArrow 仅作为可选附加证据。
+    python3 ./test/interop/phase4/run.py
+
+    # P4-D4/P4-D9/P4-D3 的性能关键路径只记录本机 baseline，不作为跨机器绝对阈值。
+    go test -run '^$' -bench 'Benchmark(WriterPoolAcquireRelease|PartitionRouting2048x64|ParquetWriterInteger1024)$' -benchmem -benchtime=100ms ./internal/export
+    ;;
   *)
     echo "unsupported acceptance phase: $phase" >&2
     exit 2
