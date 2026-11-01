@@ -156,6 +156,9 @@ func manifestJSONUpperBound(manifest *Manifest) (int64, error) {
 		manifest.JobID, manifest.QueryFingerprint, manifest.SourceSnapshot.Fingerprint,
 		manifest.Destination.URI, manifest.Format, manifest.Compression, manifest.Consistency,
 	}
+	if manifest.SegmentPlan != nil {
+		stringsToCount = append(stringsToCount, manifest.SegmentPlan.Strategy, manifest.SegmentPlan.PlannerFingerprint)
+	}
 	for _, entry := range manifest.FileStates {
 		if total > math.MaxInt64-256 {
 			return 0, errors.New("export: manifest size overflow")
