@@ -109,17 +109,17 @@ func newMultipartTestDriver(t *testing.T, state *multipartTestServer) (*Driver, 
 	return d, server
 }
 
-// TestS3WriteCapabilities 只允许声明已实现能力；ConditionalWrite/AtomicRename 不得提前暴露。
+// TestS3WriteCapabilities 只允许声明已真实实现的能力；ConditionalWrite 已实现，AtomicRename 仍必须保持 false。
 func TestS3WriteCapabilities(t *testing.T) {
 	state := &multipartTestServer{}
 	d, server := newMultipartTestDriver(t, state)
 	defer server.Close()
 	caps := d.StaticCapabilities()
-	if !caps.Has(vfs.StreamingWrite) || !caps.Has(vfs.MultipartWrite) {
-		t.Fatalf("missing write capabilities: %#x", uint64(caps))
+	if !caps.Has(vfs.StreamingWrite) || !caps.Has(vfs.MultipartWrite) || !caps.Has(vfs.ConditionalWrite) {
+		t.Fatalf("missing implemented write capabilities: %#x", uint64(caps))
 	}
-	if caps.Has(vfs.ConditionalWrite) || caps.Has(vfs.AtomicRename) {
-		t.Fatalf("advertised unimplemented commit capability: %#x", uint64(caps))
+	if caps.Has(vfs.AtomicRename) {
+		t.Fatalf("advertised unimplemented AtomicRename capability: %#x", uint64(caps))
 	}
 }
 
