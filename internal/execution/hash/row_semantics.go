@@ -175,3 +175,37 @@ func (c *TupleDataCollection) Truncate(count int) error {
 	c.used = int(binary.LittleEndian.Uint32(c.offsets.Bytes()[count*4 : count*4+4]))
 	return nil
 }
+
+func EqualProjectedRows(aLayout RowLayout, a []byte, aColumns []int, bLayout RowLayout, b []byte, bColumns []int, nulls NullEquality) (bool, error) {
+	if len(aColumns) != len(bColumns) {
+		return false, errors.New("projected row key count mismatch")
+	}
+	for i := range aColumns {
+		ac, bc := aColumns[i], bColumns[i]
+		if ac < 0 || ac >= len(aLayout.Columns) || bc < 0 || bc >= len(bLayout.Columns) {
+			return false, errors.New("projected row key index out of range")
+		}
+		if aLayout.Columns[ac].Type.ID != bLayout.Columns[bc].Type.ID || aLayout.Columns[ac].Type.Decimal != bLayout.Columns[bc].Type.Decimal {
+			return false, errors.New("projected row key type mismatch")
+		}
+		ad, av, err := aLayout.ColumnData(a, ac)
+		if err != nil {
+			return false, err
+		}
+		bd, bv, err := bLayout.ColumnData(b, bc)
+		if err != nil {
+			return false, err
+		}
+		if !av || !bv {
+			if !av && !bv && nulls == NullsEqual {
+				continue
+			}
+			return false, nil
+		}
+		eq, err := equalEncoded(aLayout.Columns[ac], ad, bd)
+		if err != nil || !eq {
+			return eq, err
+		}
+	}
+	return true, nil
+}
