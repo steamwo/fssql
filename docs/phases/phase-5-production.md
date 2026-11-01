@@ -11,7 +11,7 @@
 - QueryRegistry
 - QueryHandle
 - ResultCursor
-- HTTP/gRPC Server
+- HTTP Server（v1 required；gRPC 为 optional future adapter，进入 Stable 前必须单独 ADR，见 ADR-0005）
 - ResourceGroup
 - Global Resource Scheduler
 - Security Boundary
