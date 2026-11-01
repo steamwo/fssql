@@ -69,7 +69,7 @@ func (w *JSONWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk) er
 	}
 	for row := 0; row < chunk.Cardinality; row++ {
 		if w.opts.Mode == JSONModeArray && w.rows > 0 {
-			if err := w.out.WriteByte(ctx, ','); err != nil {
+			if err := w.out.WriteContextByte(ctx, ','); err != nil {
 				return err
 			}
 		}
@@ -77,7 +77,7 @@ func (w *JSONWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk) er
 			return fmt.Errorf("export: JSON row %d: %w", row+1, err)
 		}
 		if w.opts.Mode == JSONModeNDJSON {
-			if err := w.out.WriteByte(ctx, '\n'); err != nil {
+			if err := w.out.WriteContextByte(ctx, '\n'); err != nil {
 				return err
 			}
 		}
@@ -107,7 +107,7 @@ func (w *JSONWriter) Close(ctx context.Context) (WriteResult, error) {
 		return WriteResult{}, err
 	}
 	if w.opts.Mode == JSONModeArray {
-		if err := w.out.WriteByte(ctx, ']'); err != nil {
+		if err := w.out.WriteContextByte(ctx, ']'); err != nil {
 			_ = w.out.Abort(context.Background())
 			return WriteResult{}, err
 		}
@@ -129,31 +129,31 @@ func (w *JSONWriter) ensureStarted(ctx context.Context) error {
 	}
 	w.started = true
 	if w.opts.Mode == JSONModeArray {
-		return w.out.WriteByte(ctx, '[')
+		return w.out.WriteContextByte(ctx, '[')
 	}
 	return nil
 }
 
 // writeObject 按 schema 顺序写 object，保持输出确定性。
 func (w *JSONWriter) writeObject(ctx context.Context, chunk *vector.DataChunk, row int) error {
-	if err := w.out.WriteByte(ctx, '{'); err != nil {
+	if err := w.out.WriteContextByte(ctx, '{'); err != nil {
 		return err
 	}
 	for col := range w.schema {
 		if col > 0 {
-			if err := w.out.WriteByte(ctx, ','); err != nil {
+			if err := w.out.WriteContextByte(ctx, ','); err != nil {
 				return err
 			}
 		}
 		if err := writeJSONString(ctx, w.out, w.schema[col].Name); err != nil {
 			return err
 		}
-		if err := w.out.WriteByte(ctx, ':'); err != nil {
+		if err := w.out.WriteContextByte(ctx, ':'); err != nil {
 			return err
 		}
 		if err := writeJSONValue(ctx, w.out, chunk.Columns[col], w.schema[col].Type, row); err != nil {
 			return err
 		}
 	}
-	return w.out.WriteByte(ctx, '}')
+	return w.out.WriteContextByte(ctx, '}')
 }

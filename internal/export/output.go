@@ -75,8 +75,8 @@ func (o *managedOutput) Write(ctx context.Context, p []byte) error {
 	return nil
 }
 
-// WriteByte 写入一个字节，不产生临时堆切片。
-func (o *managedOutput) WriteByte(ctx context.Context, b byte) error {
+// WriteContextByte 写入一个字节并显式携带调用上下文，不冒充 io.ByteWriter。
+func (o *managedOutput) WriteContextByte(ctx context.Context, b byte) error {
 	var one [1]byte
 	one[0] = b
 	return o.Write(ctx, one[:])

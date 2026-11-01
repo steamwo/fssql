@@ -15,7 +15,7 @@ import (
 // valueOutput 是值编码器需要的最小流式输出接口。
 type valueOutput interface {
 	Write(context.Context, []byte) error
-	WriteByte(context.Context, byte) error
+	WriteContextByte(context.Context, byte) error
 	WriteString(context.Context, string) error
 }
 
@@ -73,36 +73,36 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 		v, _ := vec.Int32(row)
 		t := time.Unix(int64(v)*86400, 0).UTC()
 		buf := t.AppendFormat(tmp[:0], "2006-01-02")
-		if err := out.WriteByte(ctx, '"'); err != nil {
+		if err := out.WriteContextByte(ctx, '"'); err != nil {
 			return err
 		}
 		if err := out.Write(ctx, buf); err != nil {
 			return err
 		}
-		return out.WriteByte(ctx, '"')
+		return out.WriteContextByte(ctx, '"')
 	case types.TimestampType:
 		v, _ := vec.Int64(row)
 		t := time.UnixMicro(v).UTC()
 		buf := t.AppendFormat(tmp[:0], "2006-01-02 15:04:05.999999")
-		if err := out.WriteByte(ctx, '"'); err != nil {
+		if err := out.WriteContextByte(ctx, '"'); err != nil {
 			return err
 		}
 		if err := out.Write(ctx, buf); err != nil {
 			return err
 		}
-		return out.WriteByte(ctx, '"')
+		return out.WriteContextByte(ctx, '"')
 	case types.List:
 		entry, _ := vec.ListEntry(row)
 		children := vec.Children()
 		if typ.Child == nil || len(children) != 1 {
 			return fmt.Errorf("export: malformed LIST vector")
 		}
-		if err := out.WriteByte(ctx, '['); err != nil {
+		if err := out.WriteContextByte(ctx, '['); err != nil {
 			return err
 		}
 		for i := uint32(0); i < entry.Length; i++ {
 			if i != 0 {
-				if err := out.WriteByte(ctx, ','); err != nil {
+				if err := out.WriteContextByte(ctx, ','); err != nil {
 					return err
 				}
 			}
@@ -110,32 +110,32 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 				return err
 			}
 		}
-		return out.WriteByte(ctx, ']')
+		return out.WriteContextByte(ctx, ']')
 	case types.Struct:
 		children := vec.Children()
 		if len(children) != len(typ.Fields) {
 			return fmt.Errorf("export: malformed STRUCT vector")
 		}
-		if err := out.WriteByte(ctx, '{'); err != nil {
+		if err := out.WriteContextByte(ctx, '{'); err != nil {
 			return err
 		}
 		for i := range typ.Fields {
 			if i != 0 {
-				if err := out.WriteByte(ctx, ','); err != nil {
+				if err := out.WriteContextByte(ctx, ','); err != nil {
 					return err
 				}
 			}
 			if err := writeJSONString(ctx, out, typ.Fields[i].Name); err != nil {
 				return err
 			}
-			if err := out.WriteByte(ctx, ':'); err != nil {
+			if err := out.WriteContextByte(ctx, ':'); err != nil {
 				return err
 			}
 			if err := writeJSONValue(ctx, out, children[i], typ.Fields[i].Type, row); err != nil {
 				return err
 			}
 		}
-		return out.WriteByte(ctx, '}')
+		return out.WriteContextByte(ctx, '}')
 	default:
 		return fmt.Errorf("export: unsupported logical type %d", typ.ID)
 	}
@@ -143,7 +143,7 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 
 // writeJSONString 流式转义 JSON 字符串，仅对 JSON 必须字符做转义并原样保留 UTF-8。
 func writeJSONString(ctx context.Context, out valueOutput, s string) error {
-	if err := out.WriteByte(ctx, '"'); err != nil {
+	if err := out.WriteContextByte(ctx, '"'); err != nil {
 		return err
 	}
 	start := 0
@@ -201,7 +201,7 @@ func writeJSONString(ctx context.Context, out valueOutput, s string) error {
 			return err
 		}
 	}
-	return out.WriteByte(ctx, '"')
+	return out.WriteContextByte(ctx, '"')
 }
 
 // appendInt128 将 two's-complement Int128 追加为十进制文本，不使用 big.Int。

@@ -83,7 +83,7 @@ func (w *CSVWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk) err
 	for row := 0; row < chunk.Cardinality; row++ {
 		for col := range w.schema {
 			if col != 0 {
-				if err := w.out.WriteByte(ctx, w.opts.Delimiter); err != nil {
+				if err := w.out.WriteContextByte(ctx, w.opts.Delimiter); err != nil {
 					return err
 				}
 			}
@@ -140,7 +140,7 @@ func (w *CSVWriter) ensureStarted(ctx context.Context) error {
 	}
 	for i := range w.schema {
 		if i != 0 {
-			if err := w.out.WriteByte(ctx, w.opts.Delimiter); err != nil {
+			if err := w.out.WriteContextByte(ctx, w.opts.Delimiter); err != nil {
 				return err
 			}
 		}
@@ -161,14 +161,14 @@ func (w *CSVWriter) writeField(ctx context.Context, vec *vector.Vector, typ type
 		return w.writeStringField(ctx, s, w.opts.NullString == "" && s == "")
 	}
 	if typ.ID == types.List || typ.ID == types.Struct {
-		if err := w.out.WriteByte(ctx, w.opts.Quote); err != nil {
+		if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
 			return err
 		}
 		quoted := csvQuotedOutput{out: w.out, quote: w.opts.Quote}
 		if err := writeDuckDBTextValue(ctx, &quoted, vec, typ, row); err != nil {
 			return err
 		}
-		return w.out.WriteByte(ctx, w.opts.Quote)
+		return w.out.WriteContextByte(ctx, w.opts.Quote)
 	}
 	return writeCSVScalar(ctx, w.out, vec, typ, row)
 }
@@ -179,7 +179,7 @@ func (w *CSVWriter) writeStringField(ctx context.Context, value string, forceQuo
 	if !needsQuote {
 		return w.out.WriteString(ctx, value)
 	}
-	if err := w.out.WriteByte(ctx, w.opts.Quote); err != nil {
+	if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
 		return err
 	}
 	for start := 0; ; {
@@ -194,15 +194,15 @@ func (w *CSVWriter) writeStringField(ctx context.Context, value string, forceQuo
 		if err := w.out.WriteString(ctx, value[start:i]); err != nil {
 			return err
 		}
-		if err := w.out.WriteByte(ctx, w.opts.Quote); err != nil {
+		if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
 			return err
 		}
-		if err := w.out.WriteByte(ctx, w.opts.Quote); err != nil {
+		if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
 			return err
 		}
 		start = i + 1
 	}
-	return w.out.WriteByte(ctx, w.opts.Quote)
+	return w.out.WriteContextByte(ctx, w.opts.Quote)
 }
 
 func writeCSVScalar(ctx context.Context, out valueOutput, vec *vector.Vector, typ types.LogicalType, row int) error {
@@ -263,7 +263,7 @@ type csvQuotedOutput struct {
 
 func (q *csvQuotedOutput) Write(ctx context.Context, p []byte) error {
 	for _, b := range p {
-		if err := q.WriteByte(ctx, b); err != nil {
+		if err := q.WriteContextByte(ctx, b); err != nil {
 			return err
 		}
 	}
@@ -271,18 +271,18 @@ func (q *csvQuotedOutput) Write(ctx context.Context, p []byte) error {
 }
 func (q *csvQuotedOutput) WriteString(ctx context.Context, s string) error {
 	for i := 0; i < len(s); i++ {
-		if err := q.WriteByte(ctx, s[i]); err != nil {
+		if err := q.WriteContextByte(ctx, s[i]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
-func (q *csvQuotedOutput) WriteByte(ctx context.Context, b byte) error {
-	if err := q.out.WriteByte(ctx, b); err != nil {
+func (q *csvQuotedOutput) WriteContextByte(ctx context.Context, b byte) error {
+	if err := q.out.WriteContextByte(ctx, b); err != nil {
 		return err
 	}
 	if b == q.quote {
-		return q.out.WriteByte(ctx, b)
+		return q.out.WriteContextByte(ctx, b)
 	}
 	return nil
 }
@@ -294,20 +294,20 @@ func writeDuckDBTextValue(ctx context.Context, out valueOutput, vec *vector.Vect
 	}
 	if typ.ID == types.Varchar {
 		s, _ := vec.String(row)
-		if err := out.WriteByte(ctx, '\''); err != nil {
+		if err := out.WriteContextByte(ctx, '\''); err != nil {
 			return err
 		}
 		for i := 0; i < len(s); i++ {
 			if s[i] == '\'' {
-				if err := out.WriteByte(ctx, '\''); err != nil {
+				if err := out.WriteContextByte(ctx, '\''); err != nil {
 					return err
 				}
 			}
-			if err := out.WriteByte(ctx, s[i]); err != nil {
+			if err := out.WriteContextByte(ctx, s[i]); err != nil {
 				return err
 			}
 		}
-		return out.WriteByte(ctx, '\'')
+		return out.WriteContextByte(ctx, '\'')
 	}
 	if typ.ID == types.List {
 		entry, _ := vec.ListEntry(row)
@@ -315,7 +315,7 @@ func writeDuckDBTextValue(ctx context.Context, out valueOutput, vec *vector.Vect
 		if typ.Child == nil || len(children) != 1 {
 			return fmt.Errorf("malformed LIST vector")
 		}
-		if err := out.WriteByte(ctx, '['); err != nil {
+		if err := out.WriteContextByte(ctx, '['); err != nil {
 			return err
 		}
 		for i := uint32(0); i < entry.Length; i++ {
@@ -328,14 +328,14 @@ func writeDuckDBTextValue(ctx context.Context, out valueOutput, vec *vector.Vect
 				return err
 			}
 		}
-		return out.WriteByte(ctx, ']')
+		return out.WriteContextByte(ctx, ']')
 	}
 	if typ.ID == types.Struct {
 		children := vec.Children()
 		if len(children) != len(typ.Fields) {
 			return fmt.Errorf("malformed STRUCT vector")
 		}
-		if err := out.WriteByte(ctx, '{'); err != nil {
+		if err := out.WriteContextByte(ctx, '{'); err != nil {
 			return err
 		}
 		for i, f := range typ.Fields {
@@ -344,7 +344,7 @@ func writeDuckDBTextValue(ctx context.Context, out valueOutput, vec *vector.Vect
 					return err
 				}
 			}
-			if err := out.WriteByte(ctx, '\''); err != nil {
+			if err := out.WriteContextByte(ctx, '\''); err != nil {
 				return err
 			}
 			if err := out.WriteString(ctx, f.Name); err != nil {
@@ -357,16 +357,16 @@ func writeDuckDBTextValue(ctx context.Context, out valueOutput, vec *vector.Vect
 				return err
 			}
 		}
-		return out.WriteByte(ctx, '}')
+		return out.WriteContextByte(ctx, '}')
 	}
 	if typ.ID == types.DateType || typ.ID == types.TimestampType {
-		if err := out.WriteByte(ctx, '\''); err != nil {
+		if err := out.WriteContextByte(ctx, '\''); err != nil {
 			return err
 		}
 		if err := writeCSVScalar(ctx, out, vec, typ, row); err != nil {
 			return err
 		}
-		return out.WriteByte(ctx, '\'')
+		return out.WriteContextByte(ctx, '\'')
 	}
 	if typ.ID == types.Float {
 		v, _ := vec.Float32(row)
