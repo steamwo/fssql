@@ -320,8 +320,15 @@ func (s *QueryService) run(runtime *queryRuntime, sql string) {
 	s.finishRuntime(runtime, QuerySucceeded, nil)
 }
 
-// finishRuntime 发布 Query terminal state；Close/lifecycle 失败时保留 admission Lease，避免把泄漏伪装成已释放资源。
+// finishRuntime 在发布 terminal state 前等待所有 consumer-held result chunk 完成 Managed Buffer 释放。
+// Close/lifecycle 失败时保留 admission Lease，避免把 I-10 泄漏伪装成已释放资源。
 func (s *QueryService) finishRuntime(runtime *queryRuntime, target QueryState, terminalErr error) {
+	if err := runtime.cursor.WaitConsumerReleased(s.parent); err != nil {
+		runtime.mu.Lock()
+		runtime.coordinatorErr = fmt.Errorf("server: wait for consumer result ownership before %s: %w", target.String(), err)
+		runtime.mu.Unlock()
+		return
+	}
 	if err := runtime.handle.Finalize(target, terminalErr, time.Time{}); err != nil {
 		runtime.mu.Lock()
 		runtime.coordinatorErr = err
