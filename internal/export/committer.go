@@ -1,6 +1,7 @@
 package export
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/storage/vfs"
+)
+
+var (
+	// ErrCommitConflict 表示 final manifest 已存在但内容不是当前导出作业的 committed Manifest。
+	ErrCommitConflict = errors.New("export: final manifest conflicts with current job")
 )
 
 // CommitOptions 描述 dataset commit 的唯一公开控制点；FinalManifestURI 必须由调用方显式给出。
@@ -24,7 +30,7 @@ type Committer struct {
 	manifest *Manifest
 	// registry 保证 final manifest 仍经过 VFS capability gate。
 	registry *vfs.Registry
-	// scope/buffers 管理 final manifest 序列化记账和远端写缓冲。
+	// scope/buffers 管理 final manifest 序列化、reconciliation read 和远端写缓冲。
 	scope   *memory.Scope
 	buffers *memory.BufferManager
 	// finalURI 是调用方显式指定的最终 manifest 对象。
@@ -53,7 +59,7 @@ func NewCommitter(manifest *Manifest, registry *vfs.Registry, scope *memory.Scop
 	return &Committer{manifest: manifest, registry: registry, scope: scope, buffers: buffers, finalURI: finalURI}, nil
 }
 
-// Commit 条件创建 committed final manifest；任何写入失败都会 Abort 当前对象并把本地作业置为 FAILED 以供 Resume。
+// Commit 条件创建 committed final manifest；COMMITTING 重试会先尝试同一原子创建，冲突时再读取并核对既有 final manifest。
 func (c *Committer) Commit(ctx context.Context) error {
 	if c == nil || c.manifest == nil || c.registry == nil {
 		return errors.New("export: incomplete committer")
@@ -65,14 +71,14 @@ func (c *Committer) Commit(ctx context.Context) error {
 		// 同一进程内已确认 COMMITTED 时幂等返回，不重复触碰 final marker。
 		return nil
 	}
-	if c.manifest.ExportState != ExportStateWriting {
-		return fmt.Errorf("export: commit requires WRITING manifest, got %s", c.manifest.ExportState)
+	if c.manifest.ExportState != ExportStateWriting && c.manifest.ExportState != ExportStateCommitting {
+		return fmt.Errorf("export: commit requires WRITING/COMMITTING manifest, got %s", c.manifest.ExportState)
 	}
 	if !c.manifest.AllFilesComplete() {
 		return fmt.Errorf("%w: cannot commit incomplete dataset", ErrInvalidTransition)
 	}
 
-	// 先检查真实 endpoint capability，再改变 Manifest 状态；不允许通过普通 overwrite 模拟原子提交。
+	// 先检查真实 endpoint capability；不允许通过普通 overwrite 模拟原子提交。
 	_, caps, err := c.registry.WriteDriverFor(ctx, c.finalURI)
 	if err != nil {
 		return err
@@ -87,34 +93,70 @@ func (c *Committer) Commit(ctx context.Context) error {
 	}
 	defer reservation.Release()
 
-	if err := c.manifest.TransitionExport(ExportStateCommitting); err != nil {
-		return err
-	}
-	fail := func(cause error) error {
-		stateErr := c.manifest.TransitionExport(ExportStateFailed)
-		return errors.Join(cause, stateErr)
+	if c.manifest.ExportState == ExportStateWriting {
+		if err := c.manifest.TransitionExport(ExportStateCommitting); err != nil {
+			return err
+		}
 	}
 
 	handle, err := c.registry.OpenWrite(ctx, c.finalURI, vfs.WriteOptions{IfNoneMatch: true, Tag: memory.TagMetadata}, c.scope, c.buffers)
 	if err != nil {
-		return fail(err)
+		if errors.Is(err, vfs.ErrObjectChanged) {
+			return c.reconcileCommittedManifest(ctx, payload)
+		}
+		// 一旦进入 COMMITTING，任何远端结果不确定性都保持 COMMITTING，禁止错误回到数据重写阶段。
+		return err
 	}
 	if err := writeHandleAll(ctx, handle, payload); err != nil {
 		abortErr := handle.Abort(context.Background())
-		return fail(errors.Join(err, abortErr))
+		return errors.Join(err, abortErr)
 	}
 	identity, err := handle.Close(ctx)
 	if err != nil {
 		abortErr := handle.Abort(context.Background())
-		return fail(errors.Join(err, abortErr))
+		if errors.Is(err, vfs.ErrObjectChanged) && abortErr == nil {
+			return c.reconcileCommittedManifest(ctx, payload)
+		}
+		return errors.Join(err, abortErr)
 	}
 	if identity.Size != int64(len(payload)) {
-		return fail(fmt.Errorf("%w: final manifest size=%d want=%d", io.ErrShortWrite, identity.Size, len(payload)))
+		// Close 成功但返回 identity 不可信时不降级到 FAILED；读取最终对象决定是否真的提交成功。
+		return c.reconcileCommittedManifest(ctx, payload)
 	}
-	if err := c.manifest.TransitionExport(ExportStateCommitted); err != nil {
-		return err
+	return c.manifest.TransitionExport(ExportStateCommitted)
+}
+
+// reconcileCommittedManifest 读取已经存在的 final manifest；只有字节完全等于当前 committed payload 才确认 COMMITTED。
+func (c *Committer) reconcileCommittedManifest(ctx context.Context, expected []byte) error {
+	driver, caps, err := c.registry.WriteDriverFor(ctx, c.finalURI)
+	if err != nil {
+		return fmt.Errorf("%w: resolve final manifest driver: %v", ErrCommitRecoveryRequired, err)
 	}
-	return nil
+	if !caps.Has(vfs.RandomRead) {
+		return fmt.Errorf("%w: final manifest destination lacks RandomRead", ErrCommitRecoveryRequired)
+	}
+	info, err := driver.Stat(ctx, c.finalURI)
+	if err != nil {
+		return fmt.Errorf("%w: stat final manifest: %v", ErrCommitRecoveryRequired, err)
+	}
+	if info.Size != int64(len(expected)) || info.Size <= 0 {
+		return fmt.Errorf("%w: final manifest size=%d expected=%d", ErrCommitConflict, info.Size, len(expected))
+	}
+	result, err := driver.ReadRange(ctx, vfs.RangeRequest{
+		URI:      c.finalURI,
+		Offset:   0,
+		Length:   info.Size,
+		Expected: &info.Identity,
+		Tag:      memory.TagMetadata,
+	}, c.scope, c.buffers)
+	if err != nil {
+		return fmt.Errorf("%w: read final manifest: %v", ErrCommitRecoveryRequired, err)
+	}
+	defer result.Buffer.Release()
+	if !bytes.Equal(result.Buffer.Bytes(), expected) {
+		return ErrCommitConflict
+	}
+	return c.manifest.TransitionExport(ExportStateCommitted)
 }
 
 // marshalCommittedManifest 在普通 Go heap 序列化前先 Reserve Metadata 上界，满足 allocate-before-accounting 约束。
