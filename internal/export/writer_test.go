@@ -104,6 +104,34 @@ func TestWriterPoolFactoryAndCloseFailureReleaseEverything(t *testing.T) {
 	}
 }
 
+func TestPooledWriterTerminalStateRejectsFurtherUse(t *testing.T) {
+	mm := memory.NewManager(1024)
+	scope := mm.NewScope()
+	pool, _ := NewWriterPool(1, 64, scope)
+	w, err := pool.Acquire(context.Background(), func(context.Context) (FormatWriter, error) { return &stubFormatWriter{}, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteChunk(context.Background(), nil); !errors.Is(err, ErrWriterClosed) {
+		t.Fatalf("expected write after close rejection, got %v", err)
+	}
+	if err := w.Flush(context.Background()); !errors.Is(err, ErrWriterClosed) {
+		t.Fatalf("expected flush after close rejection, got %v", err)
+	}
+	if _, err := w.Close(context.Background()); !errors.Is(err, ErrWriterClosed) {
+		t.Fatalf("expected double close rejection, got %v", err)
+	}
+	if err := w.Abort(context.Background()); err != nil {
+		t.Fatalf("abort after terminal should be idempotent: %v", err)
+	}
+	if pool.Active() != 0 || scope.Used() != 0 {
+		t.Fatalf("terminal state leaked ownership: active=%d used=%d", pool.Active(), scope.Used())
+	}
+}
+
 func BenchmarkWriterPoolAcquireRelease(b *testing.B) {
 	mm := memory.NewManager(1 << 30)
 	scope := mm.NewScope()
