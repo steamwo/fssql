@@ -40,9 +40,12 @@ func NewVFSByteSink(ctx context.Context, registry *vfs.Registry, uri vfs.URI, op
 
 // Write 完整转发字节；short write 被硬失败，不允许格式层产生静默截断文件。
 func (s *VFSByteSink) Write(ctx context.Context, data []byte) (int, error) {
+	if s == nil {
+		return 0, ErrWriterClosed
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.terminal || s.handle == nil {
+	if s.terminal || s.handle == nil {
 		return 0, ErrWriterClosed
 	}
 	n, err := s.handle.Write(ctx, data)
@@ -58,12 +61,15 @@ func (s *VFSByteSink) Write(ctx context.Context, data []byte) (int, error) {
 
 // Flush 对 VFS streaming handle 是 no-op；真正 flush/commit 由格式/压缩 Close 与 VFS Close 边界控制。
 func (s *VFSByteSink) Flush(ctx context.Context) error {
+	if s == nil {
+		return ErrWriterClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.terminal || s.handle == nil {
+	if s.terminal || s.handle == nil {
 		return ErrWriterClosed
 	}
 	return nil
@@ -71,9 +77,12 @@ func (s *VFSByteSink) Flush(ctx context.Context) error {
 
 // Close 完成单个远端文件，并返回字节数与 SHA-256；它不定义 dataset commit。
 func (s *VFSByteSink) Close(ctx context.Context) (WriteResult, error) {
+	if s == nil {
+		return WriteResult{}, ErrWriterClosed
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.terminal || s.handle == nil {
+	if s.terminal || s.handle == nil {
 		return WriteResult{}, ErrWriterClosed
 	}
 	identity, err := s.handle.Close(ctx)
@@ -90,9 +99,12 @@ func (s *VFSByteSink) Close(ctx context.Context) (WriteResult, error) {
 
 // Abort 丢弃 incomplete file；无论底层删除是否成功，本 sink 都进入终态，错误交给 failure gate 处理。
 func (s *VFSByteSink) Abort(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s == nil || s.terminal || s.handle == nil {
+	if s.terminal || s.handle == nil {
 		return nil
 	}
 	err := s.handle.Abort(ctx)
