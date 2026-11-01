@@ -46,6 +46,7 @@ case "$phase" in
     go test -run '^$' -bench 'BenchmarkTypedDecode1024' -benchmem -benchtime=100ms ./internal/format/json
     go test -run '^$' -bench 'Benchmark(GzipDecode|ZstdDecode)' -benchmem -benchtime=100ms ./internal/format/compression
     go test -run '^$' -bench 'BenchmarkPoolAcquireRelease' -benchmem -benchtime=100ms ./internal/storage/remote/sftp
+    go run ./cmd/phase3-metrics >/dev/null
     ;;
   *)
     echo "unsupported acceptance phase: $phase" >&2
