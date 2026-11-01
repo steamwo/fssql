@@ -1,7 +1,7 @@
 # Phase 4 Known Limitations
 
 Date: 2026-11-01
-Status: **PRELIMINARY**
+Status: **ACCEPTED**
 
 ## Product / contract limitations
 
@@ -15,20 +15,21 @@ Status: **PRELIMINARY**
    Complete staging files become visible as a committed dataset through a conditional final Manifest object. Atomic directory rename is never emulated.
 
 4. **Parquet whole-file gzip/zstd wrapping is rejected.**
-   Parquet writer boundaries remain independent of the outer CompressionWriter. The Phase 4 format/compression matrix permits CSV/JSON/NDJSON outer gzip/zstd and Parquet identity only.
+   Phase 4 permits CSV/JSON/NDJSON outer identity/gzip/zstd and Parquet identity only. Parquet page compression remains a distinct format-internal concern.
 
-5. **Crash recovery requires job-exclusive remote staging scope.**
-   ADR-0004 cleanup must never run against a shared bucket/dataset root. S3 recovery is scoped to the exact job prefix.
+5. **Crash recovery requires a job-exclusive remote staging scope.**
+   ADR-0004 cleanup must never run against a shared bucket or dataset root. S3 recovery is scoped to the exact job prefix.
 
-6. **Crash-resumable S3 credentials need multipart discovery/abort permission.**
+6. **Crash-resumable S3 credentials require multipart discovery/abort permission.**
    Missing permission is a hard Resume failure, not a warning or silent fallback.
 
-## Current validation-environment limitations
+7. **Phase 4 resumability is file-level, not byte/checkpoint-level.**
+   A file that was not durably COMPLETE is redone as a whole file after restart.
 
-These are not product contracts, but they currently block Phase 4 acceptance evidence:
+## Interoperability evidence boundary
 
-- The execution container cannot clone the private GitHub repository through its local network path, so the entire `phase4-export` branch has not yet been executed as a single local worktree.
-- DuckDB Python module and DuckDB CLI are not installed in the current container. The repository includes a DuckDB Parquet writer interop gate, but the gate currently reports BLOCKED rather than PASS.
-- PyArrow is not installed; it is optional Phase 4 writer interop evidence and is not the DuckDB acceptance target.
+The acceptance gate verified the fssql Parquet writer with DuckDB 2.0.0 and exact row values. PyArrow was not installed in the acceptance runner and remains optional supplementary evidence rather than a Phase 4 acceptance dependency.
 
-No workflow file was added to work around these environment limitations.
+## Performance note
+
+Partition routing remains materially more allocation-heavy than WriterPool control-path operations. The accepted Phase 4 baseline records this for later regression work; no Phase 5 optimization has been pulled into Phase 4.

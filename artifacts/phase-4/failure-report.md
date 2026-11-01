@@ -1,33 +1,35 @@
 # Phase 4 Failure Report
 
 Date: 2026-11-01
-Status: **PRELIMINARY — final failure gate pending**
+Status: **PASS**
+
+Acceptance workflow run: `41302222162`
+
+The complete repository ordinary and race suites, architecture check, targeted Phase 4 package tests, protocol conversion tests and DuckDB interop all completed successfully.
 
 ## Failure matrix
 
-| Failure | Required result | Test / evidence |
+| Failure | Required result | Evidence |
 | --- | --- | --- |
-| Format writer allocation failure | fail before/abort remote file; managed memory returns to zero | `TestFileWriterFactoryConstructorFailureAbortsVFS`, writer-specific allocation tests |
-| Writer Close/Abort terminal misuse | no double ownership release; writer remains terminal | WriterPool lifecycle tests |
-| SFTP write failure | incomplete file removed on Abort; session lease released | `internal/storage/remote/sftp/write_test.go` |
-| S3 UploadPart transient 5xx | retry replayable payload; eventual success or explicit failure | `TestS3MultipartRetryAndAbort` |
-| S3 CompleteMultipartUpload failure | live upload remains abortable; no hidden local ownership leak | `TestS3CompleteFailureRemainsAbortable` |
-| Conditional final manifest conflict | never overwrite another committed dataset | S3 ConditionalWrite tests + Committer conflict/reconciliation tests |
-| Commit response ambiguity | remain `COMMITTING`; reconcile exact final manifest before declaring committed | `committer_recovery_test.go`, durable committer tests |
-| Manifest durable Save failure | in-memory state does not advance past durable state; no remote operation when precondition Save fails | Manifest durable / Coordinator / DatasetWriter / Committer durable tests |
-| Query/Source/SegmentPlan mismatch on Resume | fail before any remote cleanup or data rewrite | `resume_test.go`, `resume_recovery_test.go` |
-| Hard kill with a COMPLETE and a WRITING file | COMPLETE file not reopened; incomplete file redone; final file set has no duplicates/missing files | `resume_kill_restart_test.go` |
-| Hard kill after S3 CreateMultipartUpload | discover orphan through job-exclusive scope and Abort it after restart | `TestS3RecoveryCapabilityAndOrphanAfterProcessStateLoss` |
-| >1 page orphan multipart set | paginate every upload; do not touch neighboring job prefix | `TestS3RecoveryPaginationScopeIsolationAndIdempotence` |
-| Multipart recovery 5xx | retry via existing S3 retry policy; failure blocks Resume | S3 recovery retry test |
-| Multipart recovery credential failure | explicit credential error; Resume blocked | S3 recovery credential test |
-| Multipart recovery cancellation | stop recovery and do not enter new writer phase | S3/VFS recovery cancellation tests |
-| Partial recovery report with nil error | reject as `ErrIncompleteWriteRecoveryPartial`; Resume blocked | `TestRecoverIncompleteWritesRejectsRootInvalidAndPartialReport` |
-| Recovery memory reservation failure | fail before ListMultipartUploads request; reservation remains zero | S3 recovery memory-gate test |
+| Format writer allocation failure | fail before/abort remote file; managed memory zero | `TestFileWriterFactoryConstructorFailureAbortsVFS` and writer allocation tests |
+| Writer terminal misuse | no double release; terminal remains terminal | WriterPool lifecycle tests |
+| SFTP write failure | incomplete file removed; session lease released | SFTP write tests |
+| S3 UploadPart transient 5xx | retry replayable payload or explicit failure | S3 multipart retry tests |
+| S3 Complete failure | upload remains abortable; no hidden ownership leak | Complete failure tests |
+| Conditional final-manifest conflict | never overwrite another committed dataset | ConditionalWrite + Committer reconciliation tests |
+| Commit response ambiguity | stay `COMMITTING`; reconcile exact final manifest | Committer recovery tests |
+| Manifest durable Save failure | process state cannot advance beyond durable state | durable Manifest/Coordinator/DatasetWriter/Committer tests |
+| Resume identity mismatch | fail before remote cleanup/data rewrite | Resume identity/recovery tests |
+| Kill with COMPLETE + WRITING files | COMPLETE skipped; incomplete redone; no duplicate/missing files | `resume_kill_restart_test.go` |
+| Kill after CreateMultipartUpload | discover and abort orphan after restart | S3 incomplete-write recovery tests |
+| Multi-page orphan set | paginate all uploads; isolate neighboring job prefix | S3 pagination/scope/idempotence tests |
+| Recovery 5xx | bounded retry; failure blocks Resume | S3 recovery retry tests |
+| Recovery credential failure | explicit credential error; Resume blocked | S3 recovery credential tests |
+| Recovery cancellation | stop recovery; do not enter writer phase | S3/VFS cancellation tests |
+| Partial recovery report | `ErrIncompleteWriteRecoveryPartial`; Resume blocked | VFS partial-report test |
+| Recovery memory failure | fail before remote list request; reservation zero | S3 recovery memory-gate test |
 
-## Phase 4 hard-restart invariant
-
-The accepted recovery ordering is:
+## Hard-restart ordering
 
 ```text
 Load durable Manifest
@@ -39,14 +41,16 @@ Load durable Manifest
 → conditional dataset commit
 ```
 
-No failure path is permitted to downgrade incomplete remote ownership into a warning.
+No failure path downgrades incomplete remote ownership into a warning.
 
-## Final gate
-
-The matrix is not acceptance evidence until the complete same-commit repository runs:
+## Gate result
 
 ```text
-go test ./...
-go test -race ./...
-./scripts/acceptance.sh 4
+go test ./...                 PASS
+go test -race ./...           PASS
+go vet ./...                  PASS
+go run ./tools/architecture-check .   PASS (architecture-check: OK)
+./scripts/acceptance.sh 4     PASS
 ```
+
+Phase 4 failure acceptance is satisfied.
