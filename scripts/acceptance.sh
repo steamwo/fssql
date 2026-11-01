@@ -41,6 +41,7 @@ case "$phase" in
     go test -count=1 ./internal/format/json -run 'TestTypedNestedProjection|TestInferNested|TestMalformedJSON|TestAllocationFailureNoLeak|TestParallelNDJSONEqualsSequential'
     go test -count=1 ./internal/format/compression -run 'TestGzipAndZstdLogicalResultEqualsPlain|TestGzipCorruptionAndLimitReleaseMemory|TestCompressionCapabilityComposition'
     go test -count=1 ./internal/storage/remote/sftp -run 'TestDriverRetriesResetPoisonsSession|TestWrongHostKeyNoRetry|TestCancelReadReleasesLeaseAndManagedBuffer|TestEndpointMismatchRejectedBeforeDial|TestSFTPQueryDemoCSV|TestParallelCapabilityRequiresPoolCapacity|TestPoolBoundedCancelReuseAndPoison|TestPoolFactoryFailureRollsBackSlot|TestWireSessionStatReadList|TestOpenSSH'
+    go test -count=1 ./test/interop/phase3 -run 'TestDuckDBV200Golden'
     go test -run '^$' -bench 'Benchmark' -benchmem -benchtime=100ms ./internal/format/csv
     go test -run '^$' -bench 'BenchmarkTypedDecode1024' -benchmem -benchtime=100ms ./internal/format/json
     go test -run '^$' -bench 'Benchmark(GzipDecode|ZstdDecode)' -benchmem -benchtime=100ms ./internal/format/compression
