@@ -158,6 +158,7 @@ func (r *ListStructColumnReader) Read(ctx context.Context, rows int) (*vector.Ve
 	}()
 
 	elementValid := make([]bool, 0, capHint)
+	entries := make([]ColumnEntry, len(r.cursors))
 	used := 0
 	for row := 0; row < rows; row++ {
 		first, err := r.cursors[0].PeekEntry(ctx)
@@ -174,7 +175,6 @@ func (r *ListStructColumnReader) Read(ctx context.Context, rows int) (*vector.Ve
 		listNull := first.Definition < r.list.MaxDef
 		firstEntry := true
 		for {
-			entries := make([]ColumnEntry, len(r.cursors))
 			for i, cursor := range r.cursors {
 				entry, err := cursor.PeekEntry(ctx)
 				if err != nil {
