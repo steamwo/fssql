@@ -145,6 +145,9 @@ func projectedReaderForNode(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectI
 		return NewStructColumnReader(driver, uri, identity, rg, node, scope, bm)
 	}
 	if node.Logical.ID == coretypes.List && isListAnnotated(node.Element) {
+		if _, _, _, err := validateStandardListStruct(node); err == nil {
+			return NewListStructColumnReader(driver, uri, identity, rg, node, scope, bm)
+		}
 		_, leaf, err := validateStandardList(node)
 		if err != nil {
 			return nil, err
