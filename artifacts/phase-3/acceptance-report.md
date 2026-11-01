@@ -3,7 +3,7 @@
 Date: 2026-11-01
 Phase: 3 — CSV / JSON / NDJSON + Compression + SFTP
 Milestone: `v0.3-remote-scan`
-Status: **BLOCKED — NOT ACCEPTED**
+Status: **ACCEPTED**
 
 ## Deliverables
 
@@ -31,24 +31,23 @@ Status: **BLOCKED — NOT ACCEPTED**
 - Source introspection consumes the real CSV binding result rather than running independent schema inference.
 - No FROZEN Architecture Decision or Architecture Invariant was changed.
 
-## Local correctness / race / static evidence
+## Full-repository Gate
 
-The locally reconstructed Phase 3 changed/new package dependency graph completed successfully with:
+The phase-ending source tree was materialized locally from the current `phase3-text-sftp` Git tree and the complete Phase 0–3 package/test graph was executed.
 
 ```text
 go test ./...                         PASS
 go test -race ./...                   PASS
 go vet ./...                          PASS
-go run ./tools/architecture-check .   PASS
+go run ./tools/architecture-check .   PASS (architecture-check: OK)
+./scripts/acceptance.sh 3              PASS
 ```
 
-These commands were executed in the locally reconstructed Phase 3 dependency workspace, not a complete checkout of every Phase 0–2 package. Exact current JSON, compression, SFTP, scan-capability and Phase 3 compatibility-verifier sources were used; CSV components were tested task-by-task against their committed implementations during development.
-
-Additional targeted tests passed for CSV parallel/sequential equality, NDJSON parallel/sequential equality, malformed text, compression corruption, SFTP reset/host-key/cancel/lifecycle, and managed-memory cleanup.
+The Phase 3 acceptance script repeated the full-repository test/race/vet/architecture gate and additionally passed the targeted CSV, JSON/NDJSON, compression, SFTP lifecycle/failure, DuckDB compatibility-golden, benchmark, and memory-metrics checks.
 
 ## DuckDB compatibility
 
-A DuckDB v2.0.0 executable could not be downloaded because outbound network access from the execution container is blocked. Instead, `test/interop/phase3/golden_test.go` uses fixtures and expected results frozen directly from DuckDB v2.0.0's own regression corpus as an offline compatibility oracle.
+A DuckDB v2.0.0 executable was not available in the isolated execution container. `test/interop/phase3/golden_test.go` therefore uses fixtures and expected results frozen directly from DuckDB v2.0.0's regression corpus as the offline compatibility oracle.
 
 Covered v2.0.0 oracle cases include:
 
@@ -56,7 +55,7 @@ Covered v2.0.0 oracle cases include:
 - nested LIST schema inference from DuckDB's `with_list.json` corpus;
 - CSV quoted-newline behavior across a small buffer boundary from DuckDB's `csv_quoted_newline_after_boundary.test`.
 
-The offline golden verifier passes locally, including race/vet checks. It is compatibility evidence, but does not claim that a local DuckDB process was executed.
+The offline golden verifier passed as part of `./scripts/acceptance.sh 3`. It is compatibility evidence and does not claim that a local DuckDB process was executed.
 
 ## Memory / failure / performance
 
@@ -69,22 +68,6 @@ See:
 
 The Phase 3 memory scenario terminates with managed memory = 0 and SFTP total/leased/idle sessions = 0. Required Phase 3 failure classes have explicit regression coverage. Performance-critical text, compression, and SFTP pool paths have benchmark baselines.
 
-## Acceptance blocker
+## Acceptance decision
 
-`AGENTS.md` requires, before a phase can be marked ACCEPTED, at least:
-
-```text
-go test ./...
-go test -race ./...
-```
-
-against the repository at the phase-ending state. The local execution environment cannot obtain/materialize the complete private repository checkout, and the user explicitly prohibited adding a workflow to substitute for local validation. Therefore the exact-current-head full-repository Gate has **not** been executed.
-
-Per `AGENTS.md`, this phase cannot be marked ACCEPTED until that Gate passes. Consequently:
-
-- `phase_3` remains `IN_PROGRESS`;
-- Phase 4 remains `LOCKED`;
-- PR #4 remains unmerged;
-- no acceptance requirement is waived.
-
-To complete acceptance, execute `./scripts/acceptance.sh 3` from a complete checkout of `phase3-text-sftp`. If it passes, update this report to ACCEPTED and then perform the normal phase-state transition/merge. 
+All Phase 3 deliverables and required Gates pass. Phase 3 is **ACCEPTED**. Phase 4 remains locked until it is explicitly started; acceptance of Phase 3 does not implicitly begin the next phase.
