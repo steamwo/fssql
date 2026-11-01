@@ -1,5 +1,6 @@
 name: phase4-temporary-acceptance
 
+# Temporary Phase 4 acceptance gate. Delete after verification.
 on:
   push:
     branches:
