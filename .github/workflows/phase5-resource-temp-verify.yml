@@ -1,0 +1,25 @@
+name: phase5-resource-temp-verify
+
+on:
+  push:
+    branches:
+      - phase-5-resource-scheduler
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Gofmt check
+        run: test -z "$(gofmt -l internal/resource)"
+      - name: Resource scheduler tests
+        run: go test -count=1 ./internal/resource
+      - name: Resource scheduler race tests
+        run: go test -race -count=1 ./internal/resource
+      - name: Resource scheduler benchmark
+        run: go test -run '^$' -bench BenchmarkAcquireRelease -benchmem -count=1 ./internal/resource
+      - name: Architecture boundary check
+        run: go run ./tools/architecture-check
