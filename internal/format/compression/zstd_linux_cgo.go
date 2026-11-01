@@ -35,10 +35,10 @@ func (Zstd) Decode(src []byte, s *memory.Scope, bm *memory.BufferManager) (*memo
 	}
 	sz := uint64(C.ZSTD_getFrameContentSize(unsafe.Pointer(&src[0]), C.size_t(len(src))))
 	if sz == ^uint64(0) {
-		return nil, fmt.Errorf("%w: invalid zstd frame", ErrCorrupt)
+		return nil, ErrUnknownSize
 	}
 	if sz == ^uint64(1) {
-		return nil, ErrUnknownSize
+		return nil, fmt.Errorf("%w: invalid zstd frame", ErrCorrupt)
 	}
 	if sz > uint64(^uint(0)>>1) {
 		return nil, fmt.Errorf("compression: zstd output too large: %d", sz)
