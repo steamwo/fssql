@@ -1,0 +1,25 @@
+name: phase5-http-api-temp-verify
+
+on:
+  push:
+    branches:
+      - phase-5-http-api
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Gofmt check
+        run: test -z "$(gofmt -l internal/server)"
+      - name: HTTP query API tests
+        run: go test -count=1 ./internal/server ./internal/query ./internal/resource
+      - name: HTTP query API race tests
+        run: go test -race -count=1 ./internal/server ./internal/query ./internal/resource
+      - name: Architecture boundary check
+        run: go run ./tools/architecture-check
+      - name: HTTP routing benchmark
+        run: go test -run '^$' -bench '^BenchmarkParseQueryPath$' -benchmem -benchtime=100ms ./internal/server
