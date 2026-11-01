@@ -121,7 +121,9 @@ func TestPhase5LongRunningStability(t *testing.T) {
 				t.Fatalf("iteration %d result: %v", iteration, err)
 			}
 			value, ok := chunk.Columns[0].Int64(0)
-			chunk.Release()
+			if err := cursor.ReleaseChunk(chunk); err != nil {
+				t.Fatalf("iteration %d release result: %v", iteration, err)
+			}
 			if !ok || value != 1 {
 				t.Fatalf("iteration %d result value=%d valid=%v", iteration, value, ok)
 			}
