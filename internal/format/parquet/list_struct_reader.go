@@ -198,24 +198,15 @@ func (r *ListStructColumnReader) Read(ctx context.Context, rows int) (*vector.Ve
 			if !firstEntry && !hasElementSlot {
 				return nil, errors.New("parquet: LIST<STRUCT> empty/null list has repeated continuation")
 			}
-			if hasElementSlot {
-				for i := range scratch {
-					var err error
-					scratch[i], err = ensureVectorCapacity(r.scope, r.bm, scratch[i], used, used+1)
-					if err != nil {
-						return nil, err
-					}
+			for i := range scratch {
+				var err error
+				scratch[i], err = ensureVectorCapacity(r.scope, r.bm, scratch[i], used, used+1)
+				if err != nil {
+					return nil, err
 				}
 			}
 			for i, cursor := range r.cursors {
-				target := used
-				if !hasElementSlot {
-					target = 0
-					if scratch[i].Count() == 0 {
-						return nil, errors.New("parquet: LIST<STRUCT> scratch vector has zero capacity")
-					}
-				}
-				consumed, err := cursor.NextInto(ctx, scratch[i], target)
+				consumed, err := cursor.NextInto(ctx, scratch[i], used)
 				if err != nil {
 					return nil, err
 				}
