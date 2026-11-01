@@ -69,7 +69,9 @@ func TestResultCursorBackpressuresSlowConsumer(t *testing.T) {
 	if got := chunkInt64(t, chunk); got != 1 {
 		t.Fatalf("first value=%d, want 1", got)
 	}
-	chunk.Release()
+	if err := cursor.ReleaseChunk(chunk); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-pushed:
 		if err != nil {
@@ -85,7 +87,9 @@ func TestResultCursorBackpressuresSlowConsumer(t *testing.T) {
 	if got := chunkInt64(t, chunk); got != 2 {
 		t.Fatalf("second value=%d, want 2", got)
 	}
-	chunk.Release()
+	if err := cursor.ReleaseChunk(chunk); err != nil {
+		t.Fatal(err)
+	}
 	cursor.Close()
 	if scope.Used() != 0 {
 		t.Fatalf("managed bytes leaked: %d", scope.Used())
@@ -116,7 +120,9 @@ func TestResultCursorFinishDrainsQueuedChunksBeforeEOF(t *testing.T) {
 		if got := chunkInt64(t, chunk); got != want {
 			t.Fatalf("value=%d, want %d", got, want)
 		}
-		chunk.Release()
+		if err := cursor.ReleaseChunk(chunk); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := cursor.Next(context.Background()); !errors.Is(err, io.EOF) {
 		t.Fatalf("terminal err=%v, want io.EOF", err)
@@ -145,9 +151,78 @@ func TestResultCursorFinishErrorIsReturnedAfterDrain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chunk.Release()
+	if err := cursor.ReleaseChunk(chunk); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := cursor.Next(context.Background()); !errors.Is(err, failure) {
 		t.Fatalf("terminal err=%v, want query failure", err)
+	}
+}
+
+func TestResultCursorWaitConsumerReleasedBlocksUntilManagedChunkReleased(t *testing.T) {
+	manager := memory.NewManager(1 << 20)
+	scope := manager.NewScope()
+	cursor, err := NewResultCursor(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunk := testResultChunk(t, scope, memory.NewBufferManager(nil), 1)
+	if err := cursor.Push(context.Background(), chunk); err != nil {
+		t.Fatal(err)
+	}
+	if err := cursor.Finish(nil); err != nil {
+		t.Fatal(err)
+	}
+	owned, err := cursor.Next(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cursor.WaitDrained(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	waited := make(chan error, 1)
+	go func() { waited <- cursor.WaitConsumerReleased(context.Background()) }()
+	select {
+	case err := <-waited:
+		t.Fatalf("consumer release barrier returned early: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	stats := cursor.Stats()
+	if stats.ConsumerOwnedChunks != 1 || scope.Used() == 0 {
+		t.Fatalf("consumer ownership not visible: stats=%+v used=%d", stats, scope.Used())
+	}
+	if err := cursor.ReleaseChunk(owned); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("consumer release barrier did not wake")
+	}
+	if scope.Used() != 0 || cursor.Stats().ConsumerOwnedChunks != 0 {
+		t.Fatalf("consumer ownership leaked: stats=%+v used=%d", cursor.Stats(), scope.Used())
+	}
+}
+
+func TestResultCursorReleaseChunkRejectsUnownedChunk(t *testing.T) {
+	manager := memory.NewManager(1 << 20)
+	scope := manager.NewScope()
+	chunk := testResultChunk(t, scope, memory.NewBufferManager(nil), 1)
+	cursor, err := NewResultCursor(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cursor.ReleaseChunk(chunk); !errors.Is(err, ErrResultChunkNotOwned) {
+		t.Fatalf("ReleaseChunk err=%v, want ErrResultChunkNotOwned", err)
+	}
+	// 未取得 consumer ownership 的 chunk 仍由测试作为 producer owner 释放。
+	chunk.Release()
+	if scope.Used() != 0 {
+		t.Fatalf("managed bytes leaked: %d", scope.Used())
 	}
 }
 
@@ -188,7 +263,7 @@ func TestResultCursorNextCancellationDoesNotCloseCursor(t *testing.T) {
 		t.Fatalf("Next err=%v, want DeadlineExceeded", err)
 	}
 	stats := cursor.Stats()
-	if stats.Closed || stats.Finished || stats.BufferedChunks != 0 {
+	if stats.Closed || stats.Finished || stats.BufferedChunks != 0 || stats.ConsumerOwnedChunks != 0 {
 		t.Fatalf("stats after canceled Next=%+v", stats)
 	}
 	cursor.Close()
@@ -268,7 +343,7 @@ func TestResultCursorStatsPeakIsBoundedByCapacity(t *testing.T) {
 		}
 	}
 	stats := cursor.Stats()
-	if stats.CapacityChunks != 2 || stats.BufferedChunks != 2 || stats.PeakBufferedChunks != 2 {
+	if stats.CapacityChunks != 2 || stats.BufferedChunks != 2 || stats.ConsumerOwnedChunks != 0 || stats.PeakBufferedChunks != 2 {
 		t.Fatalf("stats=%+v", stats)
 	}
 	cursor.Close()
