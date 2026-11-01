@@ -321,17 +321,30 @@ func decodeDecimal64BigEndian(src []byte, typ coretypes.LogicalType) (int64, err
 	return int64(bits), nil
 }
 
-type dictionaryIndexStream struct{ h *hybridStream }
-
-func newDictionaryIndexStream(data []byte) (*dictionaryIndexStream, error) {
-	if len(data) == 0 {
-		return nil, errors.New("parquet: missing dictionary index bit width")
-	}
-	h, err := newHybridStream(data[1:], int(data[0]))
-	if err != nil {
-		return nil, err
-	}
-	return &dictionaryIndexStream{h: h}, nil
+type dictionaryIndexStream struct {
+	h   *hybridStream
+	err error
 }
 
-func (s *dictionaryIndexStream) Next() (uint32, error) { return s.h.Next() }
+func newDictionaryIndexStream(data []byte) *dictionaryIndexStream {
+	s := &dictionaryIndexStream{}
+	if len(data) == 0 {
+		s.err = errors.New("parquet: missing dictionary index bit width")
+		return s
+	}
+	s.h, s.err = newHybridStream(data[1:], int(data[0]))
+	return s
+}
+
+func (s *dictionaryIndexStream) Next() (uint32, error) {
+	if s == nil {
+		return 0, errors.New("parquet: nil dictionary index stream")
+	}
+	if s.err != nil {
+		return 0, s.err
+	}
+	if s.h == nil {
+		return 0, errors.New("parquet: dictionary index stream is not initialized")
+	}
+	return s.h.Next()
+}
