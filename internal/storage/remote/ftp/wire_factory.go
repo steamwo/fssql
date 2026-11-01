@@ -105,11 +105,12 @@ func (f *WireFactory) Dial(ctx context.Context, key remote.ClientKey) (Session, 
 	if f.Credentials == nil {
 		return nil, errors.New("ftp: credential provider required")
 	}
-	credentials, err := f.Credentials.Credentials(ctx, key, scheme)
+	// 先完成 endpoint 安全校验，再解析 secret，避免为已被 NetworkPolicy 拒绝的目标取出 credential。
+	endpoint, err := f.Policy.ResolveURL(ctx, scheme+"://"+key.Endpoint+"/")
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := f.Policy.ResolveURL(ctx, scheme+"://"+key.Endpoint+"/")
+	credentials, err := f.Credentials.Credentials(ctx, key, scheme)
 	if err != nil {
 		return nil, err
 	}
