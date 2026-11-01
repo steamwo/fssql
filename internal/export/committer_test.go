@@ -171,7 +171,7 @@ func TestCommitterRejectsIncompleteOrNonConditionalDestinationBeforeWriting(t *t
 	}
 }
 
-func TestCommitterFailureAbortsAndReleasesManagedMetadata(t *testing.T) {
+func TestCommitterFailureAbortsAndKeepsCommitAmbiguous(t *testing.T) {
 	boom := errors.New("close failed")
 	manifest := completeCommitManifest(t)
 	handle := &commitTestHandle{closeErr: boom}
@@ -180,7 +180,7 @@ func TestCommitterFailureAbortsAndReleasesManagedMetadata(t *testing.T) {
 	if err := committer.Commit(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("expected close failure, got %v", err)
 	}
-	if handle.aborts != 1 || manifest.ExportState != ExportStateFailed {
+	if handle.aborts != 1 || manifest.ExportState != ExportStateCommitting {
 		t.Fatalf("aborts=%d state=%s", handle.aborts, manifest.ExportState)
 	}
 	if scope.Used() != 0 {
