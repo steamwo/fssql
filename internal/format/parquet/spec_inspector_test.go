@@ -35,10 +35,13 @@ func TestSpecInspectorMatchesDirectBindBackedInspection(t *testing.T) {
 			t.Fatalf("column %d got=%+v want=%+v", i, gotColumns[i], wantColumns[i])
 		}
 	}
-	if throughSpec.DatasetFingerprint != direct.DatasetFingerprint || throughSpec.SchemaSource != introspection.SchemaSourceFileMetadata || !throughSpec.FullValidation == direct.FullValidation {
-		// 下面单独检查字段，避免任何 adapter 自行构造 schema。
-	}
-	if throughSpec.DatasetFingerprint != direct.DatasetFingerprint || throughSpec.SchemaSource != direct.SchemaSource || throughSpec.Confidence != direct.Confidence {
+	if throughSpec.DatasetFingerprint != direct.DatasetFingerprint ||
+		throughSpec.SchemaSource != direct.SchemaSource ||
+		throughSpec.Confidence != direct.Confidence ||
+		throughSpec.MatchedFiles != direct.MatchedFiles ||
+		throughSpec.SchemaFiles != direct.SchemaFiles ||
+		throughSpec.UnionByName != direct.UnionByName ||
+		throughSpec.FullValidation != direct.FullValidation {
 		t.Fatalf("report=%+v direct=%+v", throughSpec, direct)
 	}
 	if scope.Used() != 0 {
@@ -57,8 +60,8 @@ func TestSpecInspectorMapsExplicitFullValidationToRealBind(t *testing.T) {
 		t.Fatal(err)
 	}
 	report, err := adapter.InspectSource(context.Background(), introspection.SourceSpec{
-		Format: introspection.SourceFormatParquet,
-		Pattern: "mem://x/*.parquet",
+		Format:         introspection.SourceFormatParquet,
+		Pattern:        "mem://x/*.parquet",
 		FullValidation: true,
 	})
 	if err != nil {
