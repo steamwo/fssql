@@ -64,7 +64,7 @@ case "$phase" in
     # P4-D2 必须真实经过 S3/SFTP driver、CSV decode、Own DataChunk 与 Export writer。
     go test -count=1 ./test/interop/phase4 -run 'Test(S3ToSFTP|SFTPToS3)ProtocolConversion$'
 
-    # P4-D3 外部 reader interop：缺 DuckDB/PyArrow 时脚本返回 2，阶段必须明确 BLOCKED 而不能当成 skip-success。
+    # P4-D3 DuckDB reader interop：Python module 或 CLI 至少一个必须存在；PyArrow 仅作为可选附加证据。
     python3 ./test/interop/phase4/run.py
 
     # P4-D4/P4-D9/P4-D3 的性能关键路径只记录本机 baseline，不作为跨机器绝对阈值。
