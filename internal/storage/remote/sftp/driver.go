@@ -35,8 +35,11 @@ func NewDriver(key remote.ClientKey, pools *Manager, maxAttempts int) (*Driver, 
 	return &Driver{Key: key, Pools: pools, MaxAttempts: maxAttempts}, nil
 }
 func (d *Driver) Scheme() string { return "sftp" }
+
+// StaticCapabilities 只声明驱动已真正实现的能力；SFTP v3 流式写由 WritableSession/WriteHandle 提供，
+// 但 ConditionalWrite/AtomicRename 仍未实现，因此不得在这里虚假宣称。
 func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	caps := vfs.Capabilities(vfs.RandomRead, vfs.StreamingRead, vfs.ServerSideList)
+	caps := vfs.Capabilities(vfs.RandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList)
 	if d.Pools != nil && d.Pools.MaxSessions() > 1 {
 		caps = caps.With(vfs.ParallelRandomRead)
 	}
