@@ -2,7 +2,6 @@ package resource
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -350,6 +349,3 @@ func subUsage(usage *Usage, request Request) {
 	usage.RemoteIOSlots -= request.RemoteIOSlots
 	usage.SpillIOSlots -= request.SpillIOSlots
 }
-
-// compile-time 使用，防止 errors import 被后续重构意外移除后掩盖 Close path 的错误语义。
-var _ = errors.Is
