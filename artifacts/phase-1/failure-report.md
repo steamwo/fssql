@@ -23,22 +23,22 @@ Status: **PASS**
 - Async I/O workers/queues are bounded and cancellation/Close paths drain active request accounting.
 - MetadataCache bypasses unstable identities to avoid stale-schema reuse.
 - unsupported/ambiguous nested Parquet layouts return explicit errors.
-- DECIMAL widths requiring the unresolved Decimal128 Own Vector representation return an explicit architecture-requirement error; no truncation/coercion is attempted.
+- Decimal128 rejects signed-128 overflow, declared-precision overflow, and incompatible high-precision INT32/INT64 physical encodings; no truncation, string coercion, or approximate result is produced.
+- timestamp millis-to-micros conversion rejects int64 overflow.
 
 ## Execution Evidence
 
-GitHub Actions run `41256775324`, verify job `124701500839` completed successfully:
+Final GitHub Actions run `41259459358`, verify job `124709511245`, completed successfully:
 
-- `go test ./...` — PASS, including `test/fault/...`, S3 driver tests, and Parquet tests.
+- `go test ./...` — PASS, including `test/fault/...`, S3 driver tests, Parquet Decimal128 tests, and RowGroupScanner integration.
 - `go run ./tools/architecture-check .` — PASS.
 - `go test -race ./...` — PASS.
+- controlled Parquet benchmark — PASS.
 
-The earlier GitHub runner provisioning problem is resolved and no longer affects the Failure Gate.
+The dependent pinned interop job `124709838587` also completed successfully. Corresponding Phase 0 compatibility run `41259459399`, verify job `124709511595`, passed ordinary/race/architecture verification.
 
 ## Gate Result
 
-All required Phase 1 fault scenarios execute with explicit error classification and managed-resource cleanup. No silent range fallback or partial-success path is accepted.
+All required Phase 1 fault scenarios execute with explicit error classification and managed-resource cleanup. Decimal/timestamp boundary failures are explicit and non-degrading. No silent range fallback or partial-success path is accepted.
 
 Overall Failure Gate: **PASS**.
-
-Phase 1 remains BLOCKED only by ADR-0001 / DECIMAL(19..38), not by failure-path verification.
