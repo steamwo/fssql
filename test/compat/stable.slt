@@ -1,0 +1,87 @@
+# Stable v1 SQLLogic corpus.
+# Query results use SQLLogic-style flattened values: one canonical scalar per line.
+
+query I
+SELECT 1 + 2 * 3 AS value
+----
+7
+
+query I
+SELECT 9 AS value WHERE 3 > 2 AND TRUE
+----
+9
+
+query I
+SELECT (SELECT 7) AS value
+----
+7
+
+query I
+SELECT (SELECT 7 WHERE FALSE) AS value
+----
+NULL
+
+query I
+SELECT DISTINCT 2 AS value
+----
+2
+
+query I
+SELECT 2 AS value ORDER BY value DESC NULLS LAST LIMIT 1 OFFSET 0
+----
+2
+
+query IIIII
+WITH a AS (SELECT 2 AS k)
+SELECT count(*) AS c, sum(k) AS s, avg(k) AS a, min(k) AS lo, max(k) AS hi
+FROM a
+GROUP BY k
+HAVING count(*) = 1
+----
+1
+2
+2
+2
+2
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT a.k FROM a INNER JOIN b ON a.k = b.k
+----
+1
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT a.k FROM a LEFT JOIN b ON a.k = b.k
+----
+1
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT b.k FROM a RIGHT JOIN b ON a.k = b.k
+----
+1
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT a.k FROM a FULL JOIN b ON a.k = b.k
+----
+1
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT a.k + b.k FROM a CROSS JOIN b
+----
+2
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 1 AS k)
+SELECT a.k FROM a SEMI JOIN b ON a.k = b.k
+----
+1
+
+query I
+WITH a AS (SELECT 1 AS k), b AS (SELECT 2 AS k)
+SELECT a.k FROM a ANTI JOIN b ON a.k = b.k
+----
+1

@@ -166,6 +166,15 @@ func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.Da
 		return nil, err
 	}
 	switch {
+	case childExpr.Type.ID == types.Integer && expr.Type.ID == types.BigInt:
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Int32(row)
+			if !ok {
+				out.SetNull(row)
+				continue
+			}
+			out.SetInt64(row, int64(value))
+		}
 	case childExpr.Type.ID == types.Integer && expr.Type.ID == types.Double:
 		for row := 0; row < chunk.Cardinality; row++ {
 			value, ok := child.Int32(row)
@@ -193,8 +202,12 @@ func (e *Executor) executeSQLBinary(expr *binder.BoundExpression, chunk *vector.
 		return nil, fmt.Errorf("SQL expression executor: binary inputs must already be coerced, got %d/%d", leftType, rightType)
 	}
 	switch leftType {
+	case types.Boolean:
+		return e.executeSQLBooleanBinary(expr, chunk)
 	case types.Integer:
 		return e.executeSQLIntegerBinary(expr, chunk)
+	case types.BigInt:
+		return e.executeSQLBigIntBinary(expr, chunk)
 	case types.Varchar:
 		return e.executeSQLVarcharBinary(expr, chunk)
 	case types.Double:
