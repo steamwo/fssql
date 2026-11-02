@@ -266,6 +266,12 @@ func (p *Parser) parseCopyScalar() (ast.Expr, error) {
 	case lexer.KeywordTrue, lexer.KeywordFalse:
 		p.pos++
 		return &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralBool, Value: strings.ToUpper(t.Raw)}, nil
+	case lexer.KeywordOn:
+		// ON 是 JOIN keyword，但 DuckDB COPY boolean option 允许 HEADER ON；只在此局部把它解释为 option scalar。
+		p.pos++
+		id := ast.Identifier{Span: t.Span, Raw: t.Raw, Name: "on"}
+		name := ast.QualifiedName{Span: t.Span, Parts: []ast.Identifier{id}}
+		return &ast.NameExpr{Span: t.Span, Name: name}, nil
 	case lexer.Identifier, lexer.QuotedIdentifier:
 		name, err := p.parseQualifiedName()
 		if err != nil {
