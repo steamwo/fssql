@@ -483,3 +483,17 @@ Status: FROZEN
 - remediation 仅允许补齐已经声明为 Stable v1 的能力，以及 AD-036/AD-041 要求的兼容性、测试和发布前验证基础设施；不得借此新增 Stable Feature。
 - 所有缺失 Stable 能力补齐后，必须重新执行完整 Phase 5 Gate 并重新 `ACCEPTED`，之后才允许再次进入 Phase 6 Feature Freeze / Release。
 - Phase 6 不得用 lower-level operator tests、known limitations 或文档声明替代 `Stable Feature Complete` 与端到端 SQL Compatibility Verification。
+
+## AD-045 Stable v1 SQL Statement Grammar
+Status: FROZEN
+
+按 ADR-0007 Option A：
+
+- `CREATE VIEW <qualified_name> AS <select_statement>`。
+- `CREATE EXTERNAL TABLE <qualified_name> USING <stable_table_function>(<string_literal>)`；schema 必须来自真实 `TableFunction.Bind` / Schema Resolution，DDL 不提供第二套 inline schema。
+- `CREATE SECRET <name> (...)` 使用受限的 DuckDB-style option list；`TYPE` 必需，credential value 仅接受 string literal，至少一个 `SUBJECT` 必需，`SCHEME` / `HOST` 显式映射 `SecretScope`；禁止隐式 wildcard ACL 与 persistent-secret 语义。
+- `COPY <qualified_name> TO <string_literal> [...]` 与 `COPY (<select_statement>) TO <string_literal> [...]` 为 Stable；仅 `TO`，unknown option 必须失败，并复用 AD-009 ExportCoordinator/Manifest/Writer/Committer。
+- `DESCRIBE <qualified_name>` 与 `DESCRIBE <select_statement>` 为 Stable；查询只 Bind 不执行，source/table-function schema 必须复用 AD-042 实际 Bind 路径。
+- Parser 只构造带 source span 的 Own AST；Binder 负责 statement semantic validation；Catalog/Security/Export/VFS/format adapter 不得进入 Parser。
+- `OR REPLACE`、`IF NOT EXISTS`、persistent secret、provider chain、`COPY FROM`、`SHOW` / `DESC` 等未明确列出的扩展不属于 v1 Stable。
+- unsupported syntax/options 必须显式失败，不得 silent downgrade。
