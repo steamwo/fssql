@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/steamwo/fssql/internal/catalog"
-	"github.com/steamwo/fssql/internal/core/stats"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/sql/ast"
@@ -28,8 +27,8 @@ type TableBindAdapter struct {
 // SourceResolver 同时实现 Binder 的 Catalog relation 与 TableFunction resolver contracts。
 // 它只位于 statement/control path，不创建 runtime reader/operator。
 type SourceResolver struct {
-	catalog   catalog.Transaction            // catalog 是当前 Statement 独占的 Catalog Transaction。
-	functions *function.Catalog              // functions 是统一 FunctionCatalog。
+	catalog   catalog.Transaction           // catalog 是当前 Statement 独占的 Catalog Transaction。
+	functions *function.Catalog             // functions 是统一 FunctionCatalog。
 	adapters  map[function.ID]TableBindFunc // adapters 在构造后不可变。
 }
 
@@ -132,7 +131,7 @@ func (r *SourceResolver) BindTableFunction(ctx context.Context, def function.Def
 	if resolved.ID == "" || len(resolved.Columns) == 0 {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: table function %s Bind returned no identity/schema", def.Name)
 	}
-	if def.ID != function.GlobID && resolved.Fingerprint == stats.DatasetFingerprint("") {
+	if resolved.Fingerprint == "" {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: table function %s Bind returned empty dataset fingerprint", def.Name)
 	}
 	return cloneResolvedRelation(resolved), nil
