@@ -13,7 +13,7 @@ import (
 const maxBridgeQueue = 64
 
 // Operator 是现有 blocking operator 的最小统一接口。
-// Consume 只在 dependency pipeline 阶段调用；Emit 在 dependency Finalize 之后才允许启动。
+// Consume 只在 dependency pipeline 阶段调用；Emit callback 成功才转移 chunk ownership，callback error 时 ownership 仍归 operator。
 type Operator interface {
 	Consume(context.Context, *vector.DataChunk) error
 	Emit(context.Context, func(*vector.DataChunk) error) error
@@ -21,7 +21,7 @@ type Operator interface {
 }
 
 type emitItem struct {
-	chunk *vector.DataChunk // chunk 的 ownership 从 Operator.Emit callback 转移到 root Pipeline。
+	chunk *vector.DataChunk // chunk 的 ownership 从成功的 Operator.Emit callback 转移到 root Pipeline。
 }
 
 // Bridge 把 Consume/Emit 型 blocking operator 适配为 dependency Sink + root Source。
@@ -165,8 +165,7 @@ func (b *Bridge) runEmitter(ctx context.Context) {
 		case b.items <- emitItem{chunk: chunk}:
 			return nil
 		case <-ctx.Done():
-			// callback 未成功返回时 ownership 仍在 callback；必须自行释放，避免取消路径泄漏。
-			chunk.Release()
+			// callback 返回 error 时 ownership 仍归 operator；现有 Aggregate/Distinct Emit 会负责 Release。
 			return ctx.Err()
 		}
 	})
