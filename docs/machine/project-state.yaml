@@ -10,7 +10,7 @@ phase_status:
   phase_3: ACCEPTED
   phase_4: ACCEPTED
   phase_5: ACCEPTED
-  phase_6: IN_PROGRESS
+  phase_6: ACCEPTED
 rules:
   next_phase_requires_previous_acceptance: true
   frozen_architecture_requires_adr: true
