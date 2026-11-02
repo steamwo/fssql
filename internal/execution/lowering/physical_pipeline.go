@@ -2,8 +2,10 @@ package lowering
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/steamwo/fssql/internal/execution/blocking"
 	"github.com/steamwo/fssql/internal/execution/expression"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/execution/sqltransform"
@@ -16,10 +18,18 @@ type ScanSourceFactory interface {
 	Open(context.Context, planner.ScanSpec) (pipeline.Source, error)
 }
 
-// Builder 把已优化 PhysicalPlan 降低为 Push Pipeline。
+// DistinctFactory 把 generic PhysicalDistinct 映射为真实 blocking DISTINCT operator。
+// factory 负责选择 in-memory/external spill 策略；lowering 不依赖 concrete hash/temp 实现。
+type DistinctFactory interface {
+	OpenDistinct(context.Context, []planner.Column, planner.CardinalityEstimate) (blocking.Operator, error)
+}
+
+// Builder 把已优化 PhysicalPlan 降低为 Push Pipeline DAG。
 type Builder struct {
-	Sources  ScanSourceFactory    // Sources 是唯一 runtime scan factory。
-	Executor *expression.Executor // Executor 执行 Binder BoundExpression。
+	Sources       ScanSourceFactory    // Sources 是唯一 runtime scan factory。
+	Executor      *expression.Executor // Executor 执行 Binder BoundExpression。
+	Distincts     DistinctFactory      // Distincts 为 PhysicalDistinct 创建 query-scoped blocking operator。
+	BlockingQueue int                  // BlockingQueue 限制 blocking stage handoff；0 使用默认容量 1。
 }
 
 // NewBuilder 创建 PhysicalPlan lowering builder。
@@ -30,10 +40,18 @@ func NewBuilder(sources ScanSourceFactory, executor *expression.Executor) (*Buil
 	if executor == nil || executor.Scope == nil || executor.Buffers == nil {
 		return nil, fmt.Errorf("physical pipeline lowering requires managed expression executor")
 	}
-	return &Builder{Sources: sources, Executor: executor}, nil
+	return &Builder{Sources: sources, Executor: executor, BlockingQueue: 1}, nil
 }
 
-// Build 接受当前已接通的 Scan/Filter/Project/Limit 链；blocking operator 在各自 lowering 完成前显式失败。
+// loweredStage 保存一个 pipeline stage 的 Source/Transforms 以及必须先完成的 dependency pipelines。
+type loweredStage struct {
+	source       pipeline.Source
+	transforms   []pipeline.TransformOperator
+	relationID   string
+	dependencies []*pipeline.Pipeline
+}
+
+// Build 接受当前已接通的 Scan/Filter/Project/Distinct/Limit；其他 blocking operator 在各自 lowering 完成前显式失败。
 func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pipeline.Sink) (*pipeline.Pipeline, error) {
 	if b == nil || b.Sources == nil || b.Executor == nil {
 		return nil, fmt.Errorf("physical pipeline lowering builder is not initialized")
@@ -50,70 +68,120 @@ func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pi
 	if err := plan.Validate(); err != nil {
 		return nil, err
 	}
-	source, transforms, relationID, err := b.lowerNode(ctx, plan)
+	stage, err := b.lowerNode(ctx, plan)
 	if err != nil {
 		return nil, err
 	}
-	return &pipeline.Pipeline{
-		ID:         "sql:" + relationID,
-		Source:     source,
-		Transforms: transforms,
-		Sink:       sink,
-	}, nil
+	return b.pipelineForStage(stage, sink), nil
 }
 
-// lowerNode 自底向上构造 source 与 transform 顺序，保证 Filter/Project/Limit 的 SQL 语义顺序与 PhysicalPlan 一致。
-func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (pipeline.Source, []pipeline.TransformOperator, string, error) {
+// pipelineForStage 把已经完整 lowered 的 stage 组装为 Pipeline；该步骤不再打开资源，也不会失败。
+func (b *Builder) pipelineForStage(stage loweredStage, sink pipeline.Sink) *pipeline.Pipeline {
+	return &pipeline.Pipeline{
+		ID:           "sql:" + stage.relationID,
+		Source:       stage.source,
+		Transforms:   stage.transforms,
+		Sink:         sink,
+		Dependencies: stage.dependencies,
+	}
+}
+
+// lowerNode 自底向上构造 stage；Filter/Project/Limit 保持同 stage，Distinct 切出 dependency stage。
+func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, nil, "", err
+		return loweredStage{}, err
 	}
 	switch plan.Kind {
 	case planner.PhysicalScan:
 		if plan.Scan == nil {
-			return nil, nil, "", fmt.Errorf("physical scan has no ScanSpec")
+			return loweredStage{}, fmt.Errorf("physical scan has no ScanSpec")
 		}
 		if plan.Scan.Fingerprint == "" {
-			return nil, nil, "", fmt.Errorf("physical scan %q has empty dataset fingerprint", plan.Scan.RelationID)
+			return loweredStage{}, fmt.Errorf("physical scan %q has empty dataset fingerprint", plan.Scan.RelationID)
 		}
 		source, err := b.Sources.Open(ctx, *plan.Scan)
 		if err != nil {
-			return nil, nil, "", fmt.Errorf("open scan %q: %w", plan.Scan.RelationID, err)
+			return loweredStage{}, fmt.Errorf("open scan %q: %w", plan.Scan.RelationID, err)
 		}
 		if source == nil {
-			return nil, nil, "", fmt.Errorf("open scan %q returned nil source", plan.Scan.RelationID)
+			return loweredStage{}, fmt.Errorf("open scan %q returned nil source", plan.Scan.RelationID)
 		}
-		return source, nil, plan.Scan.RelationID, nil
+		return loweredStage{source: source, relationID: plan.Scan.RelationID}, nil
 	case planner.PhysicalFilter:
-		source, transforms, relationID, err := b.lowerNode(ctx, plan.Children[0])
-		if err != nil {
-			return nil, nil, "", err
-		}
+		// 先验证/构造 transform，再打开 child source，避免 transform 配置错误留下已打开 source。
 		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
 		if err != nil {
-			return nil, nil, "", err
+			return loweredStage{}, err
 		}
-		return source, append(transforms, filter), relationID, nil
-	case planner.PhysicalProject:
-		source, transforms, relationID, err := b.lowerNode(ctx, plan.Children[0])
+		stage, err := b.lowerNode(ctx, plan.Children[0])
 		if err != nil {
-			return nil, nil, "", err
+			return loweredStage{}, err
 		}
+		stage.transforms = append(stage.transforms, filter)
+		return stage, nil
+	case planner.PhysicalProject:
 		project, err := sqltransform.NewProject(b.Executor, plan.Projection)
 		if err != nil {
-			return nil, nil, "", err
+			return loweredStage{}, err
 		}
-		return source, append(transforms, project), relationID, nil
-	case planner.PhysicalLimit:
-		source, transforms, relationID, err := b.lowerNode(ctx, plan.Children[0])
+		stage, err := b.lowerNode(ctx, plan.Children[0])
 		if err != nil {
-			return nil, nil, "", err
+			return loweredStage{}, err
 		}
+		stage.transforms = append(stage.transforms, project)
+		return stage, nil
+	case planner.PhysicalDistinct:
+		return b.lowerDistinct(ctx, plan)
+	case planner.PhysicalLimit:
 		limit, err := sqltransform.NewLimit(b.Executor, plan.Offset, plan.Limit, plan.Limit == planner.UnlimitedRows)
 		if err != nil {
-			return nil, nil, "", err
+			return loweredStage{}, err
 		}
-		return source, append(transforms, limit), relationID, nil
+		stage, err := b.lowerNode(ctx, plan.Children[0])
+		if err != nil {
+			return loweredStage{}, err
+		}
+		stage.transforms = append(stage.transforms, limit)
+		return stage, nil
 	default:
-		return nil, nil, "", fmt.Errorf("physical operator %d is not wired to Push Pipeline yet", plan.Kind)
+		return loweredStage{}, fmt.Errorf("physical operator %d is not wired to Push Pipeline yet", plan.Kind)
 	}
+}
+
+// lowerDistinct 用 bounded blocking bridge 把 child Pipeline 的 Sink ownership 转成下一 stage Source。
+func (b *Builder) lowerDistinct(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	if b.Distincts == nil {
+		return loweredStage{}, fmt.Errorf("physical DISTINCT requires DistinctFactory")
+	}
+	if len(plan.Children) != 1 {
+		return loweredStage{}, fmt.Errorf("physical DISTINCT requires one child")
+	}
+	input := append([]planner.Column(nil), plan.Children[0].Output...)
+	operator, err := b.Distincts.OpenDistinct(ctx, input, plan.Estimate)
+	if err != nil {
+		return loweredStage{}, err
+	}
+	if operator == nil {
+		return loweredStage{}, fmt.Errorf("DistinctFactory returned nil operator")
+	}
+	queue := b.BlockingQueue
+	if queue == 0 {
+		queue = 1
+	}
+	bridge, err := blocking.New(operator, queue)
+	if err != nil {
+		operator.Release()
+		return loweredStage{}, err
+	}
+
+	childStage, err := b.lowerNode(ctx, plan.Children[0])
+	if err != nil {
+		return loweredStage{}, errors.Join(err, bridge.Close())
+	}
+	childPipeline := b.pipelineForStage(childStage, bridge)
+	return loweredStage{
+		source:       bridge,
+		relationID:   childStage.relationID + ":distinct",
+		dependencies: []*pipeline.Pipeline{childPipeline},
+	}, nil
 }
