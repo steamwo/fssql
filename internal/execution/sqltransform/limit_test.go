@@ -123,6 +123,11 @@ func TestLimitTransformConcurrentGlobalCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 测试数据在启动 worker 前构造，避免在非 test goroutine 中调用 t.Fatal/FailNow。
+	inputs := make([]*vector.DataChunk, 4)
+	for worker := range inputs {
+		inputs[worker] = makeLimitChunk(t, scope, buffers, worker*10, 10)
+	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	total := 0
@@ -131,7 +136,7 @@ func TestLimitTransformConcurrentGlobalCount(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			input := makeLimitChunk(t, scope, buffers, worker*10, 10)
+			input := inputs[worker]
 			output, transformErr := operator.Transform(context.Background(), input)
 			input.Release()
 			if transformErr != nil {
