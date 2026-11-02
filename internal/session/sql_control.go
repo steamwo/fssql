@@ -3,16 +3,40 @@ package session
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/steamwo/fssql/internal/catalog"
 	"github.com/steamwo/fssql/internal/security"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
+const maxSecretTypes = 64
+
 // SQLControlAdapter 执行不需要 query data pipeline 的 Stable control statement。
 // SELECT/COPY/DESCRIBE 不属于此路径，避免绕过统一 Query/Export 执行边界。
 type SQLControlAdapter struct {
-	Secrets *security.SecretManager // Secrets 是 CREATE SECRET 唯一允许写入的 credential store。
+	secrets     *security.SecretManager // secrets 是 CREATE SECRET 唯一允许写入的 credential store。
+	secretTypes map[string]struct{}      // secretTypes 是冻结的小型 TYPE adapter allowlist；TYPE 不写入 credential map。
+}
+
+// NewSQLControlAdapter 创建 control adapter，并冻结 SQL CREATE SECRET 可用的 TYPE metadata。
+// nil SecretManager 允许只执行 Catalog DDL；CREATE SECRET 会显式失败。
+func NewSQLControlAdapter(secrets *security.SecretManager, secretTypes []string) (*SQLControlAdapter, error) {
+	if len(secretTypes) > maxSecretTypes {
+		return nil, fmt.Errorf("session: too many secret types: %d > %d", len(secretTypes), maxSecretTypes)
+	}
+	types := make(map[string]struct{}, len(secretTypes))
+	for _, value := range secretTypes {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			return nil, fmt.Errorf("session: secret type must not be empty")
+		}
+		if _, exists := types[value]; exists {
+			return nil, fmt.Errorf("session: duplicate secret type %s", value)
+		}
+		types[value] = struct{}{}
+	}
+	return &SQLControlAdapter{secrets: secrets, secretTypes: types}, nil
 }
 
 // Apply 执行已绑定 control statement；Binder 已负责语法与语义校验，这里只做 subsystem 映射和 ownership commit。
@@ -29,13 +53,25 @@ func (a *SQLControlAdapter) Apply(ctx context.Context, statement *Statement, bou
 	case *binder.BoundCreateExternalTable:
 		return applyCreateExternalTable(ctx, statement, value)
 	case *binder.BoundCreateSecret:
-		if a == nil || a.Secrets == nil {
+		if a == nil || a.secrets == nil {
 			return fmt.Errorf("session: SecretManager is not configured")
 		}
-		return applyCreateSecret(a.Secrets, value)
+		if !a.supportsSecretType(value.Type) {
+			return fmt.Errorf("session: unsupported secret TYPE %s", value.Type)
+		}
+		return applyCreateSecret(a.secrets, value)
 	default:
 		return fmt.Errorf("session: statement kind %d is not a control-statement adapter responsibility", bound.StatementKind())
 	}
+}
+
+// supportsSecretType 验证 TYPE adapter metadata；TYPE 只参与 adapter selection，不进入 credential storage。
+func (a *SQLControlAdapter) supportsSecretType(value string) bool {
+	if a == nil {
+		return false
+	}
+	_, ok := a.secretTypes[strings.ToLower(strings.TrimSpace(value))]
+	return ok
 }
 
 // applyCreateView 写当前 Statement 独占 Catalog Transaction，并仅在 metadata 构造成功后提交。
@@ -79,15 +115,12 @@ func applyCreateExternalTable(ctx context.Context, statement *Statement, value *
 	return statement.CommitCatalog(ctx)
 }
 
-// applyCreateSecret 将 bound credential 明文只复制到 SecretManager；错误与审计路径不格式化 credential value。
+// applyCreateSecret 将 bound credential 明文只复制到 SecretManager；TYPE 已由 adapter allowlist 消费，不进入 Values。
 func applyCreateSecret(manager *security.SecretManager, value *binder.BoundCreateSecret) error {
 	if value == nil {
 		return fmt.Errorf("session: invalid bound CREATE SECRET")
 	}
-	credentials := make(map[string]string, len(value.Credentials)+1)
-	// TYPE 是 adapter metadata；SecretManager 当前只有 key/value credential store，因此使用保留键保存类型。
-	// 该值不是 credential secret，但与 credential 一起只存在 SecretManager，不写入 Catalog。
-	credentials["type"] = value.Type
+	credentials := make(map[string]string, len(value.Credentials))
 	for _, credential := range value.Credentials {
 		credentials[credential.Key] = credential.Value()
 	}
