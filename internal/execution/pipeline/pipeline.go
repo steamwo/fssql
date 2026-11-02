@@ -52,6 +52,9 @@ type Pipeline struct {
 	Transforms   []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
 	Sink         Sink
 	Dependencies []*Pipeline
+	// Abort 仅用于“dependency 失败导致本 Pipeline 根本未运行”时回收当前节点已创建的 ownership。
+	// 成功运行、当前 Pipeline 自身失败、cycle 检测都不会通过此字段重复清理。
+	Abort func() error
 }
 
 func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer) error {
@@ -157,7 +160,12 @@ func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Obse
 		mu.Unlock()
 		for _, d := range p.Dependencies {
 			if err := visit(d); err != nil {
-				return err
+				// 当前 Pipeline 尚未运行；若它已经持有 join/runtime 等 ownership，必须在 dependency 错误返回前释放。
+				var abortErr error
+				if p.Abort != nil {
+					abortErr = p.Abort()
+				}
+				return errors.Join(err, abortErr)
 			}
 		}
 		if err := p.Run(ctx, workers, obs); err != nil {
