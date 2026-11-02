@@ -79,13 +79,12 @@ func TestLowerSQLExpressionCastBoundary(t *testing.T) {
 	}
 }
 
-// TestLowerSQLExpressionFailsClosedOnMissingStableKernels 记录当前执行缺口，防止 unsupported SQL 被偷偷降级。
+// TestLowerSQLExpressionFailsClosedOnMissingStableKernels 记录仍不属于 legacy lowering 的执行边界，防止 unsupported SQL 被偷偷降级。
 func TestLowerSQLExpressionFailsClosedOnMissingStableKernels(t *testing.T) {
 	cases := []*binder.BoundExpression{
 		{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Integer}, Literal: "1"},
 		{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: "x"},
 		{Kind: binder.BoundBinary, Type: types.LogicalType{ID: types.Double}, Op: "/", Children: []*binder.BoundExpression{{Kind: binder.BoundColumn, Type: types.LogicalType{ID: types.Double}, ColumnIndex: 0}, {Kind: binder.BoundColumn, Type: types.LogicalType{ID: types.Double}, ColumnIndex: 1}}},
-		{Kind: binder.BoundBinary, Type: types.LogicalType{ID: types.Boolean}, Op: ">=", Children: []*binder.BoundExpression{{Kind: binder.BoundColumn, Type: types.LogicalType{ID: types.BigInt}, ColumnIndex: 0}, {Kind: binder.BoundColumn, Type: types.LogicalType{ID: types.BigInt}, ColumnIndex: 1}}},
 		{Kind: binder.BoundFunction, FunctionID: function.SumID, FunctionKind: function.Aggregate, Type: types.LogicalType{ID: types.HugeInt}},
 		{Kind: binder.BoundSubquery, Type: types.LogicalType{ID: types.BigInt}},
 	}
@@ -114,7 +113,7 @@ func TestLowerSQLExpressionDeepCopiesType(t *testing.T) {
 // TestLowerSQLExpressionDiagnosticIsSpecific 防止 unsupported kernel 被包装成模糊 generic error。
 func TestLowerSQLExpressionDiagnosticIsSpecific(t *testing.T) {
 	_, err := LowerSQLExpression(&binder.BoundExpression{Kind: binder.BoundUnary, Type: types.LogicalType{ID: types.Integer}, Op: "-", Children: []*binder.BoundExpression{{Kind: binder.BoundColumn, Type: types.LogicalType{ID: types.Integer}, ColumnIndex: 0}}})
-	if err == nil || !strings.Contains(err.Error(), "typed numeric kernel") {
+	if err == nil || !strings.Contains(err.Error(), "requires BIGINT kernel") {
 		t.Fatalf("err=%v", err)
 	}
 }

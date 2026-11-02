@@ -47,6 +47,17 @@ type Destination struct {
 	URI string `json:"uri"`
 }
 
+// PublishedObjectIdentity 是 single-object publish 后用于 crash reconciliation 的稳定内部身份。
+// 它是 Manifest recovery metadata，不是 SQL/public storage sidecar contract。
+type PublishedObjectIdentity struct {
+	ETag      string `json:"etag,omitempty"`
+	VersionID string `json:"version_id,omitempty"`
+	Size      int64  `json:"size"`
+}
+
+// Stable 表示该 identity 至少包含一个协议可验证的稳定 token。
+func (i PublishedObjectIdentity) Stable() bool { return i.ETag != "" || i.VersionID != "" }
+
 // FileEntry 描述一个由 Manifest 管理的目标文件。
 type FileEntry struct {
 	// Path 是相对于目标数据集根目录的稳定文件名。
@@ -57,6 +68,8 @@ type FileEntry struct {
 	Size int64 `json:"size,omitempty"`
 	// Checksum 是可选的完整文件内容校验值。
 	Checksum string `json:"checksum,omitempty"`
+	// PublishedIdentity 仅在 VFS 已成功发布并返回对象身份后记录；缺失时恢复不得猜测已提交。
+	PublishedIdentity *PublishedObjectIdentity `json:"published_identity,omitempty"`
 }
 
 // Manifest 是 Phase 4 导出恢复与提交的唯一持久化作业状态载体。
@@ -146,6 +159,14 @@ func (m *Manifest) Validate() error {
 		if f.Size < 0 {
 			return fmt.Errorf("%w: file %q has negative size", ErrInvalidManifest, f.Path)
 		}
+		if f.PublishedIdentity != nil {
+			if f.State != FileStateComplete {
+				return fmt.Errorf("%w: file %q has published identity before COMPLETE", ErrInvalidManifest, f.Path)
+			}
+			if f.PublishedIdentity.Size < 0 || f.PublishedIdentity.Size != f.Size {
+				return fmt.Errorf("%w: file %q published identity size mismatch", ErrInvalidManifest, f.Path)
+			}
+		}
 	}
 	if m.ExportState == ExportStateCommitted && !m.AllFilesComplete() {
 		return fmt.Errorf("%w: committed export contains incomplete files", ErrInvalidManifest)
@@ -170,6 +191,22 @@ func (m *Manifest) TransitionExport(next ExportState) error {
 
 // TransitionFile 更新一个目标文件的状态；COMPLETE 文件不可重新进入写入态。
 func (m *Manifest) TransitionFile(path string, next FileState, size int64, checksum string) error {
+	return m.transitionFile(path, next, size, checksum, nil)
+}
+
+// TransitionFilePublished 把成功 VFS publish 返回的稳定对象身份与 COMPLETE 状态一起记录。
+func (m *Manifest) TransitionFilePublished(path string, size int64, checksum string, identity PublishedObjectIdentity) error {
+	if !identity.Stable() {
+		return fmt.Errorf("%w: published identity is not stable", ErrInvalidTransition)
+	}
+	if identity.Size != size {
+		return fmt.Errorf("%w: published identity size %d != file size %d", ErrInvalidTransition, identity.Size, size)
+	}
+	copy := identity
+	return m.transitionFile(path, FileStateComplete, size, checksum, &copy)
+}
+
+func (m *Manifest) transitionFile(path string, next FileState, size int64, checksum string, identity *PublishedObjectIdentity) error {
 	if m == nil {
 		return fmt.Errorf("%w: nil manifest", ErrInvalidTransition)
 	}
@@ -188,10 +225,12 @@ func (m *Manifest) TransitionFile(path string, next FileState, size int64, check
 		if next == FileStateComplete {
 			f.Size = size
 			f.Checksum = checksum
-		} else if next != FileStateComplete {
+			f.PublishedIdentity = identity
+		} else {
 			// 未完成文件不能携带上一次尝试留下的完成元数据，恢复时会整文件重做。
 			f.Size = 0
 			f.Checksum = ""
+			f.PublishedIdentity = nil
 		}
 		return nil
 	}

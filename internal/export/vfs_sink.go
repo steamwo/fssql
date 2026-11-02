@@ -35,7 +35,23 @@ func NewVFSByteSink(ctx context.Context, registry *vfs.Registry, uri vfs.URI, op
 	if err != nil {
 		return nil, err
 	}
-	return &VFSByteSink{handle: h, digest: sha256.New()}, nil
+	return newVFSByteSinkFromHandle(h), nil
+}
+
+// NewAtomicVFSByteSink 强制经过 AtomicPublishWrite gate；不允许退回普通 OpenWrite。
+func NewAtomicVFSByteSink(ctx context.Context, registry *vfs.Registry, uri vfs.URI, opts vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (*VFSByteSink, error) {
+	if registry == nil {
+		return nil, errors.New("export: VFS registry is required")
+	}
+	h, err := registry.OpenAtomicPublishWrite(ctx, uri, opts, scope, bm)
+	if err != nil {
+		return nil, err
+	}
+	return newVFSByteSinkFromHandle(h), nil
+}
+
+func newVFSByteSinkFromHandle(handle vfs.WriteHandle) *VFSByteSink {
+	return &VFSByteSink{handle: handle, digest: sha256.New()}
 }
 
 // Write 完整转发字节；short write 被硬失败，不允许格式层产生静默截断文件。
@@ -75,7 +91,7 @@ func (s *VFSByteSink) Flush(ctx context.Context) error {
 	return nil
 }
 
-// Close 完成单个远端文件，并返回字节数与 SHA-256；它不定义 dataset commit。
+// Close 完成单个远端文件，并返回字节数、SHA-256 与 VFS published identity；它不定义 dataset commit。
 func (s *VFSByteSink) Close(ctx context.Context) (WriteResult, error) {
 	if s == nil {
 		return WriteResult{}, ErrWriterClosed
@@ -94,7 +110,11 @@ func (s *VFSByteSink) Close(ctx context.Context) (WriteResult, error) {
 		return WriteResult{}, io.ErrShortWrite
 	}
 	s.terminal = true
-	return WriteResult{Bytes: s.written, Checksum: hex.EncodeToString(s.digest.Sum(nil))}, nil
+	var published *PublishedObjectIdentity
+	if identity.Stable() {
+		published = &PublishedObjectIdentity{ETag: identity.ETag, VersionID: identity.VersionID, Size: s.written}
+	}
+	return WriteResult{Bytes: s.written, Checksum: hex.EncodeToString(s.digest.Sum(nil)), PublishedIdentity: published}, nil
 }
 
 // Abort 丢弃 incomplete file；无论底层删除是否成功，本 sink 都进入终态，错误交给 failure gate 处理。

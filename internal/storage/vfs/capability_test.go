@@ -29,6 +29,17 @@ func TestCapabilitySetOperations(t *testing.T) {
 	}
 }
 
+func TestAtomicPublishWriteCapabilityIsIndependentFromAtomicRename(t *testing.T) {
+	set := Capabilities(AtomicRename)
+	if set.Has(AtomicPublishWrite) {
+		t.Fatal("AtomicRename must not imply AtomicPublishWrite")
+	}
+	set = set.With(AtomicPublishWrite)
+	if !set.Has(AtomicPublishWrite) || !set.Has(AtomicRename) {
+		t.Fatalf("unexpected capability set: %#x", uint64(set))
+	}
+}
+
 func TestResolveEffectiveCapabilitiesRuntimeProbeOnlyNarrows(t *testing.T) {
 	static := NewCapabilitySet(
 		CapabilityRandomRead,

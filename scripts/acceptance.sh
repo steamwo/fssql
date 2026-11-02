@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 phase="${1:-phase-0}"
+
+# Phase 6 has its own release-only gate so Feature Freeze checks remain easy to
+# audit without duplicating or weakening the already accepted phase gates.
+if [[ "$phase" == "phase-6" || "$phase" == "6" ]]; then
+  exec bash ./scripts/phase6-release.sh
+fi
+
 case "$phase" in
   phase-0|0)
     go test ./...
@@ -77,6 +84,27 @@ case "$phase" in
     go vet ./...
     go run ./tools/architecture-check .
 
+    # ADR-0006 remediation 的参考语义版本是 release input，缺失或漂移必须失败，不能 skip。
+    python3 - <<'PY'
+import duckdb
+want = "2.0.0"
+if duckdb.__version__ != want:
+    raise SystemExit(f"DuckDB reference version={duckdb.__version__!r}, want {want!r}")
+PY
+
+    # Stable public composition / COPY / atomic publish 以真实 production boundaries 重新验证。
+    go test -count=1 \
+      ./pkg/gosql \
+      ./internal/session \
+      ./internal/export \
+      ./internal/storage/vfs \
+      ./internal/storage/remote/s3
+    go test -race -count=1 ./pkg/gosql
+
+    # SQLLogic expected result、live DuckDB differential、deviations registry 必须一起通过；Stable mismatch 不允许 registry waiver。
+    FSSQL_REQUIRE_DUCKDB=1 go test -count=1 ./test/compat
+    FSSQL_REQUIRE_DUCKDB=1 go test -race -count=1 ./test/compat
+
     # 生命周期、security/credential、配置兼容和长期稳定性使用已独立验收的真实组件 gate。
     bash ./scripts/phase5-cancellation-leak.sh
     bash ./scripts/phase5-security.sh
@@ -95,7 +123,8 @@ case "$phase" in
       ./internal/storage/remote/sftp \
       ./internal/storage/remote/s3
 
-    # Phase 5 hot paths 记录本机 baseline，不使用跨机器绝对阈值。
+    # Phase 5 hot paths 记录本机 baseline，不使用跨机器绝对阈值；Native API 也必须留下基线。
+    go test -run '^$' -bench 'BenchmarkNativeQueryChunks$' -benchmem -benchtime=100ms ./pkg/gosql
     go test -run '^$' -bench 'Benchmark' -benchmem -benchtime=100ms \
       ./internal/server \
       ./internal/profile \

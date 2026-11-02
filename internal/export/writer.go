@@ -20,6 +20,8 @@ type WriteResult struct {
 	Bytes int64
 	// Checksum 是可选的完整文件校验值。
 	Checksum string
+	// PublishedIdentity 是 VFS publish 成功后返回的稳定对象身份；普通测试/非稳定驱动可为空。
+	PublishedIdentity *PublishedObjectIdentity
 }
 
 // FormatWriter 是所有导出格式统一消费自研 DataChunk 的生命周期接口。

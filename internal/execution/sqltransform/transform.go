@@ -161,6 +161,12 @@ func materializeSelection(ctx context.Context, executor *expression.Executor, in
 		releaseVectors(columns)
 		return nil, err
 	}
+	// A relation may legally carry rows with zero physical columns (for example
+	// SELECT literals before projection). NewDataChunk cannot infer cardinality
+	// without a column, so preserve the filter selection count explicitly.
+	if len(columns) == 0 {
+		chunk.Cardinality = len(rows)
+	}
 	return chunk, nil
 }
 

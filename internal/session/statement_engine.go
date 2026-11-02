@@ -17,31 +17,44 @@ import (
 )
 
 // PreparedStatement 是 Native/Server 共用的 SQL statement 执行边界。
-// SELECT、DESCRIBE 与 control statements 都只向 generic Pipeline Sink 输出 native DataChunk。
+// SELECT、DESCRIBE、COPY 与 control statements 都只向 generic Pipeline Sink 输出 native DataChunk。
 type PreparedStatement interface {
 	Run(*query.Context, pipeline.Sink) error
 	Output() []planner.Column
 }
 
-// StableStatementEngine 在 StableSQLEngine 之上增加已冻结 control/DESCRIBE statement composition。
+// StableStatementEngine 在 StableSQLEngine 之上增加已冻结 control/DESCRIBE/COPY statement composition。
 type StableStatementEngine struct {
 	selects *StableSQLEngine   // selects 是 SELECT/Query 唯一 production execution path。
 	control *SQLControlAdapter // control 是 Catalog/Secret 副作用唯一 adapter。
+	copy    CopyExecutor       // copy 仅适配既有 Export/VFS，不复制 SQL/Query 执行链。
 }
 
-// NewStableStatementEngine 创建 statement composition root。
+// NewStableStatementEngine 创建不含 COPY adapter 的 statement composition root。
+// 这保持已有 Native/control 使用者兼容；COPY 请求会显式失败，不能降级到非原子 writer。
 func NewStableStatementEngine(selects *StableSQLEngine, control *SQLControlAdapter) (*StableStatementEngine, error) {
+	return newStableStatementEngine(selects, control, nil)
+}
+
+// NewStableStatementEngineWithCopy 创建包含 Stable COPY TO adapter 的 composition root。
+func NewStableStatementEngineWithCopy(selects *StableSQLEngine, control *SQLControlAdapter, copy CopyExecutor) (*StableStatementEngine, error) {
+	if copy == nil {
+		return nil, fmt.Errorf("session: Stable statement COPY executor is required")
+	}
+	return newStableStatementEngine(selects, control, copy)
+}
+
+func newStableStatementEngine(selects *StableSQLEngine, control *SQLControlAdapter, copy CopyExecutor) (*StableStatementEngine, error) {
 	if selects == nil || selects.config.Catalog == nil || selects.config.Sources == nil || selects.functions == nil || selects.config.Buffers == nil {
 		return nil, fmt.Errorf("session: Stable statement engine requires initialized StableSQLEngine")
 	}
 	if control == nil {
 		return nil, fmt.Errorf("session: Stable statement engine requires SQLControlAdapter")
 	}
-	return &StableStatementEngine{selects: selects, control: control}, nil
+	return &StableStatementEngine{selects: selects, control: control, copy: copy}, nil
 }
 
-// Prepare 只做 parse/bind/planning，不提前执行 Catalog/Secret 副作用。
-// COPY TO 在 ADR-0008 未 ACCEPTED 前保持明确 blocker，禁止自行选择单文件 commit 语义。
+// Prepare 只做 parse/bind/planning，不提前执行 Catalog/Secret/Export 副作用。
 func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, sql string) (PreparedStatement, error) {
 	if e == nil || e.selects == nil || e.control == nil {
 		return nil, fmt.Errorf("session: Stable statement engine is uninitialized")
@@ -59,9 +72,6 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 	if _, ok := parsed.(*ast.SelectStmt); ok {
 		return e.selects.Prepare(ctx, q, sql)
 	}
-	if _, ok := parsed.(*ast.CopyStmt); ok {
-		return nil, fmt.Errorf("session: COPY TO execution is blocked pending ACCEPTED ADR-0008 single-file commit semantics")
-	}
 
 	// CREATE SECRET 的 Binder 不需要 Catalog/source resolver，避免无关 VFS/source configuration 阻塞 credential control path。
 	if _, ok := parsed.(*ast.CreateSecretStmt); ok {
@@ -72,7 +82,7 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 		return &preparedControlStatement{engine: e, bound: bound}, nil
 	}
 
-	bindings, _, err := e.selects.config.Sources.NewQuerySources(q)
+	bindings, scans, err := e.selects.config.Sources.NewQuerySources(q)
 	if err != nil {
 		return nil, fmt.Errorf("session: create statement source adapters: %w", err)
 	}
@@ -106,6 +116,27 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 	if err != nil {
 		return nil, err
 	}
+
+	// COPY must build its physical plan while the statement planning transaction
+	// and view/source resolvers are still valid. The returned prepared plan owns
+	// no Catalog transaction; rollback happens before Prepare returns.
+	var copyPrepared *PreparedSQLQuery
+	if value, ok := bound.(*binder.BoundCopyTo); ok {
+		if e.copy == nil {
+			return nil, fmt.Errorf("session: COPY executor is not configured")
+		}
+		if scans == nil {
+			return nil, fmt.Errorf("session: COPY query source factory returned nil runtime scan factory")
+		}
+		copyPrepared, err = e.selects.prepareBoundQuery(ctx, q, value.Query, scans, views)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureFrozenSourceSnapshot(q); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := rollback(); err != nil {
 		return nil, fmt.Errorf("session: close statement planning transaction: %w", err)
 	}
@@ -113,6 +144,8 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 	switch value := bound.(type) {
 	case *binder.BoundCreateView, *binder.BoundCreateExternalTable:
 		return &preparedControlStatement{engine: e, bound: bound}, nil
+	case *binder.BoundCopyTo:
+		return &preparedCopyStatement{executor: e.copy, bound: value, query: copyPrepared, sql: sql}, nil
 	case *binder.BoundDescribe:
 		describe, ok := parsed.(*ast.DescribeStmt)
 		preserve := ok && describe.Relation != nil && describe.Query == nil
