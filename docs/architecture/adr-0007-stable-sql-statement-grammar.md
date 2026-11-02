@@ -1,8 +1,14 @@
 # ADR-0007 — Stable v1 SQL Statement Grammar and Security Mapping
 
-Status: **PROPOSED**
+Status: **ACCEPTED**
 
 Date: 2026-11-02
+
+## Decision
+
+Option A is accepted.
+
+The v1 Stable feature list remains unchanged. This ADR freezes the minimum public grammar required to implement the already-declared Stable statements, preserves DuckDB-compatible shapes where equivalent statements exist, and makes the project-specific Catalog/Security mappings explicit.
 
 ## Context
 
@@ -37,17 +43,7 @@ The existing implementation boundaries relevant to this decision are:
 - `SecretManager`: in-memory scoped secrets with explicit Subjects/Schemes/Hosts ACL and no persistent-secret contract;
 - AD-009 Export: `COPY TO` must lower to existing ExportCoordinator/Manifest/Writer/Committer boundaries rather than define a second writer path.
 
-## Problem
-
-Implementation cannot proceed safely until the Stable grammar and its mapping to Catalog/Security/Export are frozen.
-
-Three outcomes are possible.
-
-## Option A — Freeze a minimal v1 grammar, DuckDB-compatible where an equivalent exists
-
-**Recommended.**
-
-Use DuckDB-compatible statement shapes for `CREATE VIEW`, `COPY TO`, and `DESCRIBE`, use a constrained DuckDB-style option-list shape for `CREATE SECRET` while preserving this project's ACL boundary, and define one project-specific `CREATE EXTERNAL TABLE ... USING <table_function>(...)` grammar.
+## Accepted Option A — Minimal v1 grammar, DuckDB-compatible where an equivalent exists
 
 No `OR REPLACE`, `IF NOT EXISTS`, persistent secret, arbitrary secret provider, generic DDL option, or additional statement is implied unless explicitly listed below.
 
@@ -172,30 +168,20 @@ Rules:
 - execution adapters call existing subsystems; they do not duplicate Catalog/Security/Export state machines;
 - unsupported syntax/options fail explicitly under I-12.
 
-## Option B — Copy DuckDB statement grammar wholesale
+## Rejected Option B — Copy DuckDB statement grammar wholesale
 
-Adopt current DuckDB grammar for all similarly named statements and invent an emulation mapping for `CREATE EXTERNAL TABLE`.
-
-Rejected as recommendation because:
+Rejected because:
 
 - DuckDB does not define this project's external-table Catalog abstraction;
 - DuckDB persistent-secret/provider/scope semantics do not match the existing SecretManager ACL model;
 - wholesale COPY options would promise formats/options not necessarily implemented by the current Export contracts;
 - it would expand the frozen Stable surface beyond `feature-contract.md` rather than merely complete it.
 
-## Option C — Remove or defer the underspecified Stable statements
+## Rejected Option C — Remove or defer the underspecified Stable statements
 
-Reclassify `CREATE EXTERNAL TABLE`, `CREATE SECRET`, or `COPY TO` as Experimental/Deferred.
+Rejected because ADR-0006 / AD-044 explicitly chose to preserve the existing v1 Stable contract rather than narrow it.
 
-Rejected as recommendation because ADR-0006 / AD-044 explicitly chose to preserve the existing v1 Stable contract rather than narrow it.
-
-## Recommendation
-
-Accept **Option A**.
-
-It keeps the Stable feature list unchanged, freezes the minimum public grammar needed to implement the already-declared entries, preserves DuckDB compatibility where there is an equivalent statement, and makes project-specific Catalog/Security behavior explicit instead of hiding it in implementation defaults.
-
-## Implementation order after acceptance
+## Implementation order
 
 1. Extend lexer/token set and Own AST for the five Stable statement families.
 2. Extend PEG-style statement parser; Pratt remains expression-only.
@@ -209,18 +195,11 @@ It keeps the Stable feature list unchanged, freezes the minimum public grammar n
 
 ## Acceptance impact
 
-Until this ADR is accepted or replaced:
-
-```text
-ADR-0006 remediation work item #6 is BLOCKED at Stable statement grammar.
-No implementation PR may invent CREATE EXTERNAL TABLE or CREATE SECRET public syntax.
-Phase 5 remains IN_PROGRESS.
-Phase 6 remains LOCKED.
-```
+With Option A accepted, ADR-0006 remediation work item #6 may continue under this frozen grammar. Phase 5 remains `IN_PROGRESS` and Phase 6 remains `LOCKED` until remediation and release-precheck gates complete.
 
 ## Architecture invariants
 
-This proposal changes no runtime invariant by itself. An accepted implementation must preserve I-01 through I-12, especially:
+This decision changes no runtime invariant by itself. Its implementation must preserve I-01 through I-12, especially:
 
 - I-07: Statement SourceSnapshot remains immutable once bound;
 - I-09: SQL semantics are centralized in Binder/FunctionCatalog rather than per adapter;
