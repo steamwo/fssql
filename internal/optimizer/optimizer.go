@@ -57,7 +57,9 @@ func (o *Optimizer) markPushdownCandidates(p *planner.LogicalPlan) {
 			child.Scan.Pushdown.Projection = cols
 		}
 	case planner.LogicalLimit:
-		if p.Offset == 0 && p.Limit > 0 && (child.Scan.Pushdown.Limit == 0 || p.Limit < child.Scan.Pushdown.Limit) {
+		// UnlimitedRows 只表示 OFFSET-only；不得把 sentinel 作为真实 scan LIMIT candidate 下推。
+		// LIMIT 0 由 residual PhysicalLimit 精确执行，ScanPushdown.Limit 的 0 仍保留“未接受 pushdown”语义。
+		if p.Offset == 0 && p.Limit != planner.UnlimitedRows && p.Limit > 0 && (child.Scan.Pushdown.Limit == 0 || p.Limit < child.Scan.Pushdown.Limit) {
 			child.Scan.Pushdown.Limit = p.Limit
 		}
 	}
@@ -158,13 +160,23 @@ func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, childr
 		return children[0].Estimate, nil
 	case planner.LogicalLimit:
 		e := children[0].Estimate
-		if p.Offset >= e.Rows {
-			e.Rows = 0
-		} else if e.Rows > 0 {
-			e.Rows -= p.Offset
+		// Rows==0 且 Confidence==0 表示 Unknown；OFFSET-only 不能把 UnlimitedRows sentinel 伪造成真实 cardinality。
+		if e.Rows > 0 {
+			if p.Offset >= e.Rows {
+				e.Rows = 0
+			} else {
+				e.Rows -= p.Offset
+			}
 		}
-		if p.Limit > 0 && (e.Rows == 0 || p.Limit < e.Rows) {
-			e.Rows = p.Limit
+		if p.Limit != planner.UnlimitedRows {
+			if p.Limit == 0 {
+				// LIMIT 0 即使 child statistics Unknown 也有精确结果 0。
+				e.Rows = 0
+				e.Confidence = 1
+			} else if e.Rows == 0 || p.Limit < e.Rows {
+				// Unknown child 用 LIMIT 作为保守上界；已知 child 取 min(rows, limit)。
+				e.Rows = p.Limit
+			}
 		}
 		return e, nil
 	case planner.LogicalJoin:
