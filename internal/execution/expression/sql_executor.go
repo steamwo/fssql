@@ -21,6 +21,9 @@ func (e *Executor) ExecuteSQL(expr *binder.BoundExpression, chunk *vector.DataCh
 	if expr == nil || chunk == nil {
 		return nil, fmt.Errorf("SQL expression executor requires expression and chunk")
 	}
+	if expr.Kind == binder.BoundRuntimeConstant {
+		return e.executeSQLRuntimeConstant(expr, chunk.Cardinality)
+	}
 	if lowered, err := LowerSQLExpression(expr); err == nil {
 		return e.Execute(lowered, chunk)
 	}
