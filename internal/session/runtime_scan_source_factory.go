@@ -83,7 +83,9 @@ func (f *RuntimeScanSourceFactory) Open(ctx context.Context, spec planner.ScanSp
 	if open == nil {
 		return nil, fmt.Errorf("session: no runtime scan adapter registered for table function %s", def.Name)
 	}
-	source, err := open(ctx, cloneRuntimeScanSpec(spec))
+	prepared := cloneRuntimeScanSpec(spec)
+	prepared.Function = def.Name
+	source, err := open(ctx, prepared)
 	if err != nil {
 		return nil, fmt.Errorf("session: open runtime scan %s: %w", def.Name, err)
 	}
