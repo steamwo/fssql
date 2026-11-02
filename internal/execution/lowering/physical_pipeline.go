@@ -10,6 +10,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/execution/sqltransform"
 	"github.com/steamwo/fssql/internal/planner"
+	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
 // ScanSourceFactory 把 generic ScanSpec 打开为 Push Pipeline Source。
@@ -30,12 +31,19 @@ type SortFactory interface {
 	OpenSort(context.Context, []planner.Column, []planner.SortKey, planner.CardinalityEstimate) (blocking.Operator, error)
 }
 
+// AggregateFactory 把 generic PhysicalHashAggregate 映射为真实 blocking aggregate operator。
+// group/aggregate arguments 必须已经被 Planner materialize 成 child BoundColumn，factory 不重新执行 SQL expression。
+type AggregateFactory interface {
+	OpenAggregate(context.Context, []planner.Column, []*binder.BoundExpression, []planner.AggregateSpec, planner.CardinalityEstimate) (blocking.Operator, error)
+}
+
 // Builder 把已优化 PhysicalPlan 降低为 Push Pipeline DAG。
 type Builder struct {
 	Sources       ScanSourceFactory    // Sources 是唯一 runtime scan factory。
 	Executor      *expression.Executor // Executor 执行 Binder BoundExpression。
 	Distincts     DistinctFactory      // Distincts 为 PhysicalDistinct 创建 query-scoped blocking operator。
 	Sorts         SortFactory          // Sorts 为 PhysicalSort 创建 query-scoped blocking operator。
+	Aggregates    AggregateFactory     // Aggregates 为 PhysicalHashAggregate 创建 query-scoped blocking operator。
 	BlockingQueue int                  // BlockingQueue 限制 blocking stage handoff；0 使用默认容量 1。
 }
 
@@ -58,7 +66,7 @@ type loweredStage struct {
 	dependencies []*pipeline.Pipeline
 }
 
-// Build 接受当前已接通的 Scan/Filter/Project/Distinct/Sort/Limit；其他 blocking operator 在各自 lowering 完成前显式失败。
+// Build 接受当前已接通的 Scan/Filter/Project/Aggregate/Distinct/Sort/Limit；其他 blocking operator 在各自 lowering 完成前显式失败。
 func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pipeline.Sink) (*pipeline.Pipeline, error) {
 	if b == nil || b.Sources == nil || b.Executor == nil {
 		return nil, fmt.Errorf("physical pipeline lowering builder is not initialized")
@@ -93,7 +101,7 @@ func (b *Builder) pipelineForStage(stage loweredStage, sink pipeline.Sink) *pipe
 	}
 }
 
-// lowerNode 自底向上构造 stage；Filter/Project/Limit 保持同 stage，Distinct/Sort 切出 dependency stage。
+// lowerNode 自底向上构造 stage；Filter/Project/Limit 保持同 stage，Aggregate/Distinct/Sort 切出 dependency stage。
 func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
 	if err := ctx.Err(); err != nil {
 		return loweredStage{}, err
@@ -137,6 +145,8 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 		}
 		stage.transforms = append(stage.transforms, project)
 		return stage, nil
+	case planner.PhysicalHashAggregate:
+		return b.lowerAggregate(ctx, plan)
 	case planner.PhysicalDistinct:
 		return b.lowerDistinct(ctx, plan)
 	case planner.PhysicalSort:
@@ -155,6 +165,24 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 	default:
 		return loweredStage{}, fmt.Errorf("physical operator %d is not wired to Push Pipeline yet", plan.Kind)
 	}
+}
+
+// lowerAggregate 创建 aggregate operator 后复用统一 blocking-stage 生命周期。
+func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	if b.Aggregates == nil {
+		return loweredStage{}, fmt.Errorf("physical HASH AGGREGATE requires AggregateFactory")
+	}
+	if len(plan.Children) != 1 {
+		return loweredStage{}, fmt.Errorf("physical HASH AGGREGATE requires one child")
+	}
+	input := append([]planner.Column(nil), plan.Children[0].Output...)
+	groups := append([]*binder.BoundExpression(nil), plan.GroupBy...)
+	aggregates := append([]planner.AggregateSpec(nil), plan.Aggregates...)
+	operator, err := b.Aggregates.OpenAggregate(ctx, input, groups, aggregates, plan.Estimate)
+	if err != nil {
+		return loweredStage{}, err
+	}
+	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "aggregate")
 }
 
 // lowerDistinct 创建 DISTINCT operator 后复用统一 blocking-stage 生命周期。
