@@ -3,7 +3,11 @@ name: phase6-release-verify
 on:
   push:
     branches:
+      - main
       - phase5-remediation-adr0008
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
