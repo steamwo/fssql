@@ -8,7 +8,7 @@ import (
 )
 
 // PlanStable 是 Stable SELECT 的统一 Planner 入口。
-// 当前 output-modifier 顺序固定为 Project -> DISTINCT -> ORDER BY -> LIMIT/OFFSET；GROUP/subquery 仍由基础 Planner fail-closed。
+// output-modifier 顺序固定为 Project/Aggregate -> DISTINCT -> ORDER BY -> LIMIT/OFFSET；scalar subquery 仍在独立 lowering 前 fail-closed。
 func (p *QueryPlanner) PlanStable(ctx context.Context, query *binder.BoundQuery) (*LogicalPlan, error) {
 	if query == nil {
 		return nil, fmt.Errorf("query planner: nil BoundQuery")
@@ -32,7 +32,13 @@ func (p *QueryPlanner) PlanStable(ctx context.Context, query *binder.BoundQuery)
 	if err != nil {
 		return nil, err
 	}
-	root, err := p.Plan(ctx, &base)
+
+	var root *LogicalPlan
+	if len(base.GroupBy) != 0 || base.Having != nil || queryHasAggregate(&base) {
+		root, err = p.planStableAggregateQuery(ctx, &base)
+	} else {
+		root, err = p.Plan(ctx, &base)
+	}
 	if err != nil {
 		return nil, err
 	}
