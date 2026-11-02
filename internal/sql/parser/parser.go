@@ -14,19 +14,19 @@ type Parser struct {
 	pos    int           // pos 是当前 PEG/Pratt 游标。
 }
 
-// Parse 解析单条 SQL；当前 remediation 子任务只开放 SELECT/CTE 查询语法。
+// Parse 解析单条 Stable v1 SQL statement。
 func Parse(sql string) (ast.Statement, error) {
 	tokens, err := lexer.All(sql)
 	if err != nil {
 		return nil, err
 	}
 	p := &Parser{tokens: tokens}
-	stmt, ok, err := p.parseSelectStatement()
+	stmt, ok, err := p.parseStatement()
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return nil, p.errorf("expected SELECT or WITH")
+		return nil, p.errorf("expected Stable v1 statement")
 	}
 	p.accept(lexer.Semicolon)
 	if p.peek().Kind != lexer.EOF {
