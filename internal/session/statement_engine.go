@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	resultpkg "github.com/steamwo/fssql/internal/execution/result"
@@ -113,12 +114,8 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 	case *binder.BoundCreateView, *binder.BoundCreateExternalTable:
 		return &preparedControlStatement{engine: e, bound: bound}, nil
 	case *binder.BoundDescribe:
-		_, relationForm := parsed.(*ast.DescribeStmt)
-		preserve := false
-		if relationForm {
-			describe := parsed.(*ast.DescribeStmt)
-			preserve = describe.Relation != nil && describe.Query == nil
-		}
+		describe, ok := parsed.(*ast.DescribeStmt)
+		preserve := ok && describe.Relation != nil && describe.Query == nil
 		cursor, err := resultpkg.NewDescribeCursorWithNullability(value, preserve)
 		if err != nil {
 			return nil, err
@@ -158,7 +155,7 @@ func (p *preparedControlStatement) Run(q *query.Context, sink pipeline.Sink) err
 }
 
 type preparedDescribeStatement struct {
-	buffers *memory.BufferManager    // buffers 是 Query MemoryScope 的 managed allocator。
+	buffers *memory.BufferManager     // buffers 是 Query MemoryScope 的 managed allocator。
 	cursor  *resultpkg.DescribeCursor // cursor 只保存 Binder schema，不执行被描述查询。
 }
 
