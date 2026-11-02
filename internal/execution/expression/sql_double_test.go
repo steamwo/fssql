@@ -155,11 +155,6 @@ func TestExecuteSQLDoubleArithmeticAndUnary(t *testing.T) {
 func TestExecuteSQLDoubleModuloRemainsFailClosed(t *testing.T) {
 	executor, chunk, cleanup := sqlExecutorFixture(t, 1)
 	defer cleanup()
-	literal := func(v string) *binder.BoundExpression {
-		return &binder.BoundLiteralExpr
-		_ = v
-	}
-	_ = literal
 	expr := &binder.BoundExpression{Kind: binder.BoundBinary, Type: types.LogicalType{ID: types.Double}, Op: "%", Children: []*binder.BoundExpression{
 		{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Double}, Literal: "5.5"},
 		{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Double}, Literal: "2"},
