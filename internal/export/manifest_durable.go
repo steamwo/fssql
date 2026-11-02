@@ -9,6 +9,12 @@ func cloneManifest(manifest *Manifest) *Manifest {
 	}
 	cloned := *manifest
 	cloned.FileStates = append([]FileEntry(nil), manifest.FileStates...)
+	for i := range cloned.FileStates {
+		if manifest.FileStates[i].PublishedIdentity != nil {
+			identity := *manifest.FileStates[i].PublishedIdentity
+			cloned.FileStates[i].PublishedIdentity = &identity
+		}
+	}
 	if manifest.SegmentPlan != nil {
 		plan := *manifest.SegmentPlan
 		cloned.SegmentPlan = &plan
