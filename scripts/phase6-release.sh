@@ -35,7 +35,10 @@ bash ./scripts/phase5-config-compatibility.sh
 bash ./scripts/phase5-stability.sh
 
 # Parquet interoperability: canonical corpus + 4-producer x 4-reader matrix.
-# The workflow pins the same reader versions accepted in Phase 1.
+# The workflow pins the same reader versions accepted in Phase 1. The runner's
+# stdout is machine-readable JSON; keep that contract covered by a lightweight
+# unit test before consuming it as release evidence.
+python3 -m unittest discover -s ./test/interop/phase1 -p 'run_output_test.py'
 phase6_parquet="$(mktemp)"
 python3 ./test/interop/phase1/run.py | tee "$phase6_parquet"
 python3 - "$phase6_parquet" <<'PY'

@@ -62,6 +62,16 @@ def assert_count(label: str, got: int, want: int) -> None:
         raise AssertionError(f"{label}: row count {got}, want {want}")
 
 
+def generate_corpus(corpus_dir: Path, generated: Path) -> None:
+    # run.py stdout is machine-readable release evidence. Keep generator
+    # diagnostics visible without contaminating the JSON stream.
+    subprocess.run(
+        [sys.executable, str(corpus_dir / "generate.py"), "--out", str(generated)],
+        check=True,
+        stdout=sys.stderr,
+    )
+
+
 def main() -> None:
     engines = require_engines()
     pa = engines["pyarrow"]
@@ -73,7 +83,7 @@ def main() -> None:
     here = Path(__file__).resolve().parent
     corpus_dir = here.parents[1] / "corpus" / "phase1"
     generated = corpus_dir / "generated"
-    subprocess.run([sys.executable, str(corpus_dir / "generate.py"), "--out", str(generated)], check=True)
+    generate_corpus(corpus_dir, generated)
 
     spark = SparkSession.builder.master("local[1]").appName("fssql-phase1-interop").getOrCreate()
     spark.sparkContext.setLogLevel("ERROR")
