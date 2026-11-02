@@ -38,6 +38,13 @@ type Sink interface {
 	Finalize(context.Context) error
 }
 
+// CloseableSink 是持有 blocking state/temp ownership 的可选 Sink 扩展。
+// Pipeline 仅在执行失败或 Finalize 失败时调用 Close；成功 Finalize 后 Sink 可能继续作为下一 stage 的 Source，不能提前关闭。
+type CloseableSink interface {
+	Sink
+	Close() error
+}
+
 type Pipeline struct {
 	ID           string
 	Source       Source
@@ -99,15 +106,29 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 		})
 	}
 	runErr := scheduler.New(workers).Run(ctx, tasks, obs)
-	var closeErr error
+	var sourceCloseErr error
 	if source, ok := p.Source.(CloseableSource); ok {
-		closeErr = source.Close()
+		sourceCloseErr = source.Close()
 	}
-	if runErr != nil || closeErr != nil {
-		// 两条错误链都必须保留：执行失败不能遮蔽资源关闭失败，反之亦然。
-		return errors.Join(runErr, closeErr)
+	if runErr != nil || sourceCloseErr != nil {
+		// 失败路径必须释放持有 blocking/temp ownership 的 Sink；三条错误链都保留，不能互相遮蔽。
+		return errors.Join(runErr, sourceCloseErr, closeSink(p.Sink))
 	}
-	return p.Sink.Finalize(ctx)
+	finalizeErr := p.Sink.Finalize(ctx)
+	if finalizeErr != nil {
+		// Finalize 失败表示 stage 未成功移交 ownership；CloseableSink 必须立即回收其内部状态。
+		return errors.Join(finalizeErr, closeSink(p.Sink))
+	}
+	// 成功 Finalize 后不能关闭 Sink：blocking bridge 可能在依赖 stage 完成后继续作为 root Source。
+	return nil
+}
+
+// closeSink 只处理显式 CloseableSink；普通 Sink 没有额外 ownership，保持旧行为。
+func closeSink(sink Sink) error {
+	if closeable, ok := sink.(CloseableSink); ok {
+		return closeable.Close()
+	}
+	return nil
 }
 
 type dagState uint8
