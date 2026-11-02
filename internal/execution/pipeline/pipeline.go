@@ -14,6 +14,13 @@ type Source interface {
 	Next(context.Context) (*vector.DataChunk, bool, error)
 }
 
+// CloseableSource 是持有 reader/client/buffer 等 query-scoped ownership 的可选 Source 扩展。
+// Pipeline 只会在所有 scheduler task 已退出后调用一次 Close，因此实现无需与 Next 并发关闭。
+type CloseableSource interface {
+	Source
+	Close() error
+}
+
 // Operator 是旧的原地算子接口；实现只能修改当前 chunk，不能替换其 ownership。
 type Operator interface {
 	Process(context.Context, *vector.DataChunk) error
@@ -91,8 +98,14 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 			}
 		})
 	}
-	if err := scheduler.New(workers).Run(ctx, tasks, obs); err != nil {
-		return err
+	runErr := scheduler.New(workers).Run(ctx, tasks, obs)
+	var closeErr error
+	if source, ok := p.Source.(CloseableSource); ok {
+		closeErr = source.Close()
+	}
+	if runErr != nil || closeErr != nil {
+		// 两条错误链都必须保留：执行失败不能遮蔽资源关闭失败，反之亦然。
+		return errors.Join(runErr, closeErr)
 	}
 	return p.Sink.Finalize(ctx)
 }
