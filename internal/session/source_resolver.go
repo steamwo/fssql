@@ -21,15 +21,15 @@ type TableBindFunc func(context.Context, string) (binder.ResolvedRelation, error
 
 // TableBindAdapter 将稳定 FunctionID 与真实格式 Bind callback 关联。
 type TableBindAdapter struct {
-	FunctionID function.ID // FunctionID 必须对应 FunctionCatalog 中的 Table function。
+	FunctionID function.ID   // FunctionID 必须对应 FunctionCatalog 中的 Table function。
 	Bind       TableBindFunc // Bind 是该函数唯一实际 schema-resolution callback。
 }
 
 // SourceResolver 同时实现 Binder 的 Catalog relation 与 TableFunction resolver contracts。
 // 它只位于 statement/control path，不创建 runtime reader/operator。
 type SourceResolver struct {
-	catalog   catalog.Transaction       // catalog 是当前 Statement 独占的 Catalog Transaction。
-	functions *function.Catalog         // functions 是统一 FunctionCatalog。
+	catalog   catalog.Transaction            // catalog 是当前 Statement 独占的 Catalog Transaction。
+	functions *function.Catalog              // functions 是统一 FunctionCatalog。
 	adapters  map[function.ID]TableBindFunc // adapters 在构造后不可变。
 }
 
@@ -52,7 +52,7 @@ func NewSourceResolver(tx catalog.Transaction, functions *function.Catalog, adap
 		if _, exists := bound[adapter.FunctionID]; exists {
 			return nil, fmt.Errorf("session: duplicate table bind adapter for function id %d", adapter.FunctionID)
 		}
-		def, ok := lookupFunctionByID(functions, adapter.FunctionID)
+		def, ok := functions.LookupID(adapter.FunctionID)
 		if !ok || def.Kind != function.Table {
 			return nil, fmt.Errorf("session: table bind adapter references unknown/non-table function id %d", adapter.FunctionID)
 		}
@@ -147,16 +147,6 @@ func catalogObjectName(name ast.QualifiedName) (catalog.ObjectName, error) {
 		return catalog.ObjectName{Schema: "main", Name: name.Parts[0].Name}, nil
 	}
 	return catalog.ObjectName{Schema: name.Parts[0].Name, Name: name.Parts[1].Name}, nil
-}
-
-// lookupFunctionByID 在小型 FunctionCatalog 初始化路径中按 ID 定位定义。
-func lookupFunctionByID(c *function.Catalog, id function.ID) (function.Definition, bool) {
-	for _, name := range []string{"count", "sum", "avg", "min", "max", "read_parquet", "read_csv", "read_json", "read_ndjson", "glob"} {
-		if def, ok := c.Lookup(name); ok && def.ID == id {
-			return def, true
-		}
-	}
-	return function.Definition{}, false
 }
 
 // binderColumns 将 Catalog schema 深拷贝为 Binder relation schema。
