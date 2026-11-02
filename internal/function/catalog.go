@@ -140,6 +140,11 @@ func (c *Catalog) BindCall(name string, kind Kind, in BindInput) (Definition, Bi
 	if d.Kind != kind {
 		return Definition{}, BindResult{}, fmt.Errorf("function %s has kind %d, want %d", d.Name, d.Kind, kind)
 	}
+	// v1 Stable 只冻结 SELECT DISTINCT，没有冻结 aggregate-level DISTINCT。
+	// 在 FunctionCatalog 绑定阶段显式拒绝，避免 Binder 丢失标志后被静默当普通 aggregate 执行。
+	if in.Distinct {
+		return Definition{}, BindResult{}, fmt.Errorf("aggregate DISTINCT is not part of Stable v1")
+	}
 	argc := len(in.Arguments)
 	if in.Star {
 		if d.ID != CountID || argc != 0 {
