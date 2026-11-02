@@ -9,6 +9,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
+	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/optimizer"
 	"github.com/steamwo/fssql/internal/planner"
 	"github.com/steamwo/fssql/internal/sql/binder"
@@ -37,9 +38,6 @@ func rewriteScalarSubqueries(ctx context.Context, queryPlanner *planner.QueryPla
 	out.OrderBy = append([]binder.BoundOrderTerm(nil), query.OrderBy...)
 	prepared := make([]preparedScalarSubquery, 0, 2)
 
-	rewrite := func(expr *binder.BoundExpression) (*binder.BoundExpression, error) {
-		return nil, fmt.Errorf("session: internal scalar rewrite is uninitialized")
-	}
 	var rewriteExpr func(*binder.BoundExpression) (*binder.BoundExpression, error)
 	rewriteExpr = func(expr *binder.BoundExpression) (*binder.BoundExpression, error) {
 		if expr == nil {
@@ -82,8 +80,6 @@ func rewriteScalarSubqueries(ctx context.Context, queryPlanner *planner.QueryPla
 		}
 		return &copyExpr, nil
 	}
-	rewrite = rewriteExpr
-	_ = rewrite // 保留具名闭包，便于后续扩展诊断而不引入包级状态。
 
 	var err error
 	for i := range out.Projection {
@@ -160,11 +156,12 @@ func queryHasAggregateExpression(query *binder.BoundQuery) bool {
 	return false
 }
 
+// expressionHasAggregate 只依据统一 FunctionCatalog kind 判断 aggregate，禁止在 session 层复制枚举数值语义。
 func expressionHasAggregate(expr *binder.BoundExpression) bool {
 	if expr == nil {
 		return false
 	}
-	if expr.Kind == binder.BoundFunction && expr.FunctionKind == 1 { // function.Aggregate；避免 session helper 重新定义函数语义。
+	if expr.Kind == binder.BoundFunction && expr.FunctionKind == function.Aggregate {
 		return true
 	}
 	for _, child := range expr.Children {
