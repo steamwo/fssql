@@ -55,12 +55,8 @@ func newGlobScanOpenAdapter(plan globPlanFunc, scope *memory.Scope, buffers *mem
 			if spec.Function != "glob" {
 				return nil, fmt.Errorf("session: glob runtime adapter received function %q", spec.Function)
 			}
-			if len(spec.Pushdown.Filters) != 0 {
-				return nil, fmt.Errorf("session: glob runtime filter pushdown is not implemented")
-			}
-			if len(spec.Pushdown.Projection) > 1 || (len(spec.Pushdown.Projection) == 1 && spec.Pushdown.Projection[0] != 0) {
-				return nil, fmt.Errorf("session: glob runtime projection must be empty or [0]")
-			}
+			// ScanPushdown.Filter/Projection 是 optimizer candidate，residual operator 仍保留。
+			// glob 当前不接受这两类下推，必须输出完整单列 source，让 residual Filter/Project 保证语义。
 			uris, fingerprint, err := plan(ctx, spec.Source)
 			if err != nil {
 				return nil, err
@@ -71,6 +67,7 @@ func newGlobScanOpenAdapter(plan globPlanFunc, scope *memory.Scope, buffers *mem
 			if len(uris) == 0 {
 				return nil, fmt.Errorf("session: glob runtime ScanSet has no files")
 			}
+			// LIMIT candidate 仅在 offset=0 且直接位于 scan 上时产生；前缀截断与 residual LIMIT 等价，因此可安全接受。
 			limit := len(uris)
 			if spec.Pushdown.Limit > 0 && spec.Pushdown.Limit < uint64(limit) {
 				limit = int(spec.Pushdown.Limit)
