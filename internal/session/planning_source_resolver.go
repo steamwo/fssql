@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/steamwo/fssql/internal/catalog"
-	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
 	"github.com/steamwo/fssql/internal/sql/ast"
@@ -23,12 +22,12 @@ const (
 	planningInformationSchemaColumns
 )
 
-// planningRelationProvenance 保存当前 Statement 解析 Catalog relation 时丢失于通用 Binder ABI 的可执行来源。
-// 它只存在于 statement-scoped composition，不进入 Catalog 持久化、public API 或 Vector runtime。
+// planningRelationProvenance 保存当前 Statement 解析 relation 时丢失于通用 Binder ABI 的可执行来源。
+// source 对 external table 是 canonical source spec；对 internal virtual relation 是 bounded metadata snapshot 编码。
 type planningRelationProvenance struct {
-	kind     planningRelationKind // kind 区分 external table、view 与内部 virtual metadata relation。
+	kind     planningRelationKind // kind 区分 external table、view 与 internal virtual metadata relation。
 	function string               // function 仅 external table 使用，为 FunctionCatalog Stable 名称。
-	source   string               // source 仅 external table 使用，为 Catalog 保存的 canonical source spec。
+	source   string               // source 保存 external URI/spec 或 internal virtual snapshot；均为 statement-scoped immutable value。
 	viewSQL  string               // viewSQL 仅 view 使用，为 Catalog 保存的 query SQL。
 }
 
@@ -37,9 +36,8 @@ type planningRelationProvenance struct {
 type PlanningSourceResolver struct {
 	base *SourceResolver // base 复用现有 Catalog + real TableFunction.Bind schema path。
 
-	mu         sync.Mutex                              // mu 保护 statement-scoped provenance/virtual snapshot。
-	provenance map[string]planningRelationProvenance   // provenance 以返回给 Binder 的唯一 relation ID 为键。
-	virtuals   map[string]informationSchemaColumnsSnapshot // virtuals 仅保存当前 statement 的 metadata snapshot。
+	mu         sync.Mutex                            // mu 保护 statement-scoped provenance map。
+	provenance map[string]planningRelationProvenance // provenance 以返回给 Binder 的唯一 relation ID 为键。
 }
 
 var _ binder.RelationResolver = (*PlanningSourceResolver)(nil)
@@ -51,11 +49,7 @@ func NewPlanningSourceResolver(base *SourceResolver) (*PlanningSourceResolver, e
 	if base == nil || base.catalog == nil || base.functions == nil {
 		return nil, fmt.Errorf("session: planning source resolver requires initialized SourceResolver")
 	}
-	return &PlanningSourceResolver{
-		base:       base,
-		provenance: make(map[string]planningRelationProvenance),
-		virtuals:   make(map[string]informationSchemaColumnsSnapshot),
-	}, nil
+	return &PlanningSourceResolver{base: base, provenance: make(map[string]planningRelationProvenance)}, nil
 }
 
 // ResolveRelation 复用 SourceResolver 的真实 schema/fingerprint，并记录对应 executable provenance。
@@ -69,10 +63,11 @@ func (r *PlanningSourceResolver) ResolveRelation(ctx context.Context, name ast.Q
 		if err != nil {
 			return binder.ResolvedRelation{}, err
 		}
-		if err := r.recordProvenance(resolved.ID, planningRelationProvenance{kind: planningInformationSchemaColumns}); err != nil {
+		encoded, err := encodeInformationSchemaSnapshot(snapshot)
+		if err != nil {
 			return binder.ResolvedRelation{}, err
 		}
-		if err := r.recordVirtualSnapshot(resolved.ID, snapshot); err != nil {
+		if err := r.recordProvenance(resolved.ID, planningRelationProvenance{kind: planningInformationSchemaColumns, source: encoded}); err != nil {
 			return binder.ResolvedRelation{}, err
 		}
 		return resolved, nil
@@ -100,11 +95,7 @@ func (r *PlanningSourceResolver) ResolveRelation(ctx context.Context, name ast.Q
 		if entry.ExternalTable == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid external-table metadata for %s.%s", object.Schema, object.Name)
 		}
-		provenance = planningRelationProvenance{
-			kind:     planningExternalTable,
-			function: entry.ExternalTable.TableFunction,
-			source:   entry.ExternalTable.Source,
-		}
+		provenance = planningRelationProvenance{kind: planningExternalTable, function: entry.ExternalTable.TableFunction, source: entry.ExternalTable.Source}
 		// Catalog object identity 是 query relation identity 的一部分，避免两个对象指向同一 snapshot 时 sidecar 冲突。
 		resolved.ID = fmt.Sprintf("external:%s.%s:%s", object.Schema, object.Name, resolved.ID)
 	case catalog.ObjectView:
@@ -154,64 +145,17 @@ func (r *PlanningSourceResolver) PlanBoundRelation(ctx context.Context, relation
 		if provenance.source == "" || relation.Fingerprint == "" {
 			return nil, fmt.Errorf("session: external relation %s has incomplete source identity", relation.ID)
 		}
-		return &planner.LogicalPlan{
-			Kind:   planner.LogicalScan,
-			Output: planningColumns(relation.Columns),
-			Scan: &planner.ScanSpec{
-				RelationID:  relation.ID,
-				Function:    definition.Name,
-				Source:      provenance.source,
-				Fingerprint: relation.Fingerprint,
-			},
-		}, nil
+		return &planner.LogicalPlan{Kind: planner.LogicalScan, Output: planningColumns(relation.Columns), Scan: &planner.ScanSpec{RelationID: relation.ID, Function: definition.Name, Source: provenance.source, Fingerprint: relation.Fingerprint}}, nil
 	case planningView:
 		return nil, fmt.Errorf("session: view relation %s requires recursive view planning", relation.ID)
 	case planningInformationSchemaColumns:
-		if relation.Fingerprint == "" {
-			return nil, fmt.Errorf("session: information_schema.columns relation has empty snapshot fingerprint")
+		if provenance.source == "" || relation.Fingerprint == "" {
+			return nil, fmt.Errorf("session: information_schema.columns relation has incomplete snapshot identity")
 		}
-		if _, ok := r.lookupVirtualSnapshot(relation.ID); !ok {
-			return nil, fmt.Errorf("session: information_schema.columns snapshot missing for relation %s", relation.ID)
-		}
-		return &planner.LogicalPlan{
-			Kind:   planner.LogicalScan,
-			Output: planningColumns(relation.Columns),
-			Scan: &planner.ScanSpec{
-				RelationID:  relation.ID,
-				Function:    internalInformationSchemaColumnsFunction,
-				Source:      "information_schema.columns",
-				Fingerprint: relation.Fingerprint,
-			},
-		}, nil
+		return &planner.LogicalPlan{Kind: planner.LogicalScan, Output: planningColumns(relation.Columns), Scan: &planner.ScanSpec{RelationID: relation.ID, Function: internalInformationSchemaColumnsFunction, Source: provenance.source, Fingerprint: relation.Fingerprint}}, nil
 	default:
 		return nil, fmt.Errorf("session: unknown planning provenance kind %d", provenance.kind)
 	}
-}
-
-// InternalScanOpenAdapters 把当前 statement 已冻结的 virtual snapshot 转为 query-scoped immutable runtime callbacks。
-func (r *PlanningSourceResolver) InternalScanOpenAdapters(scope *memory.Scope, buffers *memory.BufferManager) ([]InternalScanOpenAdapter, error) {
-	if r == nil || scope == nil || buffers == nil {
-		return nil, fmt.Errorf("session: internal scan adapters require resolver and managed memory")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if len(r.virtuals) == 0 {
-		return nil, nil
-	}
-	// Stable v1 目前只有 information_schema.columns 一个 virtual relation。同一 statement 多次引用共享同一 snapshot callback。
-	var snapshot informationSchemaColumnsSnapshot
-	found := false
-	for _, candidate := range r.virtuals {
-		if !found {
-			snapshot = cloneInformationSchemaSnapshot(candidate)
-			found = true
-			continue
-		}
-		if candidate.fingerprint != snapshot.fingerprint {
-			return nil, fmt.Errorf("session: one statement resolved multiple information_schema.columns snapshots")
-		}
-	}
-	return []InternalScanOpenAdapter{informationSchemaScanAdapter(snapshot, scope, buffers)}, nil
 }
 
 // recordProvenance 以固定上限保存当前 Statement 的 relation provenance。
@@ -234,46 +178,12 @@ func (r *PlanningSourceResolver) recordProvenance(id string, provenance planning
 	return nil
 }
 
-// recordVirtualSnapshot 保存与 relation identity 对应的 metadata snapshot；重复解析同一 snapshot 可复用。
-func (r *PlanningSourceResolver) recordVirtualSnapshot(id string, snapshot informationSchemaColumnsSnapshot) error {
-	if id == "" || snapshot.fingerprint == "" {
-		return fmt.Errorf("session: virtual planning snapshot requires identity and fingerprint")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if existing, ok := r.virtuals[id]; ok {
-		if existing.fingerprint != snapshot.fingerprint {
-			return fmt.Errorf("session: virtual relation identity collision for %s", id)
-		}
-		return nil
-	}
-	if len(r.virtuals) >= maxPlanningRelationProvenance {
-		return fmt.Errorf("session: virtual relation snapshot limit exceeded: %d", maxPlanningRelationProvenance)
-	}
-	r.virtuals[id] = cloneInformationSchemaSnapshot(snapshot)
-	return nil
-}
-
-func cloneInformationSchemaSnapshot(snapshot informationSchemaColumnsSnapshot) informationSchemaColumnsSnapshot {
-	return informationSchemaColumnsSnapshot{fingerprint: snapshot.fingerprint, rows: append([]informationSchemaColumnRow(nil), snapshot.rows...)}
-}
-
 // lookupProvenance 返回 immutable-by-value provenance snapshot。
 func (r *PlanningSourceResolver) lookupProvenance(id string) (planningRelationProvenance, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	value, ok := r.provenance[id]
 	return value, ok
-}
-
-func (r *PlanningSourceResolver) lookupVirtualSnapshot(id string) (informationSchemaColumnsSnapshot, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	value, ok := r.virtuals[id]
-	if !ok {
-		return informationSchemaColumnsSnapshot{}, false
-	}
-	return cloneInformationSchemaSnapshot(value), true
 }
 
 // planningColumns 将 Binder-visible schema 深拷贝为 Planner schema。
