@@ -3,7 +3,9 @@ package session
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,8 +15,8 @@ import (
 	"github.com/steamwo/fssql/internal/core/stats"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
-	result "github.com/steamwo/fssql/internal/execution/result"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
+	result "github.com/steamwo/fssql/internal/execution/result"
 	"github.com/steamwo/fssql/internal/planner"
 	"github.com/steamwo/fssql/internal/sql/ast"
 	"github.com/steamwo/fssql/internal/sql/binder"
@@ -23,21 +25,22 @@ import (
 const (
 	internalInformationSchemaColumnsFunction = "__fssql_information_schema_columns"
 	informationSchemaCatalogName             = "memory"
-	maxInformationSchemaColumnRows           = 1 << 20
+	maxInformationSchemaColumnRows           = 1 << 16
+	maxInformationSchemaSnapshotBytes        = 32 << 20
 )
 
 // informationSchemaColumnRow 是 Prepare 阶段冻结的 information_schema.columns 单行元数据。
-// 它不持有 runtime Vector，也不保存 credential/source URI。
+// 字段导出仅用于 package-internal JSON snapshot 编码，不构成 public API。
 type informationSchemaColumnRow struct {
-	tableSchema string
-	tableName   string
-	columnName  string
-	ordinal     int32
-	nullable    bool
-	typeName    string
-	precision   *int32
-	scale       *int32
-	datetime    *int32
+	TableSchema string `json:"table_schema"`
+	TableName   string `json:"table_name"`
+	ColumnName  string `json:"column_name"`
+	Ordinal     int32  `json:"ordinal_position"`
+	Nullable    bool   `json:"nullable"`
+	TypeName    string `json:"data_type"`
+	Precision   *int32 `json:"numeric_precision,omitempty"`
+	Scale       *int32 `json:"numeric_scale,omitempty"`
+	Datetime    *int32 `json:"datetime_precision,omitempty"`
 }
 
 // informationSchemaColumnsSnapshot 是 statement-scoped Catalog metadata 快照。
@@ -65,7 +68,6 @@ var informationSchemaColumnsSchema = [...]binder.RelationColumn{
 }
 
 // isInformationSchemaColumnsName 只识别真正的两段 information_schema.columns 名称。
-// quoted identifier 仍按 Binder 既有大小写规则处理，避免把不同 quoted 名称错误归一化。
 func isInformationSchemaColumnsName(name ast.QualifiedName) bool {
 	if len(name.Parts) != 2 {
 		return false
@@ -105,17 +107,7 @@ func buildInformationSchemaColumnsSnapshot(ctx context.Context, tx catalog.Trans
 				return binder.ResolvedRelation{}, informationSchemaColumnsSnapshot{}, fmt.Errorf("session: information_schema.columns type %s.%s.%s: %w", name.Schema, name.Name, column.Name, err)
 			}
 			precision, scale, datetime := informationSchemaNumericMetadata(column.Type)
-			rows = append(rows, informationSchemaColumnRow{
-				tableSchema: name.Schema,
-				tableName:   name.Name,
-				columnName:  column.Name,
-				ordinal:     int32(ordinal + 1),
-				nullable:    column.Nullable,
-				typeName:    typeName,
-				precision:   precision,
-				scale:       scale,
-				datetime:    datetime,
-			})
+			rows = append(rows, informationSchemaColumnRow{TableSchema: name.Schema, TableName: name.Name, ColumnName: column.Name, Ordinal: int32(ordinal + 1), Nullable: column.Nullable, TypeName: typeName, Precision: precision, Scale: scale, Datetime: datetime})
 		}
 	}
 	fingerprint := fingerprintInformationSchemaColumns(rows)
@@ -125,8 +117,7 @@ func buildInformationSchemaColumnsSnapshot(ctx context.Context, tx catalog.Trans
 		columns[i] = column
 		columns[i].Type = cloneSourceType(column.Type)
 	}
-	resolved := binder.ResolvedRelation{ID: id, Columns: columns, Fingerprint: fingerprint}
-	return resolved, informationSchemaColumnsSnapshot{fingerprint: fingerprint, rows: rows}, nil
+	return binder.ResolvedRelation{ID: id, Columns: columns, Fingerprint: fingerprint}, informationSchemaColumnsSnapshot{fingerprint: fingerprint, rows: rows}, nil
 }
 
 func informationSchemaEntryColumns(entry catalog.Entry) (catalog.ObjectName, []catalog.ColumnDefinition, error) {
@@ -166,9 +157,7 @@ func informationSchemaNumericMetadata(t types.LogicalType) (precision, scale, da
 		return value(53), nil, nil
 	case types.Decimal:
 		return value(int32(t.Decimal.Width)), value(int32(t.Decimal.Scale)), nil
-	case types.DateType:
-		return nil, nil, value(0)
-	case types.TimestampType:
+	case types.DateType, types.TimestampType:
 		return nil, nil, value(0)
 	default:
 		return nil, nil, nil
@@ -178,22 +167,53 @@ func informationSchemaNumericMetadata(t types.LogicalType) (precision, scale, da
 func fingerprintInformationSchemaColumns(rows []informationSchemaColumnRow) stats.DatasetFingerprint {
 	h := sha256.New()
 	for _, row := range rows {
-		_, _ = h.Write([]byte(row.tableSchema))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(row.tableName))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(row.columnName))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(strconv.FormatInt(int64(row.ordinal), 10)))
-		_, _ = h.Write([]byte{0})
-		_, _ = h.Write([]byte(row.typeName))
-		if row.nullable {
-			_, _ = h.Write([]byte{1})
-		} else {
-			_, _ = h.Write([]byte{2})
-		}
+		_, _ = h.Write([]byte(row.TableSchema)); _, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(row.TableName)); _, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(row.ColumnName)); _, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(strconv.FormatInt(int64(row.Ordinal), 10))); _, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(row.TypeName))
+		if row.Nullable { _, _ = h.Write([]byte{1}) } else { _, _ = h.Write([]byte{2}) }
 	}
 	return stats.DatasetFingerprint(hex.EncodeToString(h.Sum(nil)))
+}
+
+// encodeInformationSchemaSnapshot 将 bounded metadata snapshot 编码到内部 ScanSpec.Source。
+func encodeInformationSchemaSnapshot(snapshot informationSchemaColumnsSnapshot) (string, error) {
+	if snapshot.fingerprint == "" || len(snapshot.rows) > maxInformationSchemaColumnRows {
+		return "", fmt.Errorf("session: invalid information_schema.columns snapshot")
+	}
+	raw, err := json.Marshal(snapshot.rows)
+	if err != nil { return "", err }
+	if len(raw) > maxInformationSchemaSnapshotBytes {
+		return "", fmt.Errorf("session: information_schema.columns snapshot exceeds %d bytes", maxInformationSchemaSnapshotBytes)
+	}
+	return base64.RawStdEncoding.EncodeToString(raw), nil
+}
+
+func decodeInformationSchemaSnapshot(encoded string, expected stats.DatasetFingerprint) (informationSchemaColumnsSnapshot, error) {
+	if expected == "" || encoded == "" {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: incomplete information_schema.columns runtime snapshot")
+	}
+	if len(encoded) > base64.RawStdEncoding.EncodedLen(maxInformationSchemaSnapshotBytes) {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: encoded information_schema.columns snapshot exceeds bound")
+	}
+	raw, err := base64.RawStdEncoding.DecodeString(encoded)
+	if err != nil { return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: decode information_schema.columns snapshot: %w", err) }
+	if len(raw) > maxInformationSchemaSnapshotBytes {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: information_schema.columns snapshot exceeds bound")
+	}
+	var rows []informationSchemaColumnRow
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: parse information_schema.columns snapshot: %w", err)
+	}
+	if len(rows) > maxInformationSchemaColumnRows {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: information_schema.columns row limit exceeded")
+	}
+	actual := fingerprintInformationSchemaColumns(rows)
+	if actual != expected {
+		return informationSchemaColumnsSnapshot{}, fmt.Errorf("session: information_schema.columns fingerprint changed between planning and execution")
+	}
+	return informationSchemaColumnsSnapshot{fingerprint: actual, rows: rows}, nil
 }
 
 // informationSchemaColumnsSource 将 frozen metadata snapshot 按默认 chunk 大小物化到 managed Vectors。
@@ -210,97 +230,63 @@ func newInformationSchemaColumnsSource(scope *memory.Scope, buffers *memory.Buff
 	if scope == nil || buffers == nil {
 		return nil, fmt.Errorf("session: information_schema.columns runtime requires managed memory")
 	}
-	cloned := append([]informationSchemaColumnRow(nil), rows...)
-	return &informationSchemaColumnsSource{scope: scope, buffers: buffers, rows: cloned}, nil
+	return &informationSchemaColumnsSource{scope: scope, buffers: buffers, rows: append([]informationSchemaColumnRow(nil), rows...)}, nil
 }
 
 // Next 只物化当前批次；所有 payload Vector/StringHeap 都由 Query MemoryScope 记账。
 func (s *informationSchemaColumnsSource) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
-	if s == nil || s.scope == nil || s.buffers == nil {
-		return nil, false, fmt.Errorf("session: information_schema.columns source is uninitialized")
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	if s.offset >= len(s.rows) {
-		return nil, false, nil
-	}
-	end := s.offset + vector.DefaultVectorSize
-	if end > len(s.rows) {
-		end = len(s.rows)
-	}
+	if s == nil || s.scope == nil || s.buffers == nil { return nil, false, fmt.Errorf("session: information_schema.columns source is uninitialized") }
+	if err := ctx.Err(); err != nil { return nil, false, err }
+	if s.offset >= len(s.rows) { return nil, false, nil }
+	end := s.offset + vector.DefaultVectorSize; if end > len(s.rows) { end = len(s.rows) }
 	count := end - s.offset
 	vectors := make([]*vector.Vector, len(informationSchemaColumnsSchema))
 	for i, column := range informationSchemaColumnsSchema {
 		item, err := vector.NewFlat(s.scope, s.buffers, column.Type, count)
-		if err != nil {
-			releaseInformationSchemaVectors(vectors)
-			return nil, false, err
-		}
+		if err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
 		vectors[i] = item
 	}
 	for i := 0; i < count; i++ {
 		row := s.rows[s.offset+i]
-		if err := setInformationSchemaString(vectors[0], i, informationSchemaCatalogName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		if err := setInformationSchemaString(vectors[1], i, row.tableSchema); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		if err := setInformationSchemaString(vectors[2], i, row.tableName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		if err := setInformationSchemaString(vectors[3], i, row.columnName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		vectors[4].SetInt32(i, row.ordinal)
+		if err := vectors[0].SetString(i, informationSchemaCatalogName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		if err := vectors[1].SetString(i, row.TableSchema); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		if err := vectors[2].SetString(i, row.TableName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		if err := vectors[3].SetString(i, row.ColumnName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		vectors[4].SetInt32(i, row.Ordinal)
 		vectors[5].SetNull(i)
-		nullable := "NO"
-		if row.nullable { nullable = "YES" }
-		if err := setInformationSchemaString(vectors[6], i, nullable); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		if err := setInformationSchemaString(vectors[7], i, row.typeName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
-		vectors[8].SetNull(i)
-		vectors[9].SetNull(i)
-		setInformationSchemaOptionalInt32(vectors[10], i, row.precision)
-		setInformationSchemaOptionalInt32(vectors[11], i, row.scale)
-		setInformationSchemaOptionalInt32(vectors[12], i, row.datetime)
-		if err := setInformationSchemaString(vectors[13], i, "NEVER"); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		nullable := "NO"; if row.Nullable { nullable = "YES" }
+		if err := vectors[6].SetString(i, nullable); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		if err := vectors[7].SetString(i, row.TypeName); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
+		vectors[8].SetNull(i); vectors[9].SetNull(i)
+		setInformationSchemaOptionalInt32(vectors[10], i, row.Precision)
+		setInformationSchemaOptionalInt32(vectors[11], i, row.Scale)
+		setInformationSchemaOptionalInt32(vectors[12], i, row.Datetime)
+		if err := vectors[13].SetString(i, "NEVER"); err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
 		vectors[14].SetNull(i)
 	}
 	chunk, err := vector.NewDataChunk(vectors...)
-	if err != nil {
-		releaseInformationSchemaVectors(vectors)
-		return nil, false, err
-	}
+	if err != nil { releaseInformationSchemaVectors(vectors); return nil, false, err }
 	s.offset = end
 	return chunk, true, nil
 }
 
-func setInformationSchemaString(v *vector.Vector, row int, value string) error {
-	if err := v.SetString(row, value); err != nil {
-		return err
-	}
-	return nil
-}
-
 func setInformationSchemaOptionalInt32(v *vector.Vector, row int, value *int32) {
-	if value == nil {
-		v.SetNull(row)
-		return
-	}
+	if value == nil { v.SetNull(row); return }
 	v.SetInt32(row, *value)
 }
 
 func releaseInformationSchemaVectors(vectors []*vector.Vector) {
-	for _, item := range vectors {
-		if item != nil {
-			item.Release()
-		}
-	}
+	for _, item := range vectors { if item != nil { item.Release() } }
 }
 
-// informationSchemaScanAdapter 返回内部 virtual scan callback；它只接受同一 frozen snapshot fingerprint。
-func informationSchemaScanAdapter(snapshot informationSchemaColumnsSnapshot, scope *memory.Scope, buffers *memory.BufferManager) InternalScanOpenAdapter {
-	rows := append([]informationSchemaColumnRow(nil), snapshot.rows...)
+// informationSchemaScanAdapter 是每 Query 预装的 internal virtual scan decoder。
+func informationSchemaScanAdapter(scope *memory.Scope, buffers *memory.BufferManager) InternalScanOpenAdapter {
 	return InternalScanOpenAdapter{
 		Function: internalInformationSchemaColumnsFunction,
 		Open: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
-			if spec.Fingerprint != snapshot.fingerprint {
-				return nil, fmt.Errorf("session: information_schema.columns fingerprint changed between planning and execution")
-			}
-			return newInformationSchemaColumnsSource(scope, buffers, rows)
+			snapshot, err := decodeInformationSchemaSnapshot(spec.Source, spec.Fingerprint)
+			if err != nil { return nil, err }
+			return newInformationSchemaColumnsSource(scope, buffers, snapshot.rows)
 		},
 	}
 }
