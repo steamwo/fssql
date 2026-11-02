@@ -6,6 +6,7 @@ import (
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/query"
 )
 
 type nullableIntResultSink struct {
