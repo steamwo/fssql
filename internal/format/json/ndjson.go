@@ -143,18 +143,22 @@ func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBind
 		if err != nil {
 			return NDJSONBinding{}, err
 		}
+		// records 只是 managed range buffer 的 slice views；InferRecords 完成前不能 Release buffer。
 		records, _, _ := FrameNDJSON(res.Buffer.Bytes(), sample == file.Size, maxRows)
-		res.Buffer.Release()
 		if len(records) > 0 {
-			schema, e := InferRecords(records, maxRows)
-			if e == nil {
+			schema, inferErr := InferRecords(records, maxRows)
+			res.Buffer.Release()
+			if inferErr == nil {
 				return NDJSONBinding{scanSet: scanSet, schema: schema}, nil
 			}
 			if sample >= maxSample || sample >= file.Size {
-				return NDJSONBinding{}, e
+				return NDJSONBinding{}, inferErr
 			}
-		} else if sample >= maxSample || sample >= file.Size {
-			return NDJSONBinding{}, fmt.Errorf("json: no complete NDJSON records")
+		} else {
+			res.Buffer.Release()
+			if sample >= maxSample || sample >= file.Size {
+				return NDJSONBinding{}, fmt.Errorf("json: no complete NDJSON records")
+			}
 		}
 		next := sample * 2
 		if next > maxSample {
