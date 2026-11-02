@@ -10,19 +10,29 @@ import (
 	"github.com/steamwo/fssql/internal/session"
 )
 
-// StableEngineAdapter 把 transport-neutral session.StableSQLEngine 适配为 AD-037 QueryService QueryEngine。
+// StableEngineAdapter 把 transport-neutral session SQL engines 适配为 AD-037 QueryService QueryEngine。
+// production 应配置 Statements；Engine 保留 SELECT-only 兼容 fallback，避免已有嵌入调用方立即破坏。
 type StableEngineAdapter struct {
-	Engine *session.StableSQLEngine // Engine 是 Parser→Push Pipeline 的唯一 production SELECT path。
+	Statements *session.StableStatementEngine // Statements 是 SELECT/control/DESCRIBE 的统一 Stable path。
+	Engine     *session.StableSQLEngine       // Engine 是旧 SELECT-only fallback。
 }
 
 var _ QueryEngine = (*StableEngineAdapter)(nil)
 
 // Plan 在 QueryService 已创建的 QueryContext 上完成 planning；PreparedQuery 不持有 HTTP/request lifetime。
 func (a *StableEngineAdapter) Plan(q *querypkg.Context, sql string) (PreparedQuery, error) {
-	if a == nil || a.Engine == nil || q == nil {
+	if a == nil || q == nil {
 		return nil, fmt.Errorf("server: Stable SQL engine adapter is uninitialized")
 	}
-	prepared, err := a.Engine.Prepare(q.Context(), q, sql)
+	var prepared session.PreparedStatement
+	var err error
+	if a.Statements != nil {
+		prepared, err = a.Statements.Prepare(q.Context(), q, sql)
+	} else if a.Engine != nil {
+		prepared, err = a.Engine.Prepare(q.Context(), q, sql)
+	} else {
+		return nil, fmt.Errorf("server: Stable SQL engine adapter has no statement/query engine")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +40,7 @@ func (a *StableEngineAdapter) Plan(q *querypkg.Context, sql string) (PreparedQue
 }
 
 type stablePreparedQuery struct {
-	prepared *session.PreparedSQLQuery // prepared 不持有 ResultCursor；每次 Run 绑定唯一 query result consumer。
+	prepared session.PreparedStatement // prepared 不持有 ResultCursor；每次 Run 绑定唯一 query result consumer。
 }
 
 func (p *stablePreparedQuery) Run(q *querypkg.Context, cursor *ResultCursor) error {
