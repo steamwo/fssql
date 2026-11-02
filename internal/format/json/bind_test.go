@@ -15,17 +15,10 @@ func TestFrameJSONRecordsObjectArrayAndUnstructured(t *testing.T) {
 		input string
 		want  int
 	}{
-		{`[{"id":1,"text":"} not structure"},{"id":2,"nested":{"x":[1,2]}}]`, 2},
+		{"[{\"id\":1,\"text\":\"} not structure\"},{\"id\":2,\"nested\":{\"x\":[1,2]}}]", 2},
 		{"{\"id\":1}\n  {\"id\":2}", 2},
-		{`{"id":1}`, 1},
+		{"{\"id\":1}", 1},
 	}
-	// raw string fixtures above intentionally use JSON escapes only where Go string syntax requires them.
-	cases[0].input = `[{"id":1,"text":"} not structure"},{"id":2,"nested":{"x":[1,2]}}]`
-	cases[0].input = string([]byte{'[', '{', '"', 'i', 'd', '"', ':', '1', ',', '"', 't', 'e', 'x', 't', '"', ':', '"', '}', ' ', 'n', 'o', 't', ' ', 's', 't', 'r', 'u', 'c', 't', 'u', 'r', 'e', '"', '}', ',', '{', '"', 'i', 'd', '"', ':', '2', ',', '"', 'n', 'e', 's', 't', 'e', 'd', '"', ':', '{', '"', 'x', '"', ':', '[', '1', ',', '2', ']', '}', '}', ']'})
-	cases[2].input = `{"id":1}`
-	cases[2].input = `{"id":1}`[0:0] + `{"id":1}`
-	// Replace escaped raw literals with the intended JSON bytes.
-	cases[2].input = "{\"id\":1}"
 	for _, tc := range cases {
 		records, err := FrameJSONRecords([]byte(tc.input), true, 32)
 		if err != nil {
