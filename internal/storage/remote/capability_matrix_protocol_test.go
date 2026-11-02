@@ -56,7 +56,7 @@ func TestPhase5ProtocolStaticCapabilityMatrix(t *testing.T) {
 			name: "s3", driver: s3Driver,
 			want: vfs.Capabilities(
 				vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite,
-				vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject,
+				vfs.AtomicPublishWrite, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject,
 				vfs.ServerSideList, vfs.IncompleteWriteRecovery,
 			),
 		},
