@@ -93,4 +93,12 @@ go test -run '^$' -bench 'Benchmark(HashAggregateBigInt|ExternalAggregateForcedS
 go test -run '^$' -bench 'Benchmark(ExternalSortForcedSpill|TopN)$' -benchmem -benchtime=100ms ./internal/execution/sort
 go test -run '^$' -bench 'Benchmark' -benchmem -benchtime=100ms ./internal/server ./internal/profile
 
+# Publication preflight is tested as part of the release gate. The real
+# publisher gets write permission only from the post-success workflow on main.
+bash -n ./scripts/phase6-publish-v1.sh
+PUBLISH_DRY_RUN=1 \
+  GITHUB_REPOSITORY=steamwo/fssql \
+  RELEASE_SHA="$(git rev-parse HEAD)" \
+  bash ./scripts/phase6-publish-v1.sh
+
 echo "Phase 6 Feature Freeze / v1 release gate: PASS"
