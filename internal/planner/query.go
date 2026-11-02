@@ -11,7 +11,7 @@ import (
 )
 
 // RelationPlanResolver 负责 Planner 自身无法从 BoundRelation 恢复的可执行 relation provenance。
-// Catalog view/external-table 与 CTE 的具体 provenance 由上层 composition 保存；Planner 不反向解析 SQL/Catalog。
+// Catalog view/external-table 的具体 provenance 由上层 composition 保存；CTE provenance 直接由 Binder IR 保存。
 type RelationPlanResolver interface {
 	PlanBoundRelation(context.Context, *binder.BoundRelation) (*LogicalPlan, error)
 }
@@ -20,7 +20,7 @@ type RelationPlanResolver interface {
 // 它不创建 runtime reader/operator，也不依赖具体格式、VFS 或 Catalog 实现。
 type QueryPlanner struct {
 	Functions *function.Catalog    // Functions 是统一 FunctionCatalog，用于 table-function FunctionID 校验。
-	Relations RelationPlanResolver // Relations 处理 Catalog/CTE 等需要额外 executable provenance 的 relation。
+	Relations RelationPlanResolver // Relations 处理 Catalog relation 等需要额外 executable provenance 的 relation。
 }
 
 // NewQueryPlanner 创建 QueryPlanner；nil FunctionCatalog 使用 Stable builtin catalog。
@@ -116,7 +116,26 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		return p.planTableFunction(relation)
 	case binder.RelationJoin:
 		return p.planJoin(ctx, relation)
-	case binder.RelationCatalog, binder.RelationCTE:
+	case binder.RelationCTE:
+		if relation.CTEQuery == nil {
+			return nil, fmt.Errorf("query planner: CTE relation %s has no bound query provenance", relation.ID)
+		}
+		planned, err := p.PlanStable(ctx, relation.CTEQuery)
+		if err != nil {
+			return nil, fmt.Errorf("query planner: plan CTE %s: %w", relation.ID, err)
+		}
+		if planned == nil {
+			return nil, fmt.Errorf("query planner: CTE %s returned nil plan", relation.ID)
+		}
+		if err := planned.Validate(); err != nil {
+			return nil, fmt.Errorf("query planner: CTE %s returned invalid plan: %w", relation.ID, err)
+		}
+		expected := relationColumnsToPlanner(relation.Columns)
+		if !plannerColumnsEqual(planned.Output, expected) {
+			return nil, fmt.Errorf("query planner: CTE %s executable schema does not match Binder schema", relation.ID)
+		}
+		return planned, nil
+	case binder.RelationCatalog:
 		if p.Relations == nil {
 			return nil, fmt.Errorf("query planner: relation %s requires executable provenance resolver", relation.ID)
 		}

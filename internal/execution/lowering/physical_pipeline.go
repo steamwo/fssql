@@ -10,6 +10,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/execution/sqltransform"
 	"github.com/steamwo/fssql/internal/planner"
+	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
 // ScanSourceFactory 把 generic ScanSpec 打开为 Push Pipeline Source。
@@ -19,23 +20,34 @@ type ScanSourceFactory interface {
 }
 
 // DistinctFactory 把 generic PhysicalDistinct 映射为真实 blocking DISTINCT operator。
-// factory 负责选择 in-memory/external spill 策略；lowering 不依赖 concrete hash/temp 实现。
 type DistinctFactory interface {
 	OpenDistinct(context.Context, []planner.Column, planner.CardinalityEstimate) (blocking.Operator, error)
 }
 
 // SortFactory 把 generic PhysicalSort 映射为真实 blocking sort operator。
-// keys 已由 Planner 重写到 child output ColumnIndex；factory 只做执行层 key/config 映射。
 type SortFactory interface {
 	OpenSort(context.Context, []planner.Column, []planner.SortKey, planner.CardinalityEstimate) (blocking.Operator, error)
+}
+
+// AggregateFactory 把 generic PhysicalHashAggregate 映射为真实 blocking aggregate operator。
+type AggregateFactory interface {
+	OpenAggregate(context.Context, []planner.Column, []*binder.BoundExpression, []planner.AggregateSpec, planner.CardinalityEstimate) (blocking.Operator, error)
+}
+
+// JoinFactory 把 generic PhysicalHashJoin/PhysicalCrossJoin 映射为 build/probe 双输入 Pipeline operator。
+// predicate 仍是 Binder IR；factory 必须显式验证可执行条件，禁止 silently drop residual。
+type JoinFactory interface {
+	OpenJoin(context.Context, planner.JoinType, []planner.Column, []planner.Column, *binder.BoundExpression, planner.CardinalityEstimate, planner.CardinalityEstimate) (pipeline.BinaryOperator, error)
 }
 
 // Builder 把已优化 PhysicalPlan 降低为 Push Pipeline DAG。
 type Builder struct {
 	Sources       ScanSourceFactory    // Sources 是唯一 runtime scan factory。
 	Executor      *expression.Executor // Executor 执行 Binder BoundExpression。
-	Distincts     DistinctFactory      // Distincts 为 PhysicalDistinct 创建 query-scoped blocking operator。
-	Sorts         SortFactory          // Sorts 为 PhysicalSort 创建 query-scoped blocking operator。
+	Distincts     DistinctFactory      // Distincts 创建 query-scoped blocking DISTINCT。
+	Sorts         SortFactory          // Sorts 创建 query-scoped blocking SORT。
+	Aggregates    AggregateFactory     // Aggregates 创建 query-scoped blocking AGGREGATE。
+	Joins         JoinFactory          // Joins 创建 query-scoped build/probe JOIN runtime。
 	BlockingQueue int                  // BlockingQueue 限制 blocking stage handoff；0 使用默认容量 1。
 }
 
@@ -50,7 +62,7 @@ func NewBuilder(sources ScanSourceFactory, executor *expression.Executor) (*Buil
 	return &Builder{Sources: sources, Executor: executor, BlockingQueue: 1}, nil
 }
 
-// loweredStage 保存一个 pipeline stage 的 Source/Transforms 以及必须先完成的 dependency pipelines。
+// loweredStage 保存一个单输入 pipeline stage 的 Source/Transforms 以及 dependency pipelines。
 type loweredStage struct {
 	source       pipeline.Source
 	transforms   []pipeline.TransformOperator
@@ -58,7 +70,8 @@ type loweredStage struct {
 	dependencies []*pipeline.Pipeline
 }
 
-// Build 接受当前已接通的 Scan/Filter/Project/Distinct/Sort/Limit；其他 blocking operator 在各自 lowering 完成前显式失败。
+// Build 构造 PhysicalPlan -> Push Pipeline DAG。
+// 无 JOIN 的树沿用紧凑 source+transform lowering；含 JOIN 的树使用 sink-driven lowering，保证 join 输出上的 transform 位于正确一侧。
 func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pipeline.Sink) (*pipeline.Pipeline, error) {
 	if b == nil || b.Sources == nil || b.Executor == nil {
 		return nil, fmt.Errorf("physical pipeline lowering builder is not initialized")
@@ -75,6 +88,9 @@ func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pi
 	if err := plan.Validate(); err != nil {
 		return nil, err
 	}
+	if containsPhysicalJoin(plan) {
+		return b.buildJoinAware(ctx, plan, sink)
+	}
 	stage, err := b.lowerNode(ctx, plan)
 	if err != nil {
 		return nil, err
@@ -82,7 +98,22 @@ func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pi
 	return b.pipelineForStage(stage, sink), nil
 }
 
-// pipelineForStage 把已经完整 lowered 的 stage 组装为 Pipeline；该步骤不再打开资源，也不会失败。
+func containsPhysicalJoin(plan *planner.PhysicalPlan) bool {
+	if plan == nil {
+		return false
+	}
+	if plan.Kind == planner.PhysicalHashJoin || plan.Kind == planner.PhysicalCrossJoin {
+		return true
+	}
+	for _, child := range plan.Children {
+		if containsPhysicalJoin(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// pipelineForStage 把已经完整 lowered 的单输入 stage 组装为 Pipeline。
 func (b *Builder) pipelineForStage(stage loweredStage, sink pipeline.Sink) *pipeline.Pipeline {
 	return &pipeline.Pipeline{
 		ID:           "sql:" + stage.relationID,
@@ -93,12 +124,14 @@ func (b *Builder) pipelineForStage(stage loweredStage, sink pipeline.Sink) *pipe
 	}
 }
 
-// lowerNode 自底向上构造 stage；Filter/Project/Limit 保持同 stage，Distinct/Sort 切出 dependency stage。
+// lowerNode 处理不含 JOIN 的单输入树；Filter/Project/Limit 保持同 stage，Aggregate/Distinct/Sort 切出 blocking dependency stage。
 func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
 	if err := ctx.Err(); err != nil {
 		return loweredStage{}, err
 	}
 	switch plan.Kind {
+	case planner.PhysicalOneRow:
+		return loweredStage{source: &oneRowSource{}, relationID: "one-row"}, nil
 	case planner.PhysicalScan:
 		if plan.Scan == nil {
 			return loweredStage{}, fmt.Errorf("physical scan has no ScanSpec")
@@ -115,7 +148,6 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 		}
 		return loweredStage{source: source, relationID: plan.Scan.RelationID}, nil
 	case planner.PhysicalFilter:
-		// 先验证/构造 transform，再打开 child source，避免 transform 配置错误留下已打开 source。
 		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
 		if err != nil {
 			return loweredStage{}, err
@@ -137,6 +169,8 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 		}
 		stage.transforms = append(stage.transforms, project)
 		return stage, nil
+	case planner.PhysicalHashAggregate:
+		return b.lowerAggregate(ctx, plan)
 	case planner.PhysicalDistinct:
 		return b.lowerDistinct(ctx, plan)
 	case planner.PhysicalSort:
@@ -152,49 +186,111 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 		}
 		stage.transforms = append(stage.transforms, limit)
 		return stage, nil
+	case planner.PhysicalHashJoin, planner.PhysicalCrossJoin:
+		return loweredStage{}, fmt.Errorf("physical JOIN requires join-aware lowering")
 	default:
 		return loweredStage{}, fmt.Errorf("physical operator %d is not wired to Push Pipeline yet", plan.Kind)
 	}
 }
 
-// lowerDistinct 创建 DISTINCT operator 后复用统一 blocking-stage 生命周期。
-func (b *Builder) lowerDistinct(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
-	if b.Distincts == nil {
-		return loweredStage{}, fmt.Errorf("physical DISTINCT requires DistinctFactory")
+// buildJoinAware 以最终 downstream Sink 为锚点递归构造含 JOIN 的 Push DAG。
+// JOIN 上方 streaming operator 通过 TransformSink 作用于 join 输出；blocking operator 仍建立 bridge stage。
+func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan, sink pipeline.Sink) (*pipeline.Pipeline, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	if len(plan.Children) != 1 {
-		return loweredStage{}, fmt.Errorf("physical DISTINCT requires one child")
+	if !containsPhysicalJoin(plan) {
+		stage, err := b.lowerNode(ctx, plan)
+		if err != nil {
+			return nil, err
+		}
+		return b.pipelineForStage(stage, sink), nil
 	}
-	input := append([]planner.Column(nil), plan.Children[0].Output...)
-	operator, err := b.Distincts.OpenDistinct(ctx, input, plan.Estimate)
-	if err != nil {
-		return loweredStage{}, err
+	switch plan.Kind {
+	case planner.PhysicalFilter:
+		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
+		if err != nil {
+			return nil, err
+		}
+		wrapped, err := pipeline.NewTransformSink([]pipeline.TransformOperator{filter}, sink)
+		if err != nil {
+			return nil, err
+		}
+		return b.buildJoinAware(ctx, plan.Children[0], wrapped)
+	case planner.PhysicalProject:
+		project, err := sqltransform.NewProject(b.Executor, plan.Projection)
+		if err != nil {
+			return nil, err
+		}
+		wrapped, err := pipeline.NewTransformSink([]pipeline.TransformOperator{project}, sink)
+		if err != nil {
+			return nil, err
+		}
+		return b.buildJoinAware(ctx, plan.Children[0], wrapped)
+	case planner.PhysicalLimit:
+		limit, err := sqltransform.NewLimit(b.Executor, plan.Offset, plan.Limit, plan.Limit == planner.UnlimitedRows)
+		if err != nil {
+			return nil, err
+		}
+		wrapped, err := pipeline.NewTransformSink([]pipeline.TransformOperator{limit}, sink)
+		if err != nil {
+			return nil, err
+		}
+		return b.buildJoinAware(ctx, plan.Children[0], wrapped)
+	case planner.PhysicalHashAggregate, planner.PhysicalDistinct, planner.PhysicalSort:
+		operator, suffix, err := b.openBlockingOperator(ctx, plan)
+		if err != nil {
+			return nil, err
+		}
+		bridge, err := b.newBlockingBridge(operator)
+		if err != nil {
+			return nil, err
+		}
+		childRoot, err := b.buildJoinAware(ctx, plan.Children[0], bridge)
+		if err != nil {
+			return nil, errors.Join(err, bridge.Close())
+		}
+		return &pipeline.Pipeline{
+			ID:           childRoot.ID + ":" + suffix,
+			Source:       bridge,
+			Sink:         sink,
+			Dependencies: []*pipeline.Pipeline{childRoot},
+		}, nil
+	case planner.PhysicalHashJoin, planner.PhysicalCrossJoin:
+		return b.lowerJoinPipeline(ctx, plan, sink)
+	default:
+		return nil, fmt.Errorf("physical operator %d is not wired to join-aware Push Pipeline yet", plan.Kind)
 	}
-	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "distinct")
 }
 
-// lowerSort 创建 sort operator 后复用统一 blocking-stage 生命周期。
-func (b *Builder) lowerSort(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
-	if b.Sorts == nil {
-		return loweredStage{}, fmt.Errorf("physical SORT requires SortFactory")
+func (b *Builder) openBlockingOperator(ctx context.Context, plan *planner.PhysicalPlan) (blocking.Operator, string, error) {
+	switch plan.Kind {
+	case planner.PhysicalHashAggregate:
+		if b.Aggregates == nil || len(plan.Children) != 1 {
+			return nil, "", fmt.Errorf("physical HASH AGGREGATE requires AggregateFactory and one child")
+		}
+		op, err := b.Aggregates.OpenAggregate(ctx, append([]planner.Column(nil), plan.Children[0].Output...), append([]*binder.BoundExpression(nil), plan.GroupBy...), append([]planner.AggregateSpec(nil), plan.Aggregates...), plan.Estimate)
+		return op, "aggregate", err
+	case planner.PhysicalDistinct:
+		if b.Distincts == nil || len(plan.Children) != 1 {
+			return nil, "", fmt.Errorf("physical DISTINCT requires DistinctFactory and one child")
+		}
+		op, err := b.Distincts.OpenDistinct(ctx, append([]planner.Column(nil), plan.Children[0].Output...), plan.Estimate)
+		return op, "distinct", err
+	case planner.PhysicalSort:
+		if b.Sorts == nil || len(plan.Children) != 1 || len(plan.Sort) == 0 {
+			return nil, "", fmt.Errorf("physical SORT requires SortFactory, one child and at least one key")
+		}
+		op, err := b.Sorts.OpenSort(ctx, append([]planner.Column(nil), plan.Children[0].Output...), append([]planner.SortKey(nil), plan.Sort...), plan.Estimate)
+		return op, "sort", err
+	default:
+		return nil, "", fmt.Errorf("physical operator %d is not blocking-lowerable", plan.Kind)
 	}
-	if len(plan.Children) != 1 || len(plan.Sort) == 0 {
-		return loweredStage{}, fmt.Errorf("physical SORT requires one child and at least one key")
-	}
-	input := append([]planner.Column(nil), plan.Children[0].Output...)
-	keys := append([]planner.SortKey(nil), plan.Sort...)
-	operator, err := b.Sorts.OpenSort(ctx, input, keys, plan.Estimate)
-	if err != nil {
-		return loweredStage{}, err
-	}
-	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "sort")
 }
 
-// lowerBlockingStage 用 bounded bridge 把 child Pipeline 的 Sink ownership 转成下一 stage Source。
-// operator 已由 factory 创建；任何后续构造失败都必须在返回前 Release。
-func (b *Builder) lowerBlockingStage(ctx context.Context, child *planner.PhysicalPlan, operator blocking.Operator, suffix string) (loweredStage, error) {
+func (b *Builder) newBlockingBridge(operator blocking.Operator) (*blocking.Bridge, error) {
 	if operator == nil {
-		return loweredStage{}, fmt.Errorf("blocking %s factory returned nil operator", suffix)
+		return nil, fmt.Errorf("blocking factory returned nil operator")
 	}
 	queue := b.BlockingQueue
 	if queue == 0 {
@@ -203,6 +299,125 @@ func (b *Builder) lowerBlockingStage(ctx context.Context, child *planner.Physica
 	bridge, err := blocking.New(operator, queue)
 	if err != nil {
 		operator.Release()
+		return nil, err
+	}
+	return bridge, nil
+}
+
+// lowerJoinPipeline 构造 build dependency + probe root；factory 在任何 child source 打开前完成语义/资源验证。
+func (b *Builder) lowerJoinPipeline(ctx context.Context, plan *planner.PhysicalPlan, downstream pipeline.Sink) (*pipeline.Pipeline, error) {
+	if b.Joins == nil {
+		return nil, fmt.Errorf("physical JOIN requires JoinFactory")
+	}
+	if len(plan.Children) != 2 {
+		return nil, fmt.Errorf("physical JOIN requires two children")
+	}
+	left, right := plan.Children[0], plan.Children[1]
+	runtime, err := b.Joins.OpenJoin(ctx, plan.Join, append([]planner.Column(nil), left.Output...), append([]planner.Column(nil), right.Output...), plan.Predicate, left.Estimate, right.Estimate)
+	if err != nil {
+		return nil, err
+	}
+	if runtime == nil {
+		return nil, fmt.Errorf("JoinFactory returned nil runtime")
+	}
+
+	buildPlan, probePlan := right, left
+	if runtime.BuildSide() == pipeline.BinaryBuildLeft {
+		buildPlan, probePlan = left, right
+	} else if runtime.BuildSide() != pipeline.BinaryBuildRight {
+		runtime.Close()
+		return nil, fmt.Errorf("JoinFactory returned invalid build side %d", runtime.BuildSide())
+	}
+	buildSink := &binaryLifecycleSink{Sink: runtime.BuildSink(), runtime: runtime}
+	if buildSink.Sink == nil {
+		runtime.Close()
+		return nil, fmt.Errorf("JOIN runtime returned nil build sink")
+	}
+	buildRoot, err := b.buildJoinAware(ctx, buildPlan, buildSink)
+	if err != nil {
+		runtime.Close()
+		return nil, err
+	}
+
+	probeRaw := runtime.ProbeSink(downstream)
+	if probeRaw == nil {
+		return nil, errors.Join(fmt.Errorf("JOIN runtime returned nil probe sink"), pipeline.AbortUnstarted(buildRoot), closeBinaryRuntime(runtime))
+	}
+	probeSink := &binaryLifecycleSink{Sink: probeRaw, runtime: runtime}
+	probeRoot, err := b.buildJoinAware(ctx, probePlan, probeSink)
+	if err != nil {
+		return nil, errors.Join(err, pipeline.AbortUnstarted(buildRoot), closeBinaryRuntime(runtime))
+	}
+	probeRoot.Dependencies = append(probeRoot.Dependencies, buildRoot)
+	probeRoot.Abort = combineAbort(probeRoot.Abort, func() error { return closeBinaryRuntime(runtime) })
+	return probeRoot, nil
+}
+
+// binaryLifecycleSink 让 Pipeline 自身失败时也能关闭双输入 runtime；成功 Finalize 不额外关闭。
+type binaryLifecycleSink struct {
+	pipeline.Sink
+	runtime pipeline.BinaryOperator
+}
+
+func (s *binaryLifecycleSink) Close() error {
+	var sinkErr error
+	if closeable, ok := s.Sink.(pipeline.CloseableSink); ok {
+		sinkErr = closeable.Close()
+	}
+	return errors.Join(sinkErr, closeBinaryRuntime(s.runtime))
+}
+
+func closeBinaryRuntime(runtime pipeline.BinaryOperator) error {
+	if runtime != nil {
+		runtime.Close()
+	}
+	return nil
+}
+
+func combineAbort(first, second func() error) func() error {
+	return func() error {
+		var firstErr, secondErr error
+		if first != nil {
+			firstErr = first()
+		}
+		if second != nil {
+			secondErr = second()
+		}
+		return errors.Join(firstErr, secondErr)
+	}
+}
+
+// lowerAggregate 创建 aggregate operator 后复用统一 blocking-stage 生命周期。
+func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	operator, _, err := b.openBlockingOperator(ctx, plan)
+	if err != nil {
+		return loweredStage{}, err
+	}
+	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "aggregate")
+}
+
+// lowerDistinct 创建 DISTINCT operator 后复用统一 blocking-stage 生命周期。
+func (b *Builder) lowerDistinct(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	operator, _, err := b.openBlockingOperator(ctx, plan)
+	if err != nil {
+		return loweredStage{}, err
+	}
+	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "distinct")
+}
+
+// lowerSort 创建 sort operator 后复用统一 blocking-stage 生命周期。
+func (b *Builder) lowerSort(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	operator, _, err := b.openBlockingOperator(ctx, plan)
+	if err != nil {
+		return loweredStage{}, err
+	}
+	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "sort")
+}
+
+// lowerBlockingStage 用 bounded bridge 把 child Pipeline 的 Sink ownership 转成下一 stage Source。
+func (b *Builder) lowerBlockingStage(ctx context.Context, child *planner.PhysicalPlan, operator blocking.Operator, suffix string) (loweredStage, error) {
+	bridge, err := b.newBlockingBridge(operator)
+	if err != nil {
 		return loweredStage{}, err
 	}
 	childStage, err := b.lowerNode(ctx, child)

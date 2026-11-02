@@ -20,6 +20,7 @@ const (
 	LogicalJoin
 	LogicalSort
 	LogicalLimit
+	LogicalOneRow // LogicalOneRow 为 SELECT 无 FROM 提供单行零列关系；追加在末尾避免改变既有 kind 数值。
 )
 
 // JoinType 是 planner 层的 SQL join 语义，不包含具体执行算法。
@@ -85,7 +86,7 @@ type LogicalPlan struct {
 	Aggregates []AggregateSpec            // Aggregates 用于 Aggregate。
 	Join       JoinType                   // Join 仅对 LogicalJoin 有效。
 	Sort       []SortKey                  // Sort 仅对 LogicalSort 有效。
-	Limit      uint64                     // Limit 是逻辑 limit；0 表示无 limit。
+	Limit      uint64                     // Limit 是逻辑 limit；UnlimitedRows 表示 OFFSET-only。
 	Offset     uint64                     // Offset 是逻辑 offset。
 }
 
@@ -95,6 +96,10 @@ func (p *LogicalPlan) Validate() error {
 		return fmt.Errorf("logical plan is nil")
 	}
 	switch p.Kind {
+	case LogicalOneRow:
+		if len(p.Children) != 0 || len(p.Output) != 0 || p.Scan != nil {
+			return fmt.Errorf("one-row source requires no children/output/scan")
+		}
 	case LogicalScan:
 		if p.Scan == nil || len(p.Children) != 0 {
 			return fmt.Errorf("scan requires ScanSpec and no children")

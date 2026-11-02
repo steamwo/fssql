@@ -8,7 +8,7 @@ import (
 )
 
 // PlanStable 是 Stable SELECT 的统一 Planner 入口。
-// 当前 output-modifier 顺序固定为 Project -> DISTINCT -> ORDER BY -> LIMIT/OFFSET；GROUP/subquery 仍由基础 Planner fail-closed。
+// output-modifier 顺序固定为 Project/Aggregate -> DISTINCT -> ORDER BY -> LIMIT/OFFSET；scalar subquery 仍在独立 lowering 前 fail-closed。
 func (p *QueryPlanner) PlanStable(ctx context.Context, query *binder.BoundQuery) (*LogicalPlan, error) {
 	if query == nil {
 		return nil, fmt.Errorf("query planner: nil BoundQuery")
@@ -32,7 +32,15 @@ func (p *QueryPlanner) PlanStable(ctx context.Context, query *binder.BoundQuery)
 	if err != nil {
 		return nil, err
 	}
-	root, err := p.Plan(ctx, &base)
+
+	var root *LogicalPlan
+	if len(base.GroupBy) != 0 || base.Having != nil || queryHasAggregate(&base) {
+		root, err = p.planStableAggregateQuery(ctx, &base)
+	} else if base.Source == nil {
+		root, err = p.planStableNoSource(ctx, &base)
+	} else {
+		root, err = p.Plan(ctx, &base)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +101,41 @@ func (p *QueryPlanner) PlanStable(ctx context.Context, query *binder.BoundQuery)
 		Output:   clonePlannerColumns(root.Output),
 		Limit:    limit,
 		Offset:   offset,
+	}
+	if err := root.Validate(); err != nil {
+		return nil, err
+	}
+	return root, nil
+}
+
+// planStableNoSource 为 SELECT 无 FROM 构造单行零列关系，再复用 Filter/Project 语义。
+// 它不创建伪 VFS source；常量表达式仍通过正常 ExpressionExecutor 物化 managed Vector。
+func (p *QueryPlanner) planStableNoSource(ctx context.Context, query *binder.BoundQuery) (*LogicalPlan, error) {
+	if query == nil || query.Source != nil {
+		return nil, fmt.Errorf("query planner: no-source planner received relation")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if queryHasSubquery(query) {
+		return nil, fmt.Errorf("query planner: scalar subquery lowering is not implemented")
+	}
+	root := &LogicalPlan{Kind: LogicalOneRow}
+	if query.Where != nil {
+		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Predicate: query.Where}
+	}
+	projection := make([]*binder.BoundExpression, len(query.Projection))
+	for i, item := range query.Projection {
+		if item.Expression == nil {
+			return nil, fmt.Errorf("query planner: projection %d is nil", i)
+		}
+		projection[i] = item.Expression
+	}
+	root = &LogicalPlan{
+		Kind:       LogicalProject,
+		Children:   []*LogicalPlan{root},
+		Output:     relationColumnsToPlanner(query.Output),
+		Projection: projection,
 	}
 	if err := root.Validate(); err != nil {
 		return nil, err

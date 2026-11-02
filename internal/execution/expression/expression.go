@@ -41,6 +41,9 @@ type BoundExpression struct {
 type Executor struct {
 	Scope   *memory.Scope
 	Buffers *memory.BufferManager
+	// RuntimeConstants 保存 non-correlated scalar subquery 的 query-scoped managed 单值 Vector。
+	// key 由 Binder runtime constant expression 的 Literal ID 指定；Vector ownership 仍属于 PreparedSQLQuery.Run。
+	RuntimeConstants map[int]*vector.Vector
 }
 
 func NewExecutor(scope *memory.Scope, buffers *memory.BufferManager) *Executor {

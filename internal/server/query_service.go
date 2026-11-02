@@ -45,6 +45,8 @@ type QueryServiceConfig struct {
 	MaxRetainedQueries int
 	// MaxSQLBytes 是单次 SQL 文本允许的最大字节数，限制 Go heap 控制对象大小。
 	MaxSQLBytes int
+	// QueryContexts 创建 QueryContext 及其 query-scoped resource ownership；nil 保持旧 managed-memory-only 行为。
+	QueryContexts QueryContextFactory
 }
 
 // SubmitRequest 是 transport-neutral query submit 请求。
@@ -99,7 +101,7 @@ type QueryService struct {
 	engine QueryEngine
 	// memory 是 engine 级 MemoryManager；每个 QueryContext 从中创建独立 Scope。
 	memory *memory.Manager
-	// config 固定 cursor/registry/SQL 控制面硬上限。
+	// config 固定 cursor/registry/SQL/query-resource 控制面硬上限。
 	config QueryServiceConfig
 	// submitMu 让 retention capacity check 与 Register 原子化，避免并发 submit 突破上限。
 	submitMu sync.Mutex
@@ -126,6 +128,9 @@ func NewQueryService(parent context.Context, registry *QueryRegistry, resources 
 	if config.MaxSQLBytes <= 0 {
 		config.MaxSQLBytes = 1 << 20
 	}
+	if config.QueryContexts == nil {
+		config.QueryContexts = defaultQueryContextFactory{}
+	}
 	if !schedulerConcurrencyBounded(resources.Snapshot()) {
 		return nil, ErrUnboundedQueryConcurrency
 	}
@@ -147,7 +152,13 @@ func (s *QueryService) Submit(ctx context.Context, request SubmitRequest) (Submi
 		request.Class = resource.QueryClassInteractive
 	}
 
-	queryContext := querypkg.New(s.parent, s.memory)
+	queryContext, err := s.config.QueryContexts.NewQueryContext(s.parent, s.memory, request.ResourceGroup)
+	if err != nil {
+		return SubmitResponse{}, fmt.Errorf("server: create query context: %w", err)
+	}
+	if queryContext == nil {
+		return SubmitResponse{}, errors.New("server: query context factory returned nil context")
+	}
 	cursor, err := NewResultCursor(s.config.CursorCapacityChunks)
 	if err != nil {
 		_ = queryContext.Close()

@@ -19,19 +19,20 @@ type planningRelationKind uint8
 const (
 	planningExternalTable planningRelationKind = iota + 1
 	planningView
+	planningInformationSchemaColumns
 )
 
-// planningRelationProvenance 保存当前 Statement 解析 Catalog relation 时丢失于通用 Binder ABI 的可执行来源。
-// 它只存在于 statement-scoped composition，不进入 Catalog 持久化、public API 或 Vector runtime。
+// planningRelationProvenance 保存当前 Statement 解析 relation 时丢失于通用 Binder ABI 的可执行来源。
+// source 对 external table 是 canonical source spec；对 internal virtual relation 是 bounded metadata snapshot 编码。
 type planningRelationProvenance struct {
-	kind     planningRelationKind // kind 区分 external table 与 view。
+	kind     planningRelationKind // kind 区分 external table、view 与 internal virtual metadata relation。
 	function string               // function 仅 external table 使用，为 FunctionCatalog Stable 名称。
-	source   string               // source 仅 external table 使用，为 Catalog 保存的 canonical source spec。
+	source   string               // source 保存 external URI/spec 或 internal virtual snapshot；均为 statement-scoped immutable value。
 	viewSQL  string               // viewSQL 仅 view 使用，为 Catalog 保存的 query SQL。
 }
 
 // PlanningSourceResolver 同时桥接 Binder relation resolution 与 Planner executable provenance。
-// SourceResolver 仍是 schema/Bind 唯一路径；本类型只记录同一次解析对应的执行来源。
+// SourceResolver 仍是用户 Catalog relation 的 schema/Bind 唯一路径；information_schema 使用同一 transaction 的 bounded snapshot。
 type PlanningSourceResolver struct {
 	base *SourceResolver // base 复用现有 Catalog + real TableFunction.Bind schema path。
 
@@ -51,11 +52,27 @@ func NewPlanningSourceResolver(base *SourceResolver) (*PlanningSourceResolver, e
 	return &PlanningSourceResolver{base: base, provenance: make(map[string]planningRelationProvenance)}, nil
 }
 
-// ResolveRelation 复用 SourceResolver 的真实 schema/fingerprint，并记录对应 Catalog executable provenance。
+// ResolveRelation 复用 SourceResolver 的真实 schema/fingerprint，并记录对应 executable provenance。
+// information_schema.columns 在同一 Catalog transaction 上生成 repeatable-read virtual snapshot，不注册为 SQL table function。
 func (r *PlanningSourceResolver) ResolveRelation(ctx context.Context, name ast.QualifiedName) (binder.ResolvedRelation, error) {
 	if r == nil || r.base == nil {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: planning source resolver is uninitialized")
 	}
+	if isInformationSchemaColumnsName(name) {
+		resolved, snapshot, err := buildInformationSchemaColumnsSnapshot(ctx, r.base.catalog)
+		if err != nil {
+			return binder.ResolvedRelation{}, err
+		}
+		encoded, err := encodeInformationSchemaSnapshot(snapshot)
+		if err != nil {
+			return binder.ResolvedRelation{}, err
+		}
+		if err := r.recordProvenance(resolved.ID, planningRelationProvenance{kind: planningInformationSchemaColumns, source: encoded}); err != nil {
+			return binder.ResolvedRelation{}, err
+		}
+		return resolved, nil
+	}
+
 	object, err := catalogObjectName(name)
 	if err != nil {
 		return binder.ResolvedRelation{}, err
@@ -78,11 +95,7 @@ func (r *PlanningSourceResolver) ResolveRelation(ctx context.Context, name ast.Q
 		if entry.ExternalTable == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid external-table metadata for %s.%s", object.Schema, object.Name)
 		}
-		provenance = planningRelationProvenance{
-			kind:     planningExternalTable,
-			function: entry.ExternalTable.TableFunction,
-			source:   entry.ExternalTable.Source,
-		}
+		provenance = planningRelationProvenance{kind: planningExternalTable, function: entry.ExternalTable.TableFunction, source: entry.ExternalTable.Source}
 		// Catalog object identity 是 query relation identity 的一部分，避免两个对象指向同一 snapshot 时 sidecar 冲突。
 		resolved.ID = fmt.Sprintf("external:%s.%s:%s", object.Schema, object.Name, resolved.ID)
 	case catalog.ObjectView:
@@ -107,8 +120,8 @@ func (r *PlanningSourceResolver) BindTableFunction(ctx context.Context, definiti
 	return r.base.BindTableFunction(ctx, definition, args)
 }
 
-// PlanBoundRelation 把已记录 external-table provenance 恢复为 generic LogicalScan。
-// View provenance 已保存，但在递归 parse/bind/plan 单元完成前显式拒绝，禁止把 view 当作物理 table scan。
+// PlanBoundRelation 把已记录 provenance 恢复为 generic LogicalScan。
+// View 由 ViewPlanningResolver 递归 parse/bind/plan；virtual metadata scan 仍走普通 Push Pipeline Scan。
 func (r *PlanningSourceResolver) PlanBoundRelation(ctx context.Context, relation *binder.BoundRelation) (*planner.LogicalPlan, error) {
 	if r == nil || r.base == nil || relation == nil {
 		return nil, fmt.Errorf("session: planning relation requires initialized resolver and relation")
@@ -132,18 +145,14 @@ func (r *PlanningSourceResolver) PlanBoundRelation(ctx context.Context, relation
 		if provenance.source == "" || relation.Fingerprint == "" {
 			return nil, fmt.Errorf("session: external relation %s has incomplete source identity", relation.ID)
 		}
-		return &planner.LogicalPlan{
-			Kind:   planner.LogicalScan,
-			Output: planningColumns(relation.Columns),
-			Scan: &planner.ScanSpec{
-				RelationID:  relation.ID,
-				Function:    definition.Name,
-				Source:      provenance.source,
-				Fingerprint: relation.Fingerprint,
-			},
-		}, nil
+		return &planner.LogicalPlan{Kind: planner.LogicalScan, Output: planningColumns(relation.Columns), Scan: &planner.ScanSpec{RelationID: relation.ID, Function: definition.Name, Source: provenance.source, Fingerprint: relation.Fingerprint}}, nil
 	case planningView:
 		return nil, fmt.Errorf("session: view relation %s requires recursive view planning", relation.ID)
+	case planningInformationSchemaColumns:
+		if provenance.source == "" || relation.Fingerprint == "" {
+			return nil, fmt.Errorf("session: information_schema.columns relation has incomplete snapshot identity")
+		}
+		return &planner.LogicalPlan{Kind: planner.LogicalScan, Output: planningColumns(relation.Columns), Scan: &planner.ScanSpec{RelationID: relation.ID, Function: internalInformationSchemaColumnsFunction, Source: provenance.source, Fingerprint: relation.Fingerprint}}, nil
 	default:
 		return nil, fmt.Errorf("session: unknown planning provenance kind %d", provenance.kind)
 	}

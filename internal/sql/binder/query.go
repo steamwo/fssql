@@ -65,6 +65,7 @@ type BoundRelation struct {
 	FunctionID  function.ID              // FunctionID 仅 table function 使用。
 	Source      string                   // Source 仅当前 Stable reader table function 使用。
 	Fingerprint stats.DatasetFingerprint // Fingerprint 绑定真实 source snapshot。
+	CTEQuery    *BoundQuery              // CTEQuery 仅 RelationCTE 使用，保存已绑定 non-recursive CTE executable provenance。
 }
 
 // BoundSelectItem 保存 SELECT projection 的强类型结果。
@@ -109,6 +110,7 @@ type QueryBinder struct {
 type boundCTE struct {
 	Name   ast.Identifier   // Name 保留 quoted identifier 语义。
 	Output []RelationColumn // Output 是已绑定 CTE schema。
+	Query  *BoundQuery      // Query 保存已经完成绑定且输出名已应用 CTE aliases 的 executable provenance。
 }
 
 // NewQueryBinder 创建 query binder；nil FunctionCatalog 使用 v1 builtin catalog。
@@ -156,7 +158,7 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 					out[j].Name = cte.Columns[j].Name
 				}
 			}
-			local.ctes = append(local.ctes, boundCTE{Name: cte.Name, Output: out})
+			local.ctes = append(local.ctes, boundCTE{Name: cte.Name, Output: out, Query: cloneCTEQuery(q, out)})
 		}
 	}
 
@@ -296,7 +298,7 @@ func (b *QueryBinder) bindTableName(ctx context.Context, t *ast.TableName) (*Bou
 	if len(t.Name.Parts) == 1 {
 		if cte := b.findCTE(t.Name.Parts[0]); cte != nil {
 			cols := cloneRelationColumns(cte.Output)
-			return &BoundRelation{Kind: RelationCTE, ID: "cte:" + cte.Name.Name, Alias: alias, Columns: cols, Scope: makeScope(alias, cols)}, nil
+			return &BoundRelation{Kind: RelationCTE, ID: "cte:" + cte.Name.Name, Alias: alias, Columns: cols, Scope: makeScope(alias, cols), CTEQuery: cte.Query}, nil
 		}
 		if b.isBlockedCTE(t.Name.Parts[0]) {
 			return nil, b.errorAt(t.Span, "recursive or forward CTE reference is not Stable v1: "+t.Name.Parts[0].Name)

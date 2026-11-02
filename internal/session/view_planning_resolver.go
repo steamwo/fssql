@@ -85,7 +85,8 @@ func (r *ViewPlanningResolver) PlanBoundRelation(ctx context.Context, relation *
 	if err != nil {
 		return nil, fmt.Errorf("session: bind view %s: %w", relation.ID, err)
 	}
-	logical, err := planner.NewQueryPlanner(functions, r).Plan(ctx, bound)
+	// View 与 direct SELECT 必须经过同一个 Stable output-modifier/aggregate/CTE planner；禁止保留旧 foundation 子集。
+	logical, err := planner.NewQueryPlanner(functions, r).PlanStable(ctx, bound)
 	if err != nil {
 		return nil, fmt.Errorf("session: plan view %s: %w", relation.ID, err)
 	}

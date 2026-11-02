@@ -1,0 +1,211 @@
+package session
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
+	"github.com/steamwo/fssql/internal/execution/pipeline"
+	resultpkg "github.com/steamwo/fssql/internal/execution/result"
+	"github.com/steamwo/fssql/internal/planner"
+	"github.com/steamwo/fssql/internal/query"
+	"github.com/steamwo/fssql/internal/sql/ast"
+	"github.com/steamwo/fssql/internal/sql/binder"
+	"github.com/steamwo/fssql/internal/sql/parser"
+)
+
+// PreparedStatement 是 Native/Server 共用的 SQL statement 执行边界。
+// SELECT、DESCRIBE 与 control statements 都只向 generic Pipeline Sink 输出 native DataChunk。
+type PreparedStatement interface {
+	Run(*query.Context, pipeline.Sink) error
+	Output() []planner.Column
+}
+
+// StableStatementEngine 在 StableSQLEngine 之上增加已冻结 control/DESCRIBE statement composition。
+type StableStatementEngine struct {
+	selects *StableSQLEngine   // selects 是 SELECT/Query 唯一 production execution path。
+	control *SQLControlAdapter // control 是 Catalog/Secret 副作用唯一 adapter。
+}
+
+// NewStableStatementEngine 创建 statement composition root。
+func NewStableStatementEngine(selects *StableSQLEngine, control *SQLControlAdapter) (*StableStatementEngine, error) {
+	if selects == nil || selects.config.Catalog == nil || selects.config.Sources == nil || selects.functions == nil || selects.config.Buffers == nil {
+		return nil, fmt.Errorf("session: Stable statement engine requires initialized StableSQLEngine")
+	}
+	if control == nil {
+		return nil, fmt.Errorf("session: Stable statement engine requires SQLControlAdapter")
+	}
+	return &StableStatementEngine{selects: selects, control: control}, nil
+}
+
+// Prepare 只做 parse/bind/planning，不提前执行 Catalog/Secret 副作用。
+// COPY TO 在 ADR-0008 未 ACCEPTED 前保持明确 blocker，禁止自行选择单文件 commit 语义。
+func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, sql string) (PreparedStatement, error) {
+	if e == nil || e.selects == nil || e.control == nil {
+		return nil, fmt.Errorf("session: Stable statement engine is uninitialized")
+	}
+	if q == nil || q.Memory == nil || q.Closed() {
+		return nil, fmt.Errorf("session: statement Prepare requires live QueryContext")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	parsed, err := parser.Parse(sql)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := parsed.(*ast.SelectStmt); ok {
+		return e.selects.Prepare(ctx, q, sql)
+	}
+	if _, ok := parsed.(*ast.CopyStmt); ok {
+		return nil, fmt.Errorf("session: COPY TO execution is blocked pending ACCEPTED ADR-0008 single-file commit semantics")
+	}
+
+	// CREATE SECRET 的 Binder 不需要 Catalog/source resolver，避免无关 VFS/source configuration 阻塞 credential control path。
+	if _, ok := parsed.(*ast.CreateSecretStmt); ok {
+		bound, err := binder.NewStatementBinder(e.selects.functions, nil, nil, sql).Bind(ctx, parsed)
+		if err != nil {
+			return nil, err
+		}
+		return &preparedControlStatement{engine: e, bound: bound}, nil
+	}
+
+	bindings, _, err := e.selects.config.Sources.NewQuerySources(q)
+	if err != nil {
+		return nil, fmt.Errorf("session: create statement source adapters: %w", err)
+	}
+	tx, err := e.selects.config.Catalog.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	closed := false
+	rollback := func() error {
+		if closed {
+			return nil
+		}
+		closed = true
+		return tx.Rollback(context.Background())
+	}
+	defer func() { _ = rollback() }()
+
+	base, err := NewSourceResolver(tx, e.selects.functions, bindings)
+	if err != nil {
+		return nil, err
+	}
+	planning, err := NewPlanningSourceResolver(base)
+	if err != nil {
+		return nil, err
+	}
+	views, err := NewViewPlanningResolver(planning)
+	if err != nil {
+		return nil, err
+	}
+	bound, err := binder.NewStatementBinder(e.selects.functions, views, views, sql).Bind(ctx, parsed)
+	if err != nil {
+		return nil, err
+	}
+	if err := rollback(); err != nil {
+		return nil, fmt.Errorf("session: close statement planning transaction: %w", err)
+	}
+
+	switch value := bound.(type) {
+	case *binder.BoundCreateView, *binder.BoundCreateExternalTable:
+		return &preparedControlStatement{engine: e, bound: bound}, nil
+	case *binder.BoundDescribe:
+		describe, ok := parsed.(*ast.DescribeStmt)
+		preserve := ok && describe.Relation != nil && describe.Query == nil
+		cursor, err := resultpkg.NewDescribeCursorWithNullability(value, preserve)
+		if err != nil {
+			return nil, err
+		}
+		return &preparedDescribeStatement{buffers: e.selects.config.Buffers, cursor: cursor}, nil
+	default:
+		return nil, fmt.Errorf("session: bound statement kind %d has no execution adapter", bound.StatementKind())
+	}
+}
+
+type preparedControlStatement struct {
+	engine *StableStatementEngine // engine 提供 Catalog/SQLControlAdapter。
+	bound  binder.BoundStatement  // bound 是无敏感日志输出的 control IR。
+}
+
+func (*preparedControlStatement) Output() []planner.Column { return nil }
+
+// Run 在副作用开始时创建独立 write transaction；planning transaction 已经回滚，符合 AD-021 生命周期分离。
+func (p *preparedControlStatement) Run(q *query.Context, sink pipeline.Sink) error {
+	if p == nil || p.engine == nil || p.bound == nil || q == nil || sink == nil {
+		return fmt.Errorf("session: control statement is uninitialized")
+	}
+	if err := q.Context().Err(); err != nil {
+		return err
+	}
+	tx, err := p.engine.selects.config.Catalog.Begin(q.Context())
+	if err != nil {
+		return err
+	}
+	statement := &Statement{catalog: tx}
+	applyErr := p.engine.control.Apply(q.Context(), statement, p.bound)
+	closeErr := statement.Close()
+	if applyErr != nil || closeErr != nil {
+		return errors.Join(applyErr, closeErr)
+	}
+	return sink.Finalize(q.Context())
+}
+
+type preparedDescribeStatement struct {
+	buffers *memory.BufferManager     // buffers 是 Query MemoryScope 的 managed allocator。
+	cursor  *resultpkg.DescribeCursor // cursor 只保存 Binder schema，不执行被描述查询。
+}
+
+func (p *preparedDescribeStatement) Output() []planner.Column {
+	if p == nil {
+		return nil
+	}
+	schema := resultpkg.DescribeSchema()
+	out := make([]planner.Column, len(schema))
+	for i, column := range schema {
+		out[i] = planner.Column{Name: column.Name, Type: cloneStatementResultType(column.Type), Nullable: column.Nullable}
+	}
+	return out
+}
+
+// Run 流式物化 DESCRIBE schema；ownership-taking Sink 可直接接管 native DataChunk。
+func (p *preparedDescribeStatement) Run(q *query.Context, sink pipeline.Sink) error {
+	if p == nil || p.buffers == nil || p.cursor == nil || q == nil || q.Memory == nil || sink == nil {
+		return fmt.Errorf("session: DESCRIBE statement is uninitialized")
+	}
+	for {
+		chunk, done, err := p.cursor.Next(q.Memory, p.buffers)
+		if err != nil {
+			return err
+		}
+		if done {
+			break
+		}
+		if err := sink.Consume(q.Context(), chunk); err != nil {
+			chunk.Release()
+			return err
+		}
+		if !pipeline.SinkTakesChunkOwnership(sink) {
+			chunk.Release()
+		}
+	}
+	return sink.Finalize(q.Context())
+}
+
+func cloneStatementResultType(value types.LogicalType) types.LogicalType {
+	out := value
+	if value.Child != nil {
+		child := cloneStatementResultType(*value.Child)
+		out.Child = &child
+	}
+	if value.Fields != nil {
+		out.Fields = make([]types.StructField, len(value.Fields))
+		for i, field := range value.Fields {
+			out.Fields[i] = types.StructField{Name: field.Name, Type: cloneStatementResultType(field.Type)}
+		}
+	}
+	return out
+}

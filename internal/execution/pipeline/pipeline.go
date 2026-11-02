@@ -38,6 +38,20 @@ type Sink interface {
 	Finalize(context.Context) error
 }
 
+// OwnershipTakingSink 是最终 Native Chunk/ResultCursor 一类 Sink 的可选扩展。
+// Consume 成功后若返回 true，chunk ownership 转移给 Sink，调用方不得再 Release；
+// Consume 返回 error 时 ownership 永远没有转移，调用方仍负责 Release。
+type OwnershipTakingSink interface {
+	Sink
+	TakesChunkOwnership() bool
+}
+
+// SinkTakesChunkOwnership 统一判断 Sink 的成功消费 ownership 语义，供 Pipeline 与直接 push 的 join emitter 共用。
+func SinkTakesChunkOwnership(sink Sink) bool {
+	owner, ok := sink.(OwnershipTakingSink)
+	return ok && owner.TakesChunkOwnership()
+}
+
 // CloseableSink 是持有 blocking state/temp ownership 的可选 Sink 扩展。
 // Pipeline 仅在执行失败或 Finalize 失败时调用 Close；成功 Finalize 后 Sink 可能继续作为下一 stage 的 Source，不能提前关闭。
 type CloseableSink interface {
@@ -52,6 +66,9 @@ type Pipeline struct {
 	Transforms   []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
 	Sink         Sink
 	Dependencies []*Pipeline
+	// Abort 仅用于“dependency 失败导致本 Pipeline 根本未运行”时回收当前节点已创建的 ownership。
+	// 成功运行、当前 Pipeline 自身失败、cycle 检测都不会通过此字段重复清理。
+	Abort func() error
 }
 
 func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer) error {
@@ -101,7 +118,9 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 					owned.Release()
 					return scheduler.FAILED, err
 				}
-				owned.Release()
+				if !SinkTakesChunkOwnership(p.Sink) {
+					owned.Release()
+				}
 			}
 		})
 	}
@@ -157,7 +176,12 @@ func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Obse
 		mu.Unlock()
 		for _, d := range p.Dependencies {
 			if err := visit(d); err != nil {
-				return err
+				// 当前 Pipeline 尚未运行；若它已经持有 join/runtime 等 ownership，必须在 dependency 错误返回前释放。
+				var abortErr error
+				if p.Abort != nil {
+					abortErr = p.Abort()
+				}
+				return errors.Join(err, abortErr)
 			}
 		}
 		if err := p.Run(ctx, workers, obs); err != nil {

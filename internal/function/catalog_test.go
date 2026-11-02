@@ -57,6 +57,17 @@ func TestCountStarAndSQLNull(t *testing.T) {
 	}
 }
 
+// TestAggregateDistinctRejectedInStableV1 防止 COUNT(DISTINCT x) 被 Binder 丢失标志后静默按普通 aggregate 执行。
+func TestAggregateDistinctRejectedInStableV1(t *testing.T) {
+	c := NewBuiltinCatalog()
+	if _, _, err := c.BindCall("count", Aggregate, BindInput{
+		Arguments: []ArgumentType{{Type: types.LogicalType{ID: types.BigInt}}},
+		Distinct:  true,
+	}); err == nil {
+		t.Fatal("expected aggregate DISTINCT rejection")
+	}
+}
+
 func TestTableFunctionRegistrationDoesNotFakeBind(t *testing.T) {
 	c := NewBuiltinCatalog()
 	d, got, err := c.BindCall("read_parquet", Table, BindInput{Arguments: []ArgumentType{{Type: types.LogicalType{ID: types.Varchar}}}})

@@ -38,12 +38,18 @@ func DescribeSchema() []Column {
 
 // DescribeCursor 把 Binder 已解析 schema 流式物化为 native DataChunk；不会执行被 DESCRIBE 的查询。
 type DescribeCursor struct {
-	columns []binder.RelationColumn // columns 是 Binder schema 的深拷贝。
-	offset  int                     // offset 是下一批待物化列序号。
+	columns             []binder.RelationColumn // columns 是 Binder schema 的深拷贝。
+	offset              int                     // offset 是下一批待物化列序号。
+	preserveNullability bool                    // preserveNullability 仅 relation form 为 true；query form 按 DuckDB 输出 YES。
 }
 
-// NewDescribeCursor 创建 DESCRIBE result cursor；空 schema 明确失败而不是返回伪造结果。
+// NewDescribeCursor 创建 query-form DESCRIBE cursor；query nullability 按 DuckDB 行为统一显示 YES。
 func NewDescribeCursor(stmt *binder.BoundDescribe) (*DescribeCursor, error) {
+	return NewDescribeCursorWithNullability(stmt, false)
+}
+
+// NewDescribeCursorWithNullability 创建 DESCRIBE cursor；relation form 可保留 Catalog/Bind schema nullability。
+func NewDescribeCursorWithNullability(stmt *binder.BoundDescribe, preserveNullability bool) (*DescribeCursor, error) {
 	if stmt == nil || len(stmt.Columns) == 0 {
 		return nil, fmt.Errorf("execution result: DESCRIBE requires non-empty bound schema")
 	}
@@ -55,12 +61,12 @@ func NewDescribeCursor(stmt *binder.BoundDescribe) (*DescribeCursor, error) {
 		columns[i] = column
 		columns[i].Type = cloneLogicalType(column.Type)
 	}
-	return &DescribeCursor{columns: columns}, nil
+	return &DescribeCursor{columns: columns, preserveNullability: preserveNullability}, nil
 }
 
 // Next 物化最多一个默认 DataChunk 的 DESCRIBE 行；done=true 时不再返回 chunk。
-// DuckDB 对 DESCRIBE query 的 nullability 信息不作约束保留；当前 v1 Catalog 也没有 key/default metadata，
-// 因此 null 固定输出 YES，key/default/extra 输出 SQL NULL，避免用空字符串伪装未知 metadata。
+// Query form 因投影/表达式会丢失约束元数据，null 统一显示 YES；relation form 保留实际 column Nullable。
+// 当前 v1 Catalog 没有 key/default metadata，因此 key/default/extra 输出 SQL NULL，避免用空字符串伪装未知 metadata。
 func (c *DescribeCursor) Next(scope *memory.Scope, buffers *memory.BufferManager) (chunk *vector.DataChunk, done bool, err error) {
 	if c == nil {
 		return nil, false, fmt.Errorf("execution result: nil DESCRIBE cursor")
@@ -99,7 +105,11 @@ func (c *DescribeCursor) Next(scope *memory.Scope, buffers *memory.BufferManager
 			releaseVectors(vectors)
 			return nil, false, err
 		}
-		if err = vectors[2].SetString(row, "YES"); err != nil {
+		nullableText := "YES"
+		if c.preserveNullability && !column.Nullable {
+			nullableText = "NO"
+		}
+		if err = vectors[2].SetString(row, nullableText); err != nil {
 			releaseVectors(vectors)
 			return nil, false, err
 		}
@@ -213,7 +223,6 @@ func formatStructFieldName(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// simpleTypeIdentifier 判断字段名能否安全按未引用 identifier 显示。
 func simpleTypeIdentifier(name string) bool {
 	if name == "" {
 		return false
@@ -233,7 +242,6 @@ func simpleTypeIdentifier(name string) bool {
 	return true
 }
 
-// typeKeyword 保存 nested type display 中必须引用的常见 SQL/type 关键字；不改变 parser keyword contract。
 func typeKeyword(name string) bool {
 	switch strings.ToLower(name) {
 	case "select", "from", "where", "group", "by", "having", "order", "limit", "offset", "join", "inner", "left", "right", "full", "cross", "semi", "anti", "null", "true", "false", "struct", "list", "date", "timestamp":
@@ -243,7 +251,6 @@ func typeKeyword(name string) bool {
 	}
 }
 
-// cloneLogicalType 深拷贝 nested type metadata，避免结果 cursor 持有 Binder 可变 slice/pointer alias。
 func cloneLogicalType(t types.LogicalType) types.LogicalType {
 	out := t
 	if t.Child != nil {
@@ -259,7 +266,6 @@ func cloneLogicalType(t types.LogicalType) types.LogicalType {
 	return out
 }
 
-// releaseVectors 释放部分构造失败时已经分配的 managed vectors。
 func releaseVectors(vectors []*vector.Vector) {
 	for _, item := range vectors {
 		if item != nil {
