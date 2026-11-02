@@ -17,6 +17,7 @@ const (
 	defaultJSONSampleBytes int64 = 1 << 20
 	defaultJSONMaxBytes    int64 = 8 << 20
 	defaultJSONMaxRows           = 2048
+	maxJSONStructuralDepth       = 256
 )
 
 var errJSONNeedMoreData = errors.New("json: source sample needs more data")
@@ -38,11 +39,9 @@ type JSONBinding struct {
 // ScanSet 返回冻结 ScanSet；调用方不得修改其文件身份。
 func (b JSONBinding) ScanSet() *fileset.ScanSet { return b.scanSet }
 
-// Schema 返回 schema 副本，避免调用方修改 binding 内 slice。
+// Schema 返回 schema 深拷贝，避免 LIST/STRUCT metadata slice/pointer 被调用方修改。
 func (b JSONBinding) Schema() InferredSchema {
-	out := b.schema
-	out.Fields = append([]types.StructField(nil), b.schema.Fields...)
-	return out
+	return InferredSchema{Fields: cloneJSONFields(b.schema.Fields), SampleRows: b.schema.SampleRows}
 }
 
 // MatchedFiles 返回冻结 ScanSet 命中的文件数。
@@ -63,9 +62,9 @@ func (b JSONBinding) Fingerprint() string {
 
 // JSONBinder 是普通 JSON query/introspection 唯一 schema Bind 入口。
 type JSONBinder struct {
-	registry *vfs.Registry       // registry 是统一 VFS capability/driver registry。
-	planner  *fileset.Planner    // planner 先冻结 ScanSet 再读取 sample。
-	scope    *memory.Scope       // scope 约束 sample buffer 的 managed memory ownership。
+	registry *vfs.Registry        // registry 是统一 VFS capability/driver registry。
+	planner  *fileset.Planner     // planner 先冻结 ScanSet 再读取 sample。
+	scope    *memory.Scope        // scope 约束 sample buffer 的 managed memory ownership。
 	bm       *memory.BufferManager // bm 创建 managed range buffer。
 }
 
@@ -136,15 +135,17 @@ func (b *JSONBinder) Bind(ctx context.Context, pattern string, opts JSONBindOpti
 		if readErr != nil {
 			return JSONBinding{}, readErr
 		}
+		// records 只是 managed range buffer 的 slice views；InferRecords 完成前不能 Release buffer。
 		records, frameErr := FrameJSONRecords(result.Buffer.Bytes(), sample == file.Size, maxRows)
-		result.Buffer.Release()
 		if frameErr == nil && len(records) > 0 {
 			schema, inferErr := InferRecords(records, maxRows)
+			result.Buffer.Release()
 			if inferErr == nil {
 				return JSONBinding{scanSet: scanSet, schema: schema}, nil
 			}
 			return JSONBinding{}, inferErr
 		}
+		result.Buffer.Release()
 		if frameErr != nil && !errors.Is(frameErr, errJSONNeedMoreData) {
 			return JSONBinding{}, frameErr
 		}
@@ -329,6 +330,9 @@ func scanJSONValueEnd(data []byte, start int) (end int, complete bool, err error
 		case '"':
 			inString = true
 		case '{', '[':
+			if len(stack) >= maxJSONStructuralDepth {
+				return 0, false, fmt.Errorf("json: structural nesting exceeds %d", maxJSONStructuralDepth)
+			}
 			stack = append(stack, c)
 		case '}', ']':
 			if len(stack) == 0 {
@@ -358,4 +362,26 @@ func skipJSONSpace(data []byte, pos int) int {
 		}
 	}
 	return pos
+}
+
+// cloneJSONFields 深拷贝 LIST/STRUCT schema metadata，保持 Binding snapshot 不可变。
+func cloneJSONFields(fields []types.StructField) []types.StructField {
+	out := make([]types.StructField, len(fields))
+	for i, field := range fields {
+		out[i] = types.StructField{Name: field.Name, Type: cloneJSONType(field.Type)}
+	}
+	return out
+}
+
+// cloneJSONType 递归复制复杂 LogicalType metadata。
+func cloneJSONType(t types.LogicalType) types.LogicalType {
+	out := t
+	if t.Child != nil {
+		child := cloneJSONType(*t.Child)
+		out.Child = &child
+	}
+	if t.Fields != nil {
+		out.Fields = cloneJSONFields(t.Fields)
+	}
+	return out
 }
