@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/execution/aggregate"
@@ -13,15 +14,28 @@ import (
 	storagetemp "github.com/steamwo/fssql/internal/storage/temp"
 )
 
-func aggregateFactoryChunk(t *testing.T, qscope interface {
-}, _ int) {
-	// 占位签名禁止被使用；真实 chunk helper 见 makeAggregateFactoryChunk。
-}
-
-func makeAggregateFactoryChunk(t *testing.T, scope interface {
-}, _ int, _ int) *vector.DataChunk {
+func makeAggregateFactoryChunk(t *testing.T, scope *memory.Scope, buffers *memory.BufferManager, start, count int) *vector.DataChunk {
 	t.Helper()
-	return nil
+	groups, err := vector.NewFlat(scope, buffers, types.LogicalType{ID: types.BigInt}, count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := vector.NewFlat(scope, buffers, types.LogicalType{ID: types.BigInt}, count)
+	if err != nil {
+		groups.Release()
+		t.Fatal(err)
+	}
+	for row := 0; row < count; row++ {
+		groups.SetInt64(row, int64(start+row))
+		values.SetInt64(row, 1)
+	}
+	chunk, err := vector.NewDataChunk(groups, values)
+	if err != nil {
+		groups.Release()
+		values.Release()
+		t.Fatal(err)
+	}
+	return chunk
 }
 
 // TestExternalAggregateFactoryRequiresExplicitResources 验证 budget/radix/depth/spill 配置必须显式且可执行。
@@ -99,5 +113,82 @@ func TestExternalAggregateFactoryRejectsUnmaterializedAndTypeDrift(t *testing.T)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestExternalAggregateFactoryForcedSpill 验证 factory 真正绑定 QueryContext TemporaryStorage，并在 forced spill 后无 temp/managed leak。
+func TestExternalAggregateFactoryForcedSpill(t *testing.T) {
+	manager, buffers, tempMemory, q := newDistinctFactoryQuery(t)
+	factory, err := NewExternalAggregateFactory(q, buffers, ExternalAggregateRuntimeConfig{
+		// 8 KiB 仅用于测试中强制 spill，不是 production 默认值。
+		MemoryBudget: 8 << 10, RadixBits: 4, MaxDepth: 8, SpillBlockBytes: 2048, Compression: storagetemp.CompressionRLE,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := []planner.Column{
+		{Name: "group", Type: types.LogicalType{ID: types.BigInt}},
+		{Name: "value", Type: types.LogicalType{ID: types.BigInt}},
+	}
+	group := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}
+	arg := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[1].Type, ColumnIndex: 1}
+	spec := planner.AggregateSpec{
+		FunctionID: uint16(function.SumID), Arguments: []*binder.BoundExpression{arg},
+		Output: planner.Column{Name: "sum", Type: types.LogicalType{ID: types.HugeInt}, Nullable: true},
+	}
+	operator, err := factory.OpenAggregate(context.Background(), columns, []*binder.BoundExpression{group}, []planner.AggregateSpec{spec}, planner.CardinalityEstimate{Rows: ^uint64(0), Confidence: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, ok := operator.(*aggregate.ExternalAggregate)
+	if !ok {
+		operator.Release()
+		t.Fatalf("operator=%T want *aggregate.ExternalAggregate", operator)
+	}
+	for start := 0; start < 4096; start += 256 {
+		chunk := makeAggregateFactoryChunk(t, q.Memory, buffers, start, 256)
+		if err := external.Consume(context.Background(), chunk); err != nil {
+			chunk.Release()
+			external.Release()
+			t.Fatal(err)
+		}
+		chunk.Release()
+	}
+	rows := 0
+	if err := external.Emit(context.Background(), func(chunk *vector.DataChunk) error {
+		for row := 0; row < chunk.Cardinality; row++ {
+			if _, valid := chunk.Columns[0].Int64(row); !valid {
+				return context.Canceled
+			}
+			sum, valid := chunk.Columns[1].Int128(row)
+			if !valid || sum.Hi != 0 || sum.Lo != 1 {
+				return context.DeadlineExceeded
+			}
+			rows++
+		}
+		chunk.Release()
+		return nil
+	}); err != nil {
+		external.Release()
+		t.Fatalf("emit/value verification: %v", err)
+	}
+	stats := external.Stats()
+	if stats.SpillPasses == 0 || stats.SpillPages == 0 || stats.SpilledGroups == 0 {
+		external.Release()
+		t.Fatalf("expected forced external aggregate stats: %+v", stats)
+	}
+	if rows != 4096 {
+		external.Release()
+		t.Fatalf("aggregate rows=%d want=4096", rows)
+	}
+	external.Release()
+	if q.Temp.Used() != 0 || q.Temp.OwnedFiles() != 0 || manager.Used() != 0 {
+		t.Fatalf("post-aggregate leak temp=%d files=%d managed=%d", q.Temp.Used(), q.Temp.OwnedFiles(), manager.Used())
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if tempMemory.GlobalUsed() != 0 {
+		t.Fatalf("temporary memory leak=%d", tempMemory.GlobalUsed())
 	}
 }
