@@ -19,6 +19,7 @@ const (
 	PhysicalCrossJoin
 	PhysicalSort
 	PhysicalLimit
+	PhysicalOneRow // PhysicalOneRow 为 SELECT 无 FROM 提供单行零列 source；追加在末尾保持既有 kind 数值。
 )
 
 // CardinalityEstimate 是 physical cost model 使用的 row estimate。
@@ -58,6 +59,10 @@ func (p *PhysicalPlan) Validate() error {
 		return fmt.Errorf("physical plan is nil")
 	}
 	switch p.Kind {
+	case PhysicalOneRow:
+		if len(p.Children) != 0 || len(p.Output) != 0 || p.Scan != nil {
+			return fmt.Errorf("physical one-row source requires no children/output/scan")
+		}
 	case PhysicalScan:
 		if p.Scan == nil || len(p.Children) != 0 {
 			return fmt.Errorf("physical scan requires ScanSpec and no children")
