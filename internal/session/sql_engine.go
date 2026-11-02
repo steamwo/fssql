@@ -23,21 +23,37 @@ import (
 	"github.com/steamwo/fssql/internal/sql/parser"
 )
 
+// QuerySourceFactory 为单个 QueryContext 创建真实 Bind adapters 与 runtime scan registry。
+// 格式 SourceBinder 持有 Query MemoryScope，因此这些对象严禁跨 Query 复用。
+type QuerySourceFactory interface {
+	NewQuerySources(*query.Context) ([]TableBindAdapter, *RuntimeScanSourceFactory, error)
+}
+
+// QuerySourceFactoryFunc 便于 composition root 用函数实现 query-scoped source 装配。
+type QuerySourceFactoryFunc func(*query.Context) ([]TableBindAdapter, *RuntimeScanSourceFactory, error)
+
+// NewQuerySources 实现 QuerySourceFactory。
+func (f QuerySourceFactoryFunc) NewQuerySources(q *query.Context) ([]TableBindAdapter, *RuntimeScanSourceFactory, error) {
+	if f == nil {
+		return nil, nil, fmt.Errorf("session: nil QuerySourceFactoryFunc")
+	}
+	return f(q)
+}
+
 // StableSQLEngineConfig 是 transport-neutral Stable SELECT composition root。
-// Catalog/Bind/scan adapters 由 Engine 装配层注入；本类型不依赖具体 VFS/format/server transport。
+// Query-scoped source objects 通过 Sources 创建；本类型不依赖具体 VFS/format/server transport。
 type StableSQLEngineConfig struct {
-	Catalog       catalog.Catalog            // Catalog 提供 statement-scoped metadata transaction。
-	Functions     *function.Catalog          // Functions 是全链路唯一 FunctionCatalog；nil 使用 builtin Stable catalog。
-	TableBindings []TableBindAdapter         // TableBindings 是真实 TableFunction.Bind adapters。
-	Scans         *RuntimeScanSourceFactory  // Scans 是 PhysicalScan 唯一 runtime source factory。
-	Buffers       *memory.BufferManager      // Buffers 是 expression/blocking operator 的 managed buffer factory。
-	Statistics    stats.Provider             // Statistics 可为空；optimizer 会保持 Unknown confidence。
-	Distinct      ExternalDistinctRuntimeConfig // Distinct 是 query-scoped DISTINCT spill policy。
-	Sort          ExternalSortRuntimeConfig     // Sort 是 query-scoped ORDER BY spill policy。
+	Catalog       catalog.Catalog                // Catalog 提供 statement-scoped metadata transaction。
+	Functions     *function.Catalog              // Functions 是全链路唯一 FunctionCatalog；nil 使用 builtin Stable catalog。
+	Sources       QuerySourceFactory             // Sources 为每个 QueryContext 装配真实 Bind/scan adapters。
+	Buffers       *memory.BufferManager          // Buffers 是 expression/blocking operator 的 managed buffer factory。
+	Statistics    stats.Provider                 // Statistics 可为空；optimizer 会保持 Unknown confidence。
+	Distinct      ExternalDistinctRuntimeConfig  // Distinct 是 query-scoped DISTINCT spill policy。
+	Sort          ExternalSortRuntimeConfig      // Sort 是 query-scoped ORDER BY spill policy。
 	Aggregate     ExternalAggregateRuntimeConfig // Aggregate 是 query-scoped GROUP/aggregate spill policy。
 	Join          ExternalJoinRuntimeConfig      // Join 是 query-scoped Stable join spill policy。
-	Workers       int                        // Workers 是单 Pipeline stage 的 CPU worker 上限；<=0 归一为 1。
-	BlockingQueue int                        // BlockingQueue 是 blocking stage bounded handoff 容量；<=0 归一为 1。
+	Workers       int                            // Workers 是单 Pipeline stage 的 CPU worker 上限；<=0 归一为 1。
+	BlockingQueue int                            // BlockingQueue 是 blocking stage bounded handoff 容量；<=0 归一为 1。
 }
 
 // StableSQLEngine 把 Parser→Binder→Planner→Optimizer→Push Pipeline 组合成唯一 production SELECT path。
@@ -48,14 +64,15 @@ type StableSQLEngine struct {
 
 // PreparedSQLQuery 保存已经完成 parser/binder/planner/optimizer 的 immutable-by-convention physical plan。
 type PreparedSQLQuery struct {
-	engine   *StableSQLEngine      // engine 提供 runtime factory policy。
-	physical *planner.PhysicalPlan // physical 不包含已打开 reader/operator。
+	engine   *StableSQLEngine          // engine 提供 runtime factory policy。
+	physical *planner.PhysicalPlan     // physical 不包含已打开 reader/operator。
+	scans    *RuntimeScanSourceFactory // scans 与 Prepare 使用的 query-scoped Bind adapters 属于同一 QueryContext。
 }
 
 // NewStableSQLEngine 创建 transport-neutral SQL engine；不创建 QueryContext 或 server goroutine。
 func NewStableSQLEngine(config StableSQLEngineConfig) (*StableSQLEngine, error) {
-	if config.Catalog == nil || config.Scans == nil || config.Buffers == nil {
-		return nil, fmt.Errorf("session: Stable SQL engine requires catalog, runtime scan factory and BufferManager")
+	if config.Catalog == nil || config.Sources == nil || config.Buffers == nil {
+		return nil, fmt.Errorf("session: Stable SQL engine requires catalog, query source factory and BufferManager")
 	}
 	if config.Functions == nil {
 		config.Functions = function.NewBuiltinCatalog()
@@ -72,7 +89,7 @@ func NewStableSQLEngine(config StableSQLEngineConfig) (*StableSQLEngine, error) 
 // Prepare 完成 SELECT 的 parse/bind/plan/optimize，并在 QueryContext 冻结全部 source fingerprints。
 // Catalog transaction 只覆盖 metadata planning；成功或失败都在返回前 rollback，运行时不持有 Catalog transaction。
 func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql string) (*PreparedSQLQuery, error) {
-	if e == nil || e.config.Catalog == nil || e.functions == nil || e.config.Scans == nil || e.config.Buffers == nil {
+	if e == nil || e.config.Catalog == nil || e.config.Sources == nil || e.functions == nil || e.config.Buffers == nil {
 		return nil, fmt.Errorf("session: Stable SQL engine is uninitialized")
 	}
 	if q == nil || q.Memory == nil || q.Closed() {
@@ -90,6 +107,14 @@ func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql str
 		return nil, fmt.Errorf("session: query execution currently requires SELECT; got %T", statement)
 	}
 
+	bindings, scans, err := e.config.Sources.NewQuerySources(q)
+	if err != nil {
+		return nil, fmt.Errorf("session: create query source adapters: %w", err)
+	}
+	if scans == nil {
+		return nil, fmt.Errorf("session: query source factory returned nil runtime scan factory")
+	}
+
 	tx, err := e.config.Catalog.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -104,7 +129,7 @@ func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql str
 	}
 	defer func() { _ = rollback() }()
 
-	baseResolver, err := NewSourceResolver(tx, e.functions, e.config.TableBindings)
+	baseResolver, err := NewSourceResolver(tx, e.functions, bindings)
 	if err != nil {
 		return nil, err
 	}
@@ -134,13 +159,13 @@ func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql str
 	if err := rollback(); err != nil {
 		return nil, fmt.Errorf("session: close read-only planning transaction: %w", err)
 	}
-	return &PreparedSQLQuery{engine: e, physical: physical}, nil
+	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans}, nil
 }
 
 // Run 把 Prepared physical plan 降低为 Push Pipeline DAG，并由调用方提供最终结果 Sink。
 // QueryContext ownership 由调用方保持；本方法不 Close/Cancel QueryContext。
 func (p *PreparedSQLQuery) Run(q *query.Context, sink pipeline.Sink) error {
-	if p == nil || p.engine == nil || p.physical == nil {
+	if p == nil || p.engine == nil || p.physical == nil || p.scans == nil {
 		return fmt.Errorf("session: prepared SQL query is uninitialized")
 	}
 	if q == nil || q.Memory == nil || q.Closed() {
@@ -151,7 +176,7 @@ func (p *PreparedSQLQuery) Run(q *query.Context, sink pipeline.Sink) error {
 	}
 	e := p.engine
 	executor := expression.NewExecutor(q.Memory, e.config.Buffers)
-	builder, err := lowering.NewBuilder(e.config.Scans, executor)
+	builder, err := lowering.NewBuilder(p.scans, executor)
 	if err != nil {
 		return err
 	}
