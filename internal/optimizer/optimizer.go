@@ -106,6 +106,8 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 		Estimate:   est,
 	}
 	switch p.Kind {
+	case planner.LogicalOneRow:
+		out.Kind = planner.PhysicalOneRow
 	case planner.LogicalScan:
 		out.Kind = planner.PhysicalScan
 	case planner.LogicalFilter:
@@ -136,6 +138,8 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 // estimate 计算 conservative cardinality；Unknown statistics 保持低置信度而不是伪造精确结果。
 func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, children []*planner.PhysicalPlan) (planner.CardinalityEstimate, error) {
 	switch p.Kind {
+	case planner.LogicalOneRow:
+		return planner.CardinalityEstimate{Rows: 1, Confidence: 1}, nil
 	case planner.LogicalScan:
 		if o.Statistics == nil || p.Scan == nil || p.Scan.Fingerprint == "" {
 			return planner.CardinalityEstimate{}, nil
@@ -252,6 +256,8 @@ func cost(p *planner.PhysicalPlan) planner.PhysicalCost {
 	rows := float64(p.Estimate.Rows)
 	c := planner.PhysicalCost{}
 	switch p.Kind {
+	case planner.PhysicalOneRow:
+		c.CPU = 0
 	case planner.PhysicalScan:
 		c.IO, c.CPU = rows, rows*0.1
 	case planner.PhysicalFilter, planner.PhysicalProject, planner.PhysicalLimit:
