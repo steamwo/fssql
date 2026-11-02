@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "engine": "duckdb",
+    "version": "2.0.0"
+  },
+  "entries": [
+    {
+      "id": "DBSQL-001",
+      "classification": "unsupported_feature",
+      "surface": "database/sql parameters",
+      "stable_sql_semantics": false,
+      "summary": "Parameterized database/sql execution is not part of the frozen Stable v1 API boundary.",
+      "duckdb": "DuckDB client APIs support parameter binding.",
+      "fssql": "database/sql QueryContext and ExecContext reject non-empty argument lists; callers pass Stable SQL text without bind parameters.",
+      "rationale": "AD-022 requires database/sql compatibility, but the frozen Stable v1 feature contract does not define a parameter placeholder or prepared-statement contract. Rejecting arguments is explicit and avoids inventing post-freeze SQL/API semantics."
+    },
+    {
+      "id": "DBSQL-002",
+      "classification": "intentional_deviation",
+      "surface": "database/sql nested result values",
+      "stable_sql_semantics": false,
+      "summary": "LIST and STRUCT values remain available through the native Chunk API but are not projected into database/sql driver.Value.",
+      "duckdb": "DuckDB language bindings can expose nested result values through binding-specific value types.",
+      "fssql": "database/sql returns an explicit error for LIST/STRUCT cells and directs callers to QueryChunks, which preserves the engine-native Vector/DataChunk representation.",
+      "rationale": "database/sql driver.Value has no lossless standard nested value representation. Converting nested values to ad-hoc strings would violate the no-hidden-semantic-downgrade invariant."
+    },
+    {
+      "id": "DBSQL-003",
+      "classification": "intentional_deviation",
+      "surface": "database/sql exact wide numeric values",
+      "stable_sql_semantics": false,
+      "summary": "DECIMAL and HUGEINT cells are represented as exact base-10 strings at the database/sql boundary.",
+      "duckdb": "DuckDB bindings may expose DECIMAL/HUGEINT through binding-specific exact numeric objects.",
+      "fssql": "database/sql emits exact decimal text for DECIMAL and HUGEINT because driver.Value has no standard Int128/Decimal type; the native Chunk API retains exact physical values.",
+      "rationale": "The string representation is lossless and limited to the row-oriented compatibility adapter; Core/Execution ABI remains the engine's own Vector/DataChunk types."
+    }
+  ]
+}
