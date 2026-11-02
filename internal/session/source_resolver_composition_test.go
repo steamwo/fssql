@@ -6,7 +6,6 @@ import (
 
 	"github.com/steamwo/fssql/internal/catalog"
 	"github.com/steamwo/fssql/internal/core/types"
-	"github.com/steamwo/fssql/internal/format/parquet"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/sql/ast"
 	"github.com/steamwo/fssql/internal/sql/binder"
@@ -120,7 +119,7 @@ func TestStableSourceResolverExternalTableRebind(t *testing.T) {
 func TestStableTableBindAdaptersRequireCompleteProvider(t *testing.T) {
 	provider := &StableTableFunctionResolver{
 		parquet: func(context.Context, string) ([]types.StructField, string, error) {
-			return parquet.ResolvedSchema{}.Fields, "fp", nil
+			return nil, "fp", nil
 		},
 	}
 	if _, err := provider.TableBindAdapters(); err == nil {
