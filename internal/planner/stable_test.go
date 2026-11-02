@@ -78,11 +78,18 @@ func TestPlanStableOffsetZeroWithoutLimitIsNoOp(t *testing.T) {
 	}
 }
 
-// TestPlanStableLeavesOrderByFailClosed 验证尚未接通的 ORDER BY 不会因统一入口而被静默跳过。
-func TestPlanStableLeavesOrderByFailClosed(t *testing.T) {
+// TestPlanStableOrdersByProjectedOutput 验证 alias/ordinal 已由 Binder 解析成 output index 后直接生成 Sort。
+func TestPlanStableOrdersByProjectedOutput(t *testing.T) {
 	query := stablePlannerQuery()
-	query.OrderBy = []binder.BoundOrderTerm{{Expression: query.Projection[0].Expression}}
-	if _, err := NewQueryPlanner(nil, nil).PlanStable(context.Background(), query); err == nil {
-		t.Fatal("expected ORDER BY lowering rejection")
+	query.OrderBy = []binder.BoundOrderTerm{{Expression: query.Projection[0].Expression, UsesOutput: true, OutputIndex: 0, Descending: true}}
+	plan, err := NewQueryPlanner(nil, nil).PlanStable(context.Background(), query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Kind != LogicalSort || len(plan.Sort) != 1 || !plan.Sort[0].Descending || plan.Sort[0].Expr.ColumnIndex != 0 {
+		t.Fatalf("sort=%+v", plan)
+	}
+	if plan.Children[0].Kind != LogicalProject || plan.Children[0].Children[0].Kind != LogicalScan {
+		t.Fatalf("child=%+v", plan.Children[0])
 	}
 }
