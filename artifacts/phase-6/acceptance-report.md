@@ -2,15 +2,18 @@
 
 Date: 2026-11-02
 Milestone: `v1.0 Stable`
-Status: **ACCEPTED — Feature Freeze release gate passed**
+Status: **ACCEPTED — Feature Freeze release gate passed and v1.0 published**
 
 ## Acceptance candidate
 
-- Candidate commit: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
-- Historical verification workflow: `phase6-release-verify` (removed after acceptance per repository workflow-cleanup rule)
+- Phase 6 acceptance candidate: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
 - Branch acceptance workflow run: `41430739607`
 - Branch acceptance workflow job: `125228379133`
-- Merged-main verification run: `41433012771`
+- Accepted-state main verification run: `41433012771`
+- Final self-verifying publication commit: `09c88549a29db652b576cb9dd030fec1fb95be70`
+- Final self-verifying publication run: `41435118170`
+- Published tag: `v1.0`
+- Published release: `v1.0 Stable`
 - Runner: Ubuntu 24.04.5 / linux amd64
 - Go: 1.22.12
 - DuckDB reference: 2.0.0
@@ -22,7 +25,7 @@ The complete release gate finished with:
 Phase 6 Feature Freeze / v1 release gate: PASS
 ```
 
-The gate re-ran repository correctness, race detection, vet, architecture freeze, Stable SQL compatibility, forced-spill equality, fault/leak suites, Phase 5 lifecycle/security/config/stability suites, Parquet interoperability, resource-envelope workloads, public/release documentation checks, and release performance baselines.
+The final publication workflow re-ran repository correctness, race detection, vet, architecture freeze, Stable SQL compatibility, forced-spill equality, fault/leak suites, Phase 5 lifecycle/security/config/stability suites, Parquet interoperability, resource-envelope workloads, public/release documentation checks, release performance baselines, and publisher preflight before publishing `v1.0`.
 
 ## Deliverables
 
@@ -38,7 +41,7 @@ The gate re-ran repository correctness, race detection, vet, architecture freeze
 | P6-D8 Security Review | `artifacts/phase-6/security-review.md` | PASS |
 | P6-D9 Operational Documentation | `docs/operations.md` | PASS |
 | P6-D10 Public API Documentation | `docs/public-api.md` | PASS |
-| P6-D11 Release Artifacts | `scripts/phase6-release.sh`, `artifacts/phase-6/release-manifest.md`, historical successful verification runs | PASS |
+| P6-D11 Release Artifacts | `scripts/phase6-release.sh`, `scripts/phase6-publish-v1.sh`, `artifacts/phase-6/release-manifest.md`, published `v1.0` tag/release | PASS |
 
 ## Release contract
 
@@ -55,12 +58,14 @@ The release candidate satisfies the frozen AD-041 / release-contract conditions:
 - Resource Envelope Documented
 - Operational Documentation Complete
 
-No Stable feature was added during Phase 6. The only code change made while closing the gate was a release-evidence output-contract fix: Phase 1 interop runner stdout is now JSON-only, with a regression test, so Phase 6 can consume it deterministically.
+No Stable feature was added during Phase 6. The only engine-adjacent fix made while closing the gate was a release-evidence output-contract fix: the Phase 1 interop runner stdout is JSON-only, with a regression test, so Phase 6 can consume it deterministically.
 
 ## Architecture freeze
 
-`go run ./tools/architecture-check .` passed in the release run. Phase 6 introduced no ADR change and no bypass of Push Pipeline, own Vector/DataChunk ABI, MemoryManager ownership, unified VFS/I/O, SourceSnapshot, TemporaryStorageManager spill, or Query lifecycle ownership.
+`go run ./tools/architecture-check .` passed in the acceptance runs and in the final publication run. Phase 6 introduced no ADR change and no bypass of Push Pipeline, own Vector/DataChunk ABI, MemoryManager ownership, unified VFS/I/O, SourceSnapshot, TemporaryStorageManager spill, or Query lifecycle ownership.
 
-## Result
+## Publication result
 
-Phase 6 Correctness, Performance, Memory/Resource, Failure, Security, Compatibility and Interop gates are satisfied. The accepted state was merged to `main`, where the complete Phase 6 gate passed again in run `41433012771`. The temporary verification workflow was then removed; the reusable release gate remains `scripts/phase6-release.sh`.
+The self-verifying publication run `41435118170` completed both `verify` and `publish` jobs successfully. GitHub tag `v1.0` resolves exactly to `09c88549a29db652b576cb9dd030fec1fb95be70`, and the non-draft, non-prerelease GitHub Release is named `v1.0 Stable`.
+
+The one-time GitHub Actions verification/publication workflows were removed after use. Reusable release verification remains available through `scripts/phase6-release.sh` and publication preflight/idempotence through `scripts/phase6-publish-v1.sh`.

@@ -3,16 +3,21 @@
 Date: 2026-11-02
 Release: `v1.0 Stable`
 Phase: 6 — Feature Freeze / v1 Release
+Status: **PUBLISHED**
 
 ## Accepted release inputs
 
 - Phase 5 status: ACCEPTED
-- Phase 6 release-gate candidate: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
+- Phase 6 status: ACCEPTED
+- Phase 6 acceptance candidate: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
 - Branch acceptance workflow run: `41430739607`
-- Branch acceptance workflow job: `125228379133`
-- Merged-main verification run: `41433012771`
+- Accepted-state main verification run: `41433012771`
+- Final self-verifying publication commit: `09c88549a29db652b576cb9dd030fec1fb95be70`
+- Final self-verifying publication run: `41435118170`
+- Published tag: `v1.0`
+- Release title: `v1.0 Stable`
 - Release script: `scripts/phase6-release.sh`
-- Verification workflow: historical only; removed after acceptance per repository workflow-cleanup rule
+- Publication script: `scripts/phase6-publish-v1.sh`
 - DuckDB reference: 2.0.0
 
 ## Required acceptance evidence
@@ -36,8 +41,10 @@ Phase: 6 — Feature Freeze / v1 Release
 - operations: `docs/operations.md`
 - public API: `docs/public-api.md`
 
-## Publication rule
+## Publication result
 
-The GitHub tag/release `v1.0` must point at the merged mainline commit containing the accepted Phase 6 state and all evidence above. Do not publish the tag from an unmerged working branch.
+`v1.0` was published only after the complete Phase 6 gate passed on main. The tag resolves exactly to `09c88549a29db652b576cb9dd030fec1fb95be70`; publication run `41435118170` completed both verification and publication successfully.
 
-No Stable feature may be added between this acceptance and publication. Any release-blocking bug/security/compatibility fix requires the complete Phase 6 gate to pass again before publication.
+The one-time GitHub Actions verifier/publisher workflows were removed after publication in accordance with the repository workflow-cleanup rule. The reusable shell gates remain in the repository.
+
+No Stable feature may be added to the published `v1.0` contract. Any subsequent release-blocking bug, security, compatibility, or regression fix must follow the Feature Freeze rules and re-run the complete release gate before a new release is published.
