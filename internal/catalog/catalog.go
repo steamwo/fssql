@@ -222,9 +222,10 @@ func (t *memoryTx) Commit(ctx context.Context) error {
 
 // Rollback 丢弃 transaction snapshot/write set。
 func (t *memoryTx) Rollback(ctx context.Context) error {
-	if err := t.check(ctx); err != nil {
+	if err := t.checkOpen(); err != nil {
 		return err
 	}
+	// Rollback 是资源释放路径，即使调用方 context 已取消也必须关闭事务。
 	t.closed = true
 	t.release()
 	return nil
@@ -232,13 +233,21 @@ func (t *memoryTx) Rollback(ctx context.Context) error {
 
 // check 验证 transaction 状态和 context。
 func (t *memoryTx) check(ctx context.Context) error {
+	if err := t.checkOpen(); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// checkOpen 仅验证 transaction ownership；供取消后的 Rollback 清理路径使用。
+func (t *memoryTx) checkOpen() error {
 	if t == nil || t.catalog == nil {
 		return fmt.Errorf("catalog transaction is nil")
 	}
 	if t.closed {
 		return fmt.Errorf("catalog transaction is closed")
 	}
-	return ctx.Err()
+	return nil
 }
 
 // release 主动释放 transaction map 引用，避免长生命周期控制面对象持有 metadata。
