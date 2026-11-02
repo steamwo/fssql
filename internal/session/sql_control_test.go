@@ -8,7 +8,6 @@ import (
 	"github.com/steamwo/fssql/internal/catalog"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/security"
-	"github.com/steamwo/fssql/internal/sql/ast"
 	"github.com/steamwo/fssql/internal/sql/binder"
 	"github.com/steamwo/fssql/internal/sql/parser"
 )
@@ -70,10 +69,10 @@ func TestSQLControlAdapterCommitsExternalTableRealBoundSchema(t *testing.T) {
 	adapter, _ := NewSQLControlAdapter(nil, nil)
 	statement := newControlStatement(t, memoryCatalog)
 	bound := &binder.BoundCreateExternalTable{
-		Name:       binder.ObjectName{Schema: "main", Name: "logs"},
-		Function:   "read_ndjson",
-		Source:     "s3://bucket/logs.ndjson",
-		RelationID: "tf:read_ndjson:snapshot",
+		Name:        binder.ObjectName{Schema: "main", Name: "logs"},
+		Function:    "read_ndjson",
+		Source:      "s3://bucket/logs.ndjson",
+		RelationID:  "tf:read_ndjson:snapshot",
 		Fingerprint: "snapshot-1",
 		Columns: []binder.RelationColumn{
 			{Name: "id", Type: types.LogicalType{ID: types.BigInt}},
@@ -123,6 +122,9 @@ func TestSQLControlAdapterCreatesScopedSecretWithoutStoringTypeAsCredential(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resolved.Type() != "s3" {
+		t.Fatalf("TYPE metadata=%q, want s3", resolved.Type())
+	}
 	if _, ok := resolved.Value("type"); ok {
 		t.Fatal("TYPE metadata leaked into credential values")
 	}
@@ -168,8 +170,6 @@ func TestSQLControlAdapterRejectsDataStatements(t *testing.T) {
 	if err := adapter.Apply(context.Background(), statement, bound); err == nil {
 		t.Fatal("SELECT must not execute through control adapter")
 	}
-	// 保留一个 compile-time AST reference，确保此测试覆盖的 control adapter 未依赖 parser 私有节点。
-	_ = ast.Span{}
 }
 
 func TestNewSQLControlAdapterBoundsSecretTypeRegistry(t *testing.T) {
