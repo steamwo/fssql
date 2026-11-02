@@ -32,10 +32,10 @@ type Sink interface {
 }
 
 type Pipeline struct {
-	ID        string
-	Source    Source
-	Operators []Operator // Operators 保留兼容旧原地 kernel；新 SQL transform 不应放入这里。
-	Transforms []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
+	ID           string
+	Source       Source
+	Operators    []Operator          // Operators 保留兼容旧原地 kernel；新 SQL transform 不应放入这里。
+	Transforms   []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
 	Sink         Sink
 	Dependencies []*Pipeline
 }
@@ -68,7 +68,6 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 				for _, op := range p.Transforms {
 					next, err := op.Transform(ctx, owned)
 					if err != nil {
-						// 错误路径同时回收当前 owner 与可能已经创建的独立 replacement。
 						if next != nil && next != owned {
 							next.Release()
 						}
