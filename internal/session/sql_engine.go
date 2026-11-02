@@ -11,6 +11,7 @@ import (
 	"github.com/steamwo/fssql/internal/catalog"
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/stats"
+	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/execution/expression"
 	"github.com/steamwo/fssql/internal/execution/lowering"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
@@ -64,9 +65,10 @@ type StableSQLEngine struct {
 
 // PreparedSQLQuery 保存已经完成 parser/binder/planner/optimizer 的 immutable-by-convention physical plan。
 type PreparedSQLQuery struct {
-	engine   *StableSQLEngine          // engine 提供 runtime factory policy。
-	physical *planner.PhysicalPlan     // physical 不包含已打开 reader/operator。
-	scans    *RuntimeScanSourceFactory // scans 与 Prepare 使用的 query-scoped Bind adapters 属于同一 QueryContext。
+	engine     *StableSQLEngine          // engine 提供 runtime factory policy。
+	physical   *planner.PhysicalPlan     // physical 是 outer query physical plan，不包含已打开 reader/operator。
+	scans      *RuntimeScanSourceFactory // scans 与 Prepare 使用的 query-scoped Bind adapters 属于同一 QueryContext。
+	subqueries []preparedScalarSubquery  // subqueries 是 limited non-correlated scalar child plans。
 }
 
 // NewStableSQLEngine 创建 transport-neutral SQL engine；不创建 QueryContext 或 server goroutine。
@@ -86,7 +88,7 @@ func NewStableSQLEngine(config StableSQLEngineConfig) (*StableSQLEngine, error) 
 	return &StableSQLEngine{config: config, functions: config.Functions}, nil
 }
 
-// Prepare 完成 SELECT 的 parse/bind/plan/optimize，并在 QueryContext 冻结全部 source fingerprints。
+// Prepare 完成 SELECT 的 parse/bind/plan/optimize，并在 QueryContext 冻结 outer + scalar child 的全部 source fingerprints。
 // Catalog transaction 只覆盖 metadata planning；成功或失败都在返回前 rollback，运行时不持有 Catalog transaction。
 func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql string) (*PreparedSQLQuery, error) {
 	if e == nil || e.config.Catalog == nil || e.config.Sources == nil || e.functions == nil || e.config.Buffers == nil {
@@ -145,25 +147,36 @@ func (e *StableSQLEngine) Prepare(ctx context.Context, q *query.Context, sql str
 	if err != nil {
 		return nil, err
 	}
-	logical, err := planner.NewQueryPlanner(e.functions, viewResolver).PlanStable(ctx, bound)
+	queryPlanner := planner.NewQueryPlanner(e.functions, viewResolver)
+	opt := &optimizer.Optimizer{Statistics: e.config.Statistics}
+	rewritten, subqueries, err := rewriteScalarSubqueries(ctx, queryPlanner, opt, bound)
 	if err != nil {
 		return nil, err
 	}
-	physical, err := (&optimizer.Optimizer{Statistics: e.config.Statistics}).Optimize(ctx, logical)
+	logical, err := queryPlanner.PlanStable(ctx, rewritten)
 	if err != nil {
 		return nil, err
 	}
-	if err := bindPhysicalSourceSnapshot(q, physical); err != nil {
+	physical, err := opt.Optimize(ctx, logical)
+	if err != nil {
+		return nil, err
+	}
+	plans := make([]*planner.PhysicalPlan, 0, 1+len(subqueries))
+	plans = append(plans, physical)
+	for _, subquery := range subqueries {
+		plans = append(plans, subquery.physical)
+	}
+	if err := bindPhysicalSourceSnapshot(q, plans...); err != nil {
 		return nil, err
 	}
 	if err := rollback(); err != nil {
 		return nil, fmt.Errorf("session: close read-only planning transaction: %w", err)
 	}
-	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans}, nil
+	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans, subqueries: subqueries}, nil
 }
 
-// Run 把 Prepared physical plan 降低为 Push Pipeline DAG，并由调用方提供最终结果 Sink。
-// QueryContext ownership 由调用方保持；本方法不 Close/Cancel QueryContext。
+// Run 先物化 limited scalar child query，再执行 outer PhysicalPlan。
+// QueryContext ownership 由调用方保持；所有 runtime constants 都在返回前释放，QueryContext 不持有额外 Go heap payload。
 func (p *PreparedSQLQuery) Run(q *query.Context, sink pipeline.Sink) error {
 	if p == nil || p.engine == nil || p.physical == nil || p.scans == nil {
 		return fmt.Errorf("session: prepared SQL query is uninitialized")
@@ -174,37 +187,51 @@ func (p *PreparedSQLQuery) Run(q *query.Context, sink pipeline.Sink) error {
 	if sink == nil {
 		return fmt.Errorf("session: prepared SQL query requires result sink")
 	}
+	constants, err := p.materializeScalarConstants(q)
+	if err != nil {
+		return err
+	}
+	defer releaseRuntimeConstants(constants)
+	return p.runPhysical(q, p.physical, sink, constants)
+}
+
+// runPhysical 是 outer/scalar child 共用的唯一 PhysicalPlan→Push Pipeline 执行路径。
+func (p *PreparedSQLQuery) runPhysical(q *query.Context, plan *planner.PhysicalPlan, sink pipeline.Sink, constants map[int]*vector.Vector) error {
+	if p == nil || p.engine == nil || p.scans == nil || plan == nil || sink == nil {
+		return fmt.Errorf("session: physical query execution is uninitialized")
+	}
 	e := p.engine
 	executor := expression.NewExecutor(q.Memory, e.config.Buffers)
+	executor.RuntimeConstants = constants
 	builder, err := lowering.NewBuilder(p.scans, executor)
 	if err != nil {
 		return err
 	}
 	builder.BlockingQueue = e.config.BlockingQueue
 
-	// 只为 physical plan 实际需要的 stateful operator 创建 factory；简单 scan/filter/project 不强制要求 Temp scope。
-	if physicalContains(p.physical, planner.PhysicalDistinct) {
+	// 只为当前 physical tree 实际需要的 stateful operator 创建 factory；简单 query 不强制要求 Temp scope。
+	if physicalContains(plan, planner.PhysicalDistinct) {
 		factory, err := NewExternalDistinctFactory(q, e.config.Buffers, e.config.Distinct)
 		if err != nil {
 			return err
 		}
 		builder.Distincts = factory
 	}
-	if physicalContains(p.physical, planner.PhysicalSort) {
+	if physicalContains(plan, planner.PhysicalSort) {
 		factory, err := NewExternalSortFactory(q, e.config.Buffers, e.config.Sort)
 		if err != nil {
 			return err
 		}
 		builder.Sorts = factory
 	}
-	if physicalContains(p.physical, planner.PhysicalHashAggregate) {
+	if physicalContains(plan, planner.PhysicalHashAggregate) {
 		factory, err := NewExternalAggregateFactory(q, e.config.Buffers, e.config.Aggregate)
 		if err != nil {
 			return err
 		}
 		builder.Aggregates = factory
 	}
-	hasJoin := physicalContains(p.physical, planner.PhysicalHashJoin) || physicalContains(p.physical, planner.PhysicalCrossJoin)
+	hasJoin := physicalContains(plan, planner.PhysicalHashJoin) || physicalContains(plan, planner.PhysicalCrossJoin)
 	if hasJoin {
 		factory, err := NewExternalJoinFactory(q, e.config.Buffers, e.config.Join)
 		if err != nil {
@@ -223,11 +250,52 @@ func (p *PreparedSQLQuery) Run(q *query.Context, sink pipeline.Sink) error {
 		}
 		executionSink = boundary
 	}
-	root, err := builder.Build(q.Context(), p.physical, executionSink)
+	root, err := builder.Build(q.Context(), plan, executionSink)
 	if err != nil {
 		return err
 	}
 	return pipeline.RunDAG(q.Context(), root, e.config.Workers, q)
+}
+
+// materializeScalarConstants 执行每个独立 child query，约束为单列 0/1 行并保留 managed one-row Vector。
+func (p *PreparedSQLQuery) materializeScalarConstants(q *query.Context) (map[int]*vector.Vector, error) {
+	if len(p.subqueries) == 0 {
+		return nil, nil
+	}
+	constants := make(map[int]*vector.Vector, len(p.subqueries))
+	for _, subquery := range p.subqueries {
+		if subquery.physical == nil || subquery.id < 0 {
+			releaseRuntimeConstants(constants)
+			return nil, fmt.Errorf("session: invalid prepared scalar subquery")
+		}
+		sink, err := newScalarResultSink(q.Memory, p.engine.config.Buffers, subquery.typeID)
+		if err != nil {
+			releaseRuntimeConstants(constants)
+			return nil, err
+		}
+		if err := p.runPhysical(q, subquery.physical, sink, nil); err != nil {
+			_ = sink.Close()
+			releaseRuntimeConstants(constants)
+			return nil, err
+		}
+		value, err := sink.take()
+		if err != nil {
+			_ = sink.Close()
+			releaseRuntimeConstants(constants)
+			return nil, err
+		}
+		constants[subquery.id] = value
+	}
+	return constants, nil
+}
+
+func releaseRuntimeConstants(constants map[int]*vector.Vector) {
+	for id, value := range constants {
+		if value != nil {
+			value.Release()
+		}
+		delete(constants, id)
+	}
 }
 
 // Output 返回 prepared query 的结果 schema 副本，供 Native/database/sql API 建立 column metadata。
@@ -258,14 +326,19 @@ func physicalContains(plan *planner.PhysicalPlan, kind planner.PhysicalKind) boo
 	return false
 }
 
-// bindPhysicalSourceSnapshot 将所有 PhysicalScan 的 immutable fingerprint 组合成 Statement-level SourceSnapshot。
-// 排序 relation/fingerprint pair 使同一 source set 不受 optimizer tree traversal 顺序影响。
-func bindPhysicalSourceSnapshot(q *query.Context, plan *planner.PhysicalPlan) error {
-	if q == nil || plan == nil {
-		return fmt.Errorf("session: source snapshot requires query and physical plan")
+// bindPhysicalSourceSnapshot 将 outer/scalar child 所有 PhysicalScan immutable fingerprint 组合成一个 Statement SourceSnapshot。
+// 排序 relation/fingerprint pair 使同一 source set 不受 planner/tree traversal 顺序影响。
+func bindPhysicalSourceSnapshot(q *query.Context, plans ...*planner.PhysicalPlan) error {
+	if q == nil {
+		return fmt.Errorf("session: source snapshot requires query")
 	}
 	pairs := make([]string, 0, 4)
-	collectPhysicalScanFingerprints(plan, &pairs)
+	for _, plan := range plans {
+		if plan == nil {
+			return fmt.Errorf("session: source snapshot contains nil physical plan")
+		}
+		collectPhysicalScanFingerprints(plan, &pairs)
+	}
 	if len(pairs) == 0 {
 		return nil
 	}
@@ -294,5 +367,5 @@ func collectPhysicalScanFingerprints(plan *planner.PhysicalPlan, out *[]string) 
 	}
 }
 
-// AbortPrepared 预留统一 error-join helper，调用方可在后续 result adapter cleanup 中保留执行/清理双错误链。
+// AbortPrepared 保留执行/清理双错误链。
 func AbortPrepared(runErr, cleanupErr error) error { return errors.Join(runErr, cleanupErr) }
