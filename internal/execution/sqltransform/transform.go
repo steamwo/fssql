@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/execution/expression"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
@@ -23,7 +24,7 @@ func NewFilter(executor *expression.Executor, predicate *binder.BoundExpression)
 	if executor == nil || executor.Scope == nil || executor.Buffers == nil {
 		return nil, fmt.Errorf("sql filter requires managed expression executor")
 	}
-	if predicate == nil || predicate.Type.ID != 1 { // types.Boolean 的稳定枚举值由 core/types 定义。
+	if predicate == nil || predicate.Type.ID != types.Boolean {
 		return nil, fmt.Errorf("sql filter requires BOOLEAN predicate")
 	}
 	return &Filter{Executor: executor, Predicate: predicate}, nil
