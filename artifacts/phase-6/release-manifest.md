@@ -8,10 +8,11 @@ Phase: 6 — Feature Freeze / v1 Release
 
 - Phase 5 status: ACCEPTED
 - Phase 6 release-gate candidate: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
-- Successful workflow run: `41430739607`
-- Successful workflow job: `125228379133`
+- Branch acceptance workflow run: `41430739607`
+- Branch acceptance workflow job: `125228379133`
+- Merged-main verification run: `41433012771`
 - Release script: `scripts/phase6-release.sh`
-- Workflow: `.github/workflows/phase6-release-verify.yml`
+- Verification workflow: historical only; removed after acceptance per repository workflow-cleanup rule
 - DuckDB reference: 2.0.0
 
 ## Required acceptance evidence

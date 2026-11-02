@@ -7,9 +7,10 @@ Status: **ACCEPTED — Feature Freeze release gate passed**
 ## Acceptance candidate
 
 - Candidate commit: `fd737c3c6f45f47fe1ba1735d09658e6c1120bc1`
-- Workflow: `phase6-release-verify`
-- Workflow run: `41430739607`
-- Workflow job: `125228379133`
+- Historical verification workflow: `phase6-release-verify` (removed after acceptance per repository workflow-cleanup rule)
+- Branch acceptance workflow run: `41430739607`
+- Branch acceptance workflow job: `125228379133`
+- Merged-main verification run: `41433012771`
 - Runner: Ubuntu 24.04.5 / linux amd64
 - Go: 1.22.12
 - DuckDB reference: 2.0.0
@@ -37,7 +38,7 @@ The gate re-ran repository correctness, race detection, vet, architecture freeze
 | P6-D8 Security Review | `artifacts/phase-6/security-review.md` | PASS |
 | P6-D9 Operational Documentation | `docs/operations.md` | PASS |
 | P6-D10 Public API Documentation | `docs/public-api.md` | PASS |
-| P6-D11 Release Artifacts | `scripts/phase6-release.sh`, `.github/workflows/phase6-release-verify.yml`, `artifacts/phase-6/release-manifest.md` | PASS |
+| P6-D11 Release Artifacts | `scripts/phase6-release.sh`, `artifacts/phase-6/release-manifest.md`, historical successful verification runs | PASS |
 
 ## Release contract
 
@@ -62,4 +63,4 @@ No Stable feature was added during Phase 6. The only code change made while clos
 
 ## Result
 
-Phase 6 Correctness, Performance, Memory/Resource, Failure, Security, Compatibility and Interop gates are satisfied. The repository is ready to publish `v1.0 Stable` from the accepted mainline commit.
+Phase 6 Correctness, Performance, Memory/Resource, Failure, Security, Compatibility and Interop gates are satisfied. The accepted state was merged to `main`, where the complete Phase 6 gate passed again in run `41433012771`. The temporary verification workflow was then removed; the reusable release gate remains `scripts/phase6-release.sh`.
