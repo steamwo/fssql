@@ -90,11 +90,9 @@ func TestExternalSortFactoryForcedSpill(t *testing.T) {
 		for row := 0; row < chunk.Cardinality; row++ {
 			value, valid := chunk.Columns[0].Int64(row)
 			if !valid {
-				chunk.Release()
 				return context.Canceled
 			}
 			if !first && previous < value {
-				chunk.Release()
 				return context.DeadlineExceeded
 			}
 			first = false
