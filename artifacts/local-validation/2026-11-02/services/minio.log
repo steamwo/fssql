@@ -1,0 +1,14 @@
+=== RUN   TestMinIORead
+=== RUN   TestMinIORead/csv
+=== RUN   TestMinIORead/parquet
+--- PASS: TestMinIORead (0.03s)
+    --- PASS: TestMinIORead/csv (0.02s)
+    --- PASS: TestMinIORead/parquet (0.02s)
+=== RUN   TestMinIOAggregate
+--- PASS: TestMinIOAggregate (0.02s)
+=== RUN   TestMinIOMissingObject
+--- PASS: TestMinIOMissingObject (0.00s)
+=== RUN   TestMinIOCopyRoundTrip
+--- PASS: TestMinIOCopyRoundTrip (0.05s)
+PASS
+ok  	github.com/steamwo/fssql/pkg/gosql	0.150s

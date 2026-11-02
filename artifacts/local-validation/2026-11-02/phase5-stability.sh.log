@@ -1,0 +1,12 @@
+[P5-D15] repeated server/query lifecycle
+ok  	github.com/steamwo/fssql/internal/server	1.412s
+[P5-D15] server/query lifecycle under race detector
+ok  	github.com/steamwo/fssql/internal/server	1.446s
+[P5-D15] repeated remote protocol lifecycle
+ok  	github.com/steamwo/fssql/internal/storage/remote/ftp	0.182s
+ok  	github.com/steamwo/fssql/internal/storage/remote/webdav	0.157s
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	0.158s
+ok  	github.com/steamwo/fssql/internal/storage/remote/s3	0.403s
+[P5-D15] architecture boundary
+architecture-check: OK
+P5-D15 long-running stability gate: PASS

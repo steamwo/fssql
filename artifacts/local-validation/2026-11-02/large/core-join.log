@@ -1,0 +1,12 @@
+goos: windows
+goarch: amd64
+pkg: github.com/steamwo/fssql/internal/execution/join
+cpu: 12th Gen Intel(R) Core(TM) i5-12400F
+BenchmarkExternalHashJoinForcedSpill-12    	      12	   9452117 ns/op	 1347022 B/op	    6178 allocs/op
+BenchmarkExternalHashJoinForcedSpill-12    	      12	   9644900 ns/op	 1346966 B/op	    6178 allocs/op
+BenchmarkExternalHashJoinForcedSpill-12    	      12	   9716325 ns/op	 1347070 B/op	    6178 allocs/op
+BenchmarkInnerHashJoin2048-12              	      72	   1701654 ns/op	  507584 B/op	     146 allocs/op
+BenchmarkInnerHashJoin2048-12              	      76	   1742834 ns/op	  507585 B/op	     146 allocs/op
+BenchmarkInnerHashJoin2048-12              	      76	   1637562 ns/op	  507651 B/op	     146 allocs/op
+PASS
+ok  	github.com/steamwo/fssql/internal/execution/join	1.759s

@@ -1,0 +1,11 @@
+--- FAIL: TestLoadAndPrepareResumePersistsRedoState (0.01s)
+    manifest_durable_test.go:36: sync E:\data\codebase-memory\fssql-verification\tmp\TestLoadAndPrepareResumePersistsRedoState2749703535\001: Access is denied.
+--- FAIL: TestLocalManifestStoreRoundTripAndCrashResume (0.01s)
+    manifest_store_test.go:44: sync E:\data\codebase-memory\fssql-verification\tmp\TestLocalManifestStoreRoundTripAndCrashResume1707655591\001\job: Access is denied.
+--- FAIL: TestLocalManifestStoreDeleteIsIdempotent (0.01s)
+    manifest_store_test.go:125: sync E:\data\codebase-memory\fssql-verification\tmp\TestLocalManifestStoreDeleteIsIdempotent2660500598\001: Access is denied.
+--- FAIL: TestKillRestartResumePreservesCompleteAndRedoesIncomplete (0.01s)
+    resume_kill_restart_test.go:48: sync E:\data\codebase-memory\fssql-verification\tmp\TestKillRestartResumePreservesCompleteAndRedoesIncomplete684749361\001\export: Access is denied.
+FAIL
+FAIL	github.com/steamwo/fssql/internal/export	0.982s
+FAIL

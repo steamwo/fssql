@@ -1,0 +1,17 @@
+[P5-D8] query/server lifecycle
+ok  	github.com/steamwo/fssql/internal/server	0.100s
+[P5-D8] async I/O cancellation
+ok  	github.com/steamwo/fssql/internal/storage/asyncio	0.522s
+[P5-D8] temporary-storage ownership
+ok  	github.com/steamwo/fssql/internal/storage/temp	0.272s
+[P5-D8] bounded remote session leases
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	0.051s
+[P5-D8] S3 multipart cleanup
+ok  	github.com/steamwo/fssql/internal/storage/remote/s3	0.118s
+[P5-D8] race-sensitive lifecycle packages
+ok  	github.com/steamwo/fssql/internal/server	7.373s
+ok  	github.com/steamwo/fssql/internal/storage/asyncio	6.678s
+ok  	github.com/steamwo/fssql/internal/storage/temp	6.803s
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	6.534s
+ok  	github.com/steamwo/fssql/internal/storage/remote/s3	6.884s
+P5-D8 cancellation leak gate: PASS

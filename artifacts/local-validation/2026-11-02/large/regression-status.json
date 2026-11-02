@@ -1,0 +1,10 @@
+{
+  "correctness": 0,
+  "race": 0,
+  "vet": 0,
+  "architecture": 0,
+  "duckdb": 0,
+  "duckdb-race": 0,
+  "linux-compile": 0,
+  "fixture-python": 0
+}

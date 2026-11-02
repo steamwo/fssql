@@ -1,0 +1,66 @@
+?   	github.com/steamwo/fssql/cmd/phase0-demo	[no test files]
+?   	github.com/steamwo/fssql/cmd/phase0-metrics	[no test files]
+?   	github.com/steamwo/fssql/cmd/phase1-parquet	[no test files]
+?   	github.com/steamwo/fssql/cmd/phase2-compat	[no test files]
+?   	github.com/steamwo/fssql/cmd/phase2-metrics	[no test files]
+?   	github.com/steamwo/fssql/cmd/phase3-metrics	[no test files]
+ok  	github.com/steamwo/fssql/examples/quickstart	3.536s
+ok  	github.com/steamwo/fssql/internal/catalog	2.390s
+ok  	github.com/steamwo/fssql/internal/core/memory	2.390s
+ok  	github.com/steamwo/fssql/internal/core/stats	1.547s
+ok  	github.com/steamwo/fssql/internal/core/types	1.531s
+ok  	github.com/steamwo/fssql/internal/core/vector	3.550s
+ok  	github.com/steamwo/fssql/internal/demo/phase0	12.492s
+ok  	github.com/steamwo/fssql/internal/execution/aggregate	3.418s
+ok  	github.com/steamwo/fssql/internal/execution/blocking	2.390s
+ok  	github.com/steamwo/fssql/internal/execution/distinct	8.132s
+ok  	github.com/steamwo/fssql/internal/execution/expression	1.744s
+ok  	github.com/steamwo/fssql/internal/execution/hash	2.382s
+ok  	github.com/steamwo/fssql/internal/execution/join	1.726s
+ok  	github.com/steamwo/fssql/internal/execution/lowering	1.387s
+ok  	github.com/steamwo/fssql/internal/execution/pipeline	1.134s
+ok  	github.com/steamwo/fssql/internal/execution/result	6.971s
+ok  	github.com/steamwo/fssql/internal/execution/scheduler	6.751s
+ok  	github.com/steamwo/fssql/internal/execution/sort	7.727s
+ok  	github.com/steamwo/fssql/internal/execution/sqltransform	5.798s
+ok  	github.com/steamwo/fssql/internal/export	2.546s
+ok  	github.com/steamwo/fssql/internal/format/compression	2.209s
+?   	github.com/steamwo/fssql/internal/format/compression/internalzstd	[no test files]
+ok  	github.com/steamwo/fssql/internal/format/csv	2.337s
+ok  	github.com/steamwo/fssql/internal/format/json	2.484s
+ok  	github.com/steamwo/fssql/internal/format/parquet	2.314s
+ok  	github.com/steamwo/fssql/internal/format/scan	2.252s
+ok  	github.com/steamwo/fssql/internal/function	2.170s
+ok  	github.com/steamwo/fssql/internal/introspection	1.612s
+ok  	github.com/steamwo/fssql/internal/optimizer	2.360s
+ok  	github.com/steamwo/fssql/internal/planner	2.437s
+ok  	github.com/steamwo/fssql/internal/profile	2.257s
+ok  	github.com/steamwo/fssql/internal/query	1.133s
+ok  	github.com/steamwo/fssql/internal/resource	7.065s
+ok  	github.com/steamwo/fssql/internal/security	7.840s
+ok  	github.com/steamwo/fssql/internal/semantics	7.825s
+ok  	github.com/steamwo/fssql/internal/server	7.575s
+ok  	github.com/steamwo/fssql/internal/session	9.054s
+ok  	github.com/steamwo/fssql/internal/settings	2.017s
+?   	github.com/steamwo/fssql/internal/sql/ast	[no test files]
+ok  	github.com/steamwo/fssql/internal/sql/binder	4.816s
+ok  	github.com/steamwo/fssql/internal/sql/lexer	4.876s
+ok  	github.com/steamwo/fssql/internal/sql/parser	2.077s
+ok  	github.com/steamwo/fssql/internal/storage/asyncio	2.108s
+ok  	github.com/steamwo/fssql/internal/storage/fileset	4.830s
+ok  	github.com/steamwo/fssql/internal/storage/remote	1.082s
+ok  	github.com/steamwo/fssql/internal/storage/remote/ftp	1.221s
+ok  	github.com/steamwo/fssql/internal/storage/remote/s3	1.572s
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	1.113s
+ok  	github.com/steamwo/fssql/internal/storage/remote/webdav	1.149s
+ok  	github.com/steamwo/fssql/internal/storage/temp	1.117s
+ok  	github.com/steamwo/fssql/internal/storage/vfs	2.236s
+ok  	github.com/steamwo/fssql/pkg/gosql	1.524s
+ok  	github.com/steamwo/fssql/test/compat	1.889s
+ok  	github.com/steamwo/fssql/test/fault	1.259s
+ok  	github.com/steamwo/fssql/test/interop/phase3	1.045s
+ok  	github.com/steamwo/fssql/test/interop/phase4	2.774s
+?   	github.com/steamwo/fssql/test/interop/phase4/generator	[no test files]
+ok  	github.com/steamwo/fssql/test/kernel	2.898s
+ok  	github.com/steamwo/fssql/test/leak	2.770s
+ok  	github.com/steamwo/fssql/tools/architecture-check	2.853s

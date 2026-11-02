@@ -1,0 +1,29 @@
+File: profile-gosql.test.exe
+Build ID: C:\Users\passerby\AppData\Local\Temp\go-build2046076164\b001\gosql.test.exe2026-11-02 22:18:23.2634431 +0800 CST
+Type: cpu
+Time: 2026-11-02 22:18:24 CST
+Duration: 5.96s, Total samples = 2.12s (35.55%)
+Showing nodes accounting for 1.24s, 58.49% of 2.12s total
+Dropped 144 nodes (cum <= 0.01s)
+Showing top 20 nodes out of 211
+      flat  flat%   sum%        cum   cum%
+     0.23s 10.85% 10.85%      0.23s 10.85%  runtime.cgocall
+     0.18s  8.49% 19.34%      0.18s  8.49%  runtime.stdcall2
+     0.09s  4.25% 23.58%      0.09s  4.25%  runtime.memclrNoHeapPointers
+     0.07s  3.30% 26.89%      0.11s  5.19%  github.com/steamwo/fssql/internal/core/memory.(*Buffer).Bytes
+     0.07s  3.30% 30.19%      0.22s 10.38%  runtime.lock2
+     0.07s  3.30% 33.49%      0.07s  3.30%  runtime.stdcall1
+     0.07s  3.30% 36.79%      0.07s  3.30%  runtime.stdcall3
+     0.07s  3.30% 40.09%      0.07s  3.30%  runtime.stdcall6
+     0.06s  2.83% 42.92%      0.06s  2.83%  internal/sync.(*Mutex).Unlock (inline)
+     0.05s  2.36% 45.28%      0.19s  8.96%  runtime.scanobject
+     0.04s  1.89% 47.17%      0.04s  1.89%  runtime.memmove
+     0.03s  1.42% 48.58%      0.03s  1.42%  runtime.(*gcBits).bitp (inline)
+     0.03s  1.42% 50.00%      0.43s 20.28%  runtime.gcDrain
+     0.03s  1.42% 51.42%      0.07s  3.30%  runtime.mallocgcSmallNoscan
+     0.03s  1.42% 52.83%      0.03s  1.42%  runtime.markBits.isMarked (inline)
+     0.03s  1.42% 54.25%      0.04s  1.89%  runtime.scanblock
+     0.03s  1.42% 55.66%      0.03s  1.42%  runtime.typePointers.nextFast (inline)
+     0.02s  0.94% 56.60%      0.03s  1.42%  crypto/internal/fips140/hmac.New[go.shape.interface { BlockSize int; Reset; Size int; Sum []uint8; Write  }]
+     0.02s  0.94% 57.55%      0.11s  5.19%  github.com/steamwo/fssql/internal/core/vector.(*StringHeap).PutBytes
+     0.02s  0.94% 58.49%      0.07s  3.30%  github.com/steamwo/fssql/internal/core/vector.(*Vector).SetInt64

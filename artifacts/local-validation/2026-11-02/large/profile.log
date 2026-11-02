@@ -1,0 +1,7 @@
+goos: windows
+goarch: amd64
+pkg: github.com/steamwo/fssql/pkg/gosql
+cpu: 12th Gen Intel(R) Core(TM) i5-12400F
+BenchmarkMinIOLarge/scan_narrow-12         	       1	5926709700 ns/op	        56.95 cpu-%	         3.375 cpu-s/op	  10518576 heap-peak-B	   3056404 managed-peak-B	 300375678 net-B/op	   1000000 rows/op	    168728 rows/s	  31346688 rss-peak-B	         0 temp-peak-B	1435951040 B/op	 6774621 allocs/op
+PASS
+ok  	github.com/steamwo/fssql/pkg/gosql	7.032s

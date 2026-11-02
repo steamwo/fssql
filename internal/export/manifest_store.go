@@ -54,7 +54,7 @@ func NewLocalManifestStore(path string, maxBytes int64, scope *memory.Scope, buf
 	return &LocalManifestStore{path: path, maxBytes: maxBytes, scope: scope, buffers: buffers}, nil
 }
 
-// Save 按 write-temp → fsync(file) → rename → fsync(dir) 顺序发布完整 snapshot，避免崩溃后读取半个 Manifest。
+// Save 先同步完整临时文件，再通过平台持久化发布操作替换 snapshot，避免恢复时读取半个 Manifest。
 func (s *LocalManifestStore) Save(ctx context.Context, manifest *Manifest) error {
 	if s == nil || manifest == nil {
 		return errors.New("export: invalid local manifest save")
@@ -83,7 +83,7 @@ func (s *LocalManifestStore) Save(ctx context.Context, manifest *Manifest) error
 	}
 
 	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := prepareLocalManifestDir(dir); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(s.path)+".tmp-*")
@@ -109,11 +109,11 @@ func (s *LocalManifestStore) Save(ctx context.Context, manifest *Manifest) error
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
+	if err := publishLocalManifest(tmpName, s.path); err != nil {
 		return err
 	}
 	published = true
-	return syncLocalManifestDir(dir)
+	return nil
 }
 
 // Load 通过 Managed Metadata buffer 读取一个原子发布的 Manifest snapshot，并在返回前执行完整 Validate。
@@ -154,7 +154,7 @@ func (s *LocalManifestStore) Load(ctx context.Context) (*Manifest, error) {
 	return UnmarshalManifest(buffer.Bytes())
 }
 
-// Delete 删除本地 staging state，并 fsync 目录保证清理在返回前进入目录元数据持久化点。
+// Delete 通过平台持久化删除操作移除 staging state，缺失路径保持幂等。
 func (s *LocalManifestStore) Delete(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -162,14 +162,7 @@ func (s *LocalManifestStore) Delete(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	err := os.Remove(s.path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return syncLocalManifestDir(filepath.Dir(s.path))
+	return removeLocalManifest(s.path)
 }
 
 // writeLocalManifestAll 完整写出 payload，并在每次文件写入前观察取消状态。
@@ -188,14 +181,4 @@ func writeLocalManifestAll(ctx context.Context, file *os.File, payload []byte) e
 		payload = payload[n:]
 	}
 	return nil
-}
-
-// syncLocalManifestDir fsync Manifest 所在目录，使 rename/delete 的目录项更新具有明确 durability boundary。
-func syncLocalManifestDir(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return file.Sync()
 }

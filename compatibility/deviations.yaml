@@ -20,9 +20,9 @@
       "classification": "intentional_deviation",
       "surface": "database/sql nested result values",
       "stable_sql_semantics": false,
-      "summary": "LIST and STRUCT values remain available through the native Chunk API but are not projected into database/sql driver.Value.",
+      "summary": "LIST and STRUCT values are rejected by database/sql; the current public Chunk exposes their type metadata without nested element-value accessors.",
       "duckdb": "DuckDB language bindings can expose nested result values through binding-specific value types.",
-      "fssql": "database/sql returns an explicit error for LIST/STRUCT cells and directs callers to QueryChunks, which preserves the engine-native Vector/DataChunk representation.",
+      "fssql": "database/sql returns an explicit error for LIST/STRUCT cells. The native public Chunk exposes Type.Child/Type.Fields metadata; internal Vector/DataChunk supports nested values, but public nested value accessors are not currently available.",
       "rationale": "database/sql driver.Value has no lossless standard nested value representation. Converting nested values to ad-hoc strings would violate the no-hidden-semantic-downgrade invariant."
     },
     {
@@ -34,6 +34,46 @@
       "duckdb": "DuckDB bindings may expose DECIMAL/HUGEINT through binding-specific exact numeric objects.",
       "fssql": "database/sql emits exact decimal text for DECIMAL and HUGEINT because driver.Value has no standard Int128/Decimal type; the native Chunk API retains exact physical values.",
       "rationale": "The string representation is lossless and limited to the row-oriented compatibility adapter; Core/Execution ABI remains the engine's own Vector/DataChunk types."
+    },
+    {
+      "id": "PERF-001",
+      "classification": "bug",
+      "surface": "production remote scan pushdown performance",
+      "stable_sql_semantics": false,
+      "summary": "Projection, selective filters, empty filters and LIMIT do not reduce physical Parquet reads in the tested production path.",
+      "duckdb": "Projected and prunable scans can avoid reading unrelated columns and row groups.",
+      "fssql": "Million-row tests return correct results but still read approximately the entire 300 MB source for narrow projections, LIMIT 100 and empty predicates.",
+      "rationale": "This is a resource/performance defect, not a waived Stable row-result mismatch. Reproduction and measured evidence are in the opt-in large MinIO matrix."
+    },
+    {
+      "id": "MEM-001",
+      "classification": "bug",
+      "surface": "default CSV and NDJSON large-file resource envelope",
+      "stable_sql_semantics": false,
+      "summary": "The default serial text scan requests a whole-file buffer and cannot scan the tested 283/344 MB objects within either 64 MiB or the default 256 MiB managed-memory limit.",
+      "duckdb": "Text readers can stream large sources without requiring a whole-file input buffer.",
+      "fssql": "The CSV and NDJSON production default paths fail explicitly with memory limit exceeded before returning rows. At 1 GiB budgets the first-chunk diagnostic consumes approximately 271/329 MiB managed memory; reservations and temporary ownership drain after stopping.",
+      "rationale": "The memory cap is respected, but the intended bounded large-file scan is incomplete. This runtime resource defect remains open; successful tiny fixtures do not waive it."
+    },
+    {
+      "id": "SQL-SAMPLE-001",
+      "classification": "unsupported_feature",
+      "surface": "SQL sampling syntax, random function, explicit CAST and BIGINT modulo sampling expressions",
+      "stable_sql_semantics": false,
+      "summary": "TABLESAMPLE, USING SAMPLE, random(), explicit CAST and the tested BIGINT modulo expression are not executable through the current public SQL path.",
+      "duckdb": "DuckDB accepts these sampling, explicit CAST and modulo expressions.",
+      "fssql": "Sampling syntax and CAST ... AS ... fail parsing; random() fails binding; BIGINT modulo fails execution. Stratified predicates on existing columns and client-side reservoir sampling are tested separately.",
+      "rationale": "The frozen Stable contract does not define statistical sampling or a complete arithmetic-operator surface. These unsupported capabilities must not be reported as implemented; adding them requires scope review. Client-side reservoir sampling is tested separately."
+    },
+    {
+      "id": "SQL-SUBQUERY-001",
+      "classification": "unsupported_feature",
+      "surface": "outer aggregate scalar subqueries and FROM derived tables",
+      "stable_sql_semantics": false,
+      "summary": "The tested aggregate query with a scalar subquery and derived-table JOIN syntax exceed the current limited non-correlated subquery surface.",
+      "duckdb": "DuckDB accepts both query forms.",
+      "fssql": "The aggregate/scalar combination is explicitly rejected as outside limited Stable support, and FROM derived tables fail parsing. Supported non-aggregate scalar queries and CTE joins are tested separately.",
+      "rationale": "The frozen feature contract promises limited non-correlated subqueries, not arbitrary derived-table or aggregate/subquery compositions. This documents the current boundary without waiving a mismatch in the existing Stable corpus."
     }
   ]
 }

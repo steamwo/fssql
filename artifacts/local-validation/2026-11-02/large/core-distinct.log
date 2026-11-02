@@ -1,0 +1,9 @@
+goos: windows
+goarch: amd64
+pkg: github.com/steamwo/fssql/internal/execution/distinct
+cpu: 12th Gen Intel(R) Core(TM) i5-12400F
+BenchmarkExternalDistinct-12    	       2	  63085750 ns/op	11190984 B/op	   40903 allocs/op
+BenchmarkExternalDistinct-12    	       2	  64087550 ns/op	11185848 B/op	   40897 allocs/op
+BenchmarkExternalDistinct-12    	       2	  66644200 ns/op	11189884 B/op	   40906 allocs/op
+PASS
+ok  	github.com/steamwo/fssql/internal/execution/distinct	1.298s

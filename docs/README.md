@@ -1,13 +1,13 @@
 # Go 云原生 OLAP 查询引擎 — AI Agent 分阶段开发指导包
 
 版本：V2.1-Agent-Ready  
-状态：Architecture Frozen / Ready for Phase 0
+状态：Architecture Frozen / 阶段状态见 [project-state.yaml](machine/project-state.yaml)
 
-本包的目标不是“给人看的设计说明”，而是给 AI coding agent 直接读取并按阶段执行。
+本目录保存架构、契约与分阶段开发文档。使用入口见 [根目录 README](../README.md)，Go 接口与当前可用能力见 [Public API](public-api.md)。
 
 ## Agent 必须按此顺序读取
 
-1. `AGENTS.md`
+1. `../AGENTS.md`
 2. `machine/project-state.yaml`
 3. `architecture/decisions.md`
 4. `architecture/invariants.md`

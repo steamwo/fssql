@@ -1,0 +1,15 @@
+[P5-D10] centralized security boundary
+ok  	github.com/steamwo/fssql/internal/security	0.765s
+[P5-D10] protocol security integration
+ok  	github.com/steamwo/fssql/internal/storage/remote/ftp	0.122s
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	0.074s
+ok  	github.com/steamwo/fssql/internal/storage/remote/webdav	0.089s
+[P5-D11] endpoint client credential-version isolation
+ok  	github.com/steamwo/fssql/internal/storage/remote	0.201s
+[P5-D10/P5-D11] race-sensitive security packages
+ok  	github.com/steamwo/fssql/internal/security	1.791s
+ok  	github.com/steamwo/fssql/internal/storage/remote	1.522s
+ok  	github.com/steamwo/fssql/internal/storage/remote/ftp	1.631s
+ok  	github.com/steamwo/fssql/internal/storage/remote/sftp	1.597s
+ok  	github.com/steamwo/fssql/internal/storage/remote/webdav	1.630s
+P5-D10/P5-D11 security gate: PASS

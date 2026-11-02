@@ -1,0 +1,12 @@
+goos: windows
+goarch: amd64
+pkg: github.com/steamwo/fssql/internal/execution/sort
+cpu: 12th Gen Intel(R) Core(TM) i5-12400F
+BenchmarkExternalSortForcedSpill-12    	      13	   8884031 ns/op	  684843 B/op	    4856 allocs/op
+BenchmarkExternalSortForcedSpill-12    	      13	   8996654 ns/op	  684452 B/op	    4855 allocs/op
+BenchmarkExternalSortForcedSpill-12    	      13	   9191638 ns/op	  684344 B/op	    4854 allocs/op
+BenchmarkTopN-12                       	      36	   3026264 ns/op	  275774 B/op	    4365 allocs/op
+BenchmarkTopN-12                       	      39	   2972485 ns/op	  275819 B/op	    4365 allocs/op
+BenchmarkTopN-12                       	      38	   3038711 ns/op	  275824 B/op	    4365 allocs/op
+PASS
+ok  	github.com/steamwo/fssql/internal/execution/sort	1.721s

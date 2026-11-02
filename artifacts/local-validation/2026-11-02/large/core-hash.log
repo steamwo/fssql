@@ -1,0 +1,15 @@
+goos: windows
+goarch: amd64
+pkg: github.com/steamwo/fssql/internal/execution/hash
+cpu: 12th Gen Intel(R) Core(TM) i5-12400F
+BenchmarkVectorHashInt64-12      	    3304	     36558 ns/op	 448.16 MB/s	       0 B/op	       0 allocs/op
+BenchmarkVectorHashInt64-12      	    3102	     36946 ns/op	 443.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkVectorHashInt64-12      	    3204	     39864 ns/op	 411.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkHashTableLookup-12      	 5042397	        51.16 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHashTableLookup-12      	 4764380	        42.30 ns/op	       0 B/op	       0 allocs/op
+BenchmarkHashTableLookup-12      	 5009120	        24.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkVectorHashVarchar-12    	    1094	    113024 ns/op	       0 B/op	       0 allocs/op
+BenchmarkVectorHashVarchar-12    	    1038	    135417 ns/op	       0 B/op	       0 allocs/op
+BenchmarkVectorHashVarchar-12    	     927	    118426 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	github.com/steamwo/fssql/internal/execution/hash	2.852s

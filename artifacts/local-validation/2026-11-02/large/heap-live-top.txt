@@ -1,0 +1,18 @@
+File: profile-gosql.test.exe
+Build ID: C:\Users\passerby\AppData\Local\Temp\go-build2046076164\b001\gosql.test.exe2026-11-02 22:18:23.2634431 +0800 CST
+Type: inuse_space
+Time: 2026-11-02 22:18:30 CST
+Showing nodes accounting for 3590.02kB, 100% of 3590.02kB total
+      flat  flat%   sum%        cum   cum%
+    3078kB 85.74% 85.74%     3078kB 85.74%  runtime.allocm
+  512.02kB 14.26%   100%   512.02kB 14.26%  runtime.gcBgMarkWorker
+         0     0%   100%     1539kB 42.87%  runtime.mcall
+         0     0%   100%     1539kB 42.87%  runtime.mstart
+         0     0%   100%     1539kB 42.87%  runtime.mstart0
+         0     0%   100%     1539kB 42.87%  runtime.mstart1
+         0     0%   100%     3078kB 85.74%  runtime.newm
+         0     0%   100%     1539kB 42.87%  runtime.park_m
+         0     0%   100%     3078kB 85.74%  runtime.resetspinning
+         0     0%   100%     3078kB 85.74%  runtime.schedule
+         0     0%   100%     3078kB 85.74%  runtime.startm
+         0     0%   100%     3078kB 85.74%  runtime.wakep
