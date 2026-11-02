@@ -115,7 +115,7 @@ func applyCreateExternalTable(ctx context.Context, statement *Statement, value *
 	return statement.CommitCatalog(ctx)
 }
 
-// applyCreateSecret 将 bound credential 明文只复制到 SecretManager；TYPE 已由 adapter allowlist 消费，不进入 Values。
+// applyCreateSecret 将 bound credential 明文只复制到 SecretManager；TYPE 作为独立 metadata 保存，不进入 Values。
 func applyCreateSecret(manager *security.SecretManager, value *binder.BoundCreateSecret) error {
 	if value == nil {
 		return fmt.Errorf("session: invalid bound CREATE SECRET")
@@ -126,6 +126,7 @@ func applyCreateSecret(manager *security.SecretManager, value *binder.BoundCreat
 	}
 	return manager.Create(security.SecretSpec{
 		Name:   value.Name,
+		Type:   value.Type,
 		Values: credentials,
 		Scope: security.SecretScope{
 			Subjects: append([]string(nil), value.Subjects...),
