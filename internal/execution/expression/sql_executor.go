@@ -8,6 +8,7 @@ import (
 
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
@@ -293,7 +294,7 @@ func (e *Executor) executeSQLVarcharBinary(expr *binder.BoundExpression, chunk *
 }
 
 // executeSQLDoubleBinary 执行 DOUBLE arithmetic/comparison。
-// 除零保留 IEEE 754 Inf/NaN；比较使用 DuckDB total-order 规则而不是 Go 原生 NaN 比较。
+// 除零保留 IEEE 754 Inf/NaN；比较统一复用 semantics.CompareFloat64 的 DuckDB total-order 规则。
 func (e *Executor) executeSQLDoubleBinary(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	left, err := e.ExecuteSQL(expr.Children[0], chunk)
 	if err != nil {
@@ -322,7 +323,7 @@ func (e *Executor) executeSQLDoubleBinary(expr *binder.BoundExpression, chunk *v
 			continue
 		}
 		if comparison {
-			out.SetBool(row, comparisonFromOrder(compareDoubleDuckDB(x, y), expr.Op))
+			out.SetBool(row, comparisonFromOrder(semantics.CompareFloat64(x, y), expr.Op))
 			continue
 		}
 		switch expr.Op {
@@ -344,26 +345,6 @@ func (e *Executor) executeSQLDoubleBinary(expr *binder.BoundExpression, chunk *v
 		}
 	}
 	return out, nil
-}
-
-// compareDoubleDuckDB 实现 DuckDB 浮点 total order：NaN=NaN 且 NaN 大于所有非 NaN 值。
-func compareDoubleDuckDB(x, y float64) int {
-	xNaN := math.IsNaN(x)
-	yNaN := math.IsNaN(y)
-	switch {
-	case xNaN && yNaN:
-		return 0
-	case xNaN:
-		return 1
-	case yNaN:
-		return -1
-	case x < y:
-		return -1
-	case x > y:
-		return 1
-	default:
-		return 0
-	}
 }
 
 // compareInt32 执行已知为比较运算符的 INTEGER 比较。
