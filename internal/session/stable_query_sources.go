@@ -15,13 +15,13 @@ import (
 // StableQuerySourceFactory 是 production QuerySourceFactory：VFS/metadata cache 可跨 Query 复用，
 // 任何持有 MemoryScope 的 format binder/runtime adapter 都按 QueryContext 重新创建。
 type StableQuerySourceFactory struct {
-	Registry       *vfs.Registry             // Registry 是统一 VFS capability/driver registry。
-	ParquetCache   *parquet.MetadataCache    // ParquetCache 只缓存 immutable footer metadata，可跨 Query 共享。
-	Buffers        *memory.BufferManager     // Buffers 是 engine 级 managed buffer allocator。
-	Functions      *function.Catalog         // Functions 必须与 StableSQLEngine 使用同一个 catalog。
-	CSVScan        csv.ScanOptions           // CSVScan 是 runtime scan policy；零值使用格式层既有默认。
+	Registry       *vfs.Registry                // Registry 是统一 VFS capability/driver registry。
+	ParquetCache   *parquet.MetadataCache       // ParquetCache 只缓存 immutable footer metadata，可跨 Query 共享。
+	Buffers        *memory.BufferManager        // Buffers 是 engine 级 managed buffer allocator。
+	Functions      *function.Catalog            // Functions 必须与 StableSQLEngine 使用同一个 catalog。
+	CSVScan        csv.ScanOptions              // CSVScan 是 runtime scan policy；零值使用格式层既有默认。
 	NDJSONScan     jsonformat.NDJSONScanOptions // NDJSONScan 是 runtime range/worker policy。
-	JSONRangeBytes int64                     // JSONRangeBytes 控制普通 JSON 串行 range 窗口；<=0 使用 runtime 默认。
+	JSONRangeBytes int64                        // JSONRangeBytes 控制普通 JSON 串行 range 窗口；<=0 使用 runtime 默认。
 }
 
 var _ QuerySourceFactory = (*StableQuerySourceFactory)(nil)
@@ -92,6 +92,12 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 		return nil, nil, err
 	}
 	scans, err := NewRuntimeScanSourceFactory(f.Functions, []ScanOpenAdapter{parquetScan, csvScan, jsonScan, ndjsonScan, globScan})
+	if err != nil {
+		return nil, nil, err
+	}
+	// information_schema.columns 是 Planner-only virtual relation，不进入 FunctionCatalog。
+	// adapter 每 Query 绑定当前 MemoryScope；真正 Catalog snapshot 已在 Prepare 阶段编码进 internal ScanSpec。
+	scans, err = scans.WithInternalAdapters([]InternalScanOpenAdapter{informationSchemaScanAdapter(q.Memory, f.Buffers)})
 	if err != nil {
 		return nil, nil, err
 	}
