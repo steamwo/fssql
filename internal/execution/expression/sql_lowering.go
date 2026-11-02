@@ -62,7 +62,7 @@ func lowerSQLLiteral(expr *binder.BoundExpression) (*BoundExpression, error) {
 	}
 }
 
-// lowerSQLUnary 映射当前执行器已有的一元语义；数值正负号等待完整 typed numeric kernel。
+// lowerSQLUnary 复用现有 BOOLEAN/BIGINT kernel；BIGINT +/- 不新增第二套算术语义。
 func lowerSQLUnary(expr *binder.BoundExpression) (*BoundExpression, error) {
 	if len(expr.Children) != 1 {
 		return nil, fmt.Errorf("expression lowering: unary %q requires one child", expr.Op)
@@ -77,14 +77,26 @@ func lowerSQLUnary(expr *binder.BoundExpression) (*BoundExpression, error) {
 			return nil, fmt.Errorf("expression lowering: NOT result must be BOOLEAN")
 		}
 		return &BoundExpression{Kind: Not, Type: cloneSQLType(expr.Type), Children: []*BoundExpression{child}}, nil
-	case "+", "-":
-		return nil, fmt.Errorf("expression lowering: unary numeric operator %s requires typed numeric kernel", expr.Op)
+	case "+":
+		if expr.Type.ID != types.BigInt || expr.Children[0].Type.ID != types.BigInt {
+			return nil, fmt.Errorf("expression lowering: unary + currently requires BIGINT kernel")
+		}
+		// 一元正号是 identity；直接复用 child，避免增加无意义 runtime operator。
+		return child, nil
+	case "-":
+		if expr.Type.ID != types.BigInt || expr.Children[0].Type.ID != types.BigInt {
+			return nil, fmt.Errorf("expression lowering: unary - currently requires BIGINT kernel")
+		}
+		// 0-x 继续走现有 Subtract→semantics.SubInt64，因此 MinInt64 overflow 仍由唯一语义层检测。
+		zero := &BoundExpression{Kind: ConstantInt, Type: types.LogicalType{ID: types.BigInt}, IntValue: 0}
+		return &BoundExpression{Kind: Subtract, Type: cloneSQLType(expr.Type), Children: []*BoundExpression{zero, child}}, nil
 	default:
 		return nil, fmt.Errorf("expression lowering: unsupported unary operator %q", expr.Op)
 	}
 }
 
-// lowerSQLBinary 只映射现有执行器已实现且类型安全的 BigInt/Boolean kernels。
+// lowerSQLBinary 映射现有执行器已实现且类型安全的 BigInt/Boolean kernels。
+// BIGINT 的复合比较只组合 Equal/LessThan/Not，不复制 CompareInt64 语义。
 func lowerSQLBinary(expr *binder.BoundExpression) (*BoundExpression, error) {
 	if len(expr.Children) != 2 {
 		return nil, fmt.Errorf("expression lowering: binary %q requires two children", expr.Op)
@@ -131,7 +143,25 @@ func lowerSQLBinary(expr *binder.BoundExpression) (*BoundExpression, error) {
 		} else {
 			kind = LessThan
 		}
-	case "<>", "<=", ">", ">=", "/", "%":
+	case "<>", "<=", ">", ">=":
+		if !bothType(expr.Children, types.BigInt) || expr.Type.ID != types.Boolean {
+			return nil, fmt.Errorf("expression lowering: %s currently requires BIGINT comparison kernel", op)
+		}
+		boolType := types.LogicalType{ID: types.Boolean}
+		switch op {
+		case "<>":
+			equal := &BoundExpression{Kind: Equal, Type: boolType, Children: []*BoundExpression{left, right}}
+			return &BoundExpression{Kind: Not, Type: boolType, Children: []*BoundExpression{equal}}, nil
+		case ">":
+			return &BoundExpression{Kind: LessThan, Type: boolType, Children: []*BoundExpression{right, left}}, nil
+		case "<=":
+			greater := &BoundExpression{Kind: LessThan, Type: boolType, Children: []*BoundExpression{right, left}}
+			return &BoundExpression{Kind: Not, Type: boolType, Children: []*BoundExpression{greater}}, nil
+		case ">=":
+			less := &BoundExpression{Kind: LessThan, Type: boolType, Children: []*BoundExpression{left, right}}
+			return &BoundExpression{Kind: Not, Type: boolType, Children: []*BoundExpression{less}}, nil
+		}
+	case "/", "%":
 		return nil, fmt.Errorf("expression lowering: operator %s kernel is not implemented", op)
 	default:
 		return nil, fmt.Errorf("expression lowering: unsupported binary operator %q", expr.Op)
