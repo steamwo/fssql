@@ -23,14 +23,16 @@ const (
 	BoundFunction
 	BoundIsNull
 	BoundCast
+	BoundSubquery
 )
 
 // ColumnBinding 是输入 relation 中可解析列的控制面描述。
 type ColumnBinding struct {
-	Table string            // Table 是表名或 alias；空字符串表示无 qualifier。
-	Name  string            // Name 是规范化列名。
-	Type  types.LogicalType // Type 是列的逻辑类型。
-	Index int               // Index 是 relation schema 中的列序号。
+	Table    string            // Table 是表名或 alias；空字符串表示无 qualifier。
+	Name     string            // Name 是规范化列名。
+	Type     types.LogicalType // Type 是列的逻辑类型。
+	Nullable bool              // Nullable 来自实际 relation schema；Binder 不再无条件假定列可空。
+	Index    int               // Index 是 relation schema 中的列序号。
 }
 
 // Scope 保存当前 expression binder 可见列；后续 query binder 负责构造 Scope。
@@ -51,12 +53,17 @@ type BoundExpression struct {
 	FunctionKind function.Kind      // FunctionKind 区分 scalar/aggregate。
 	Literal      string             // Literal 保存已词法解码但未物化的常量文本。
 	Children     []*BoundExpression // Children 保存已绑定子表达式。
+	Subquery     *BoundQuery        // Subquery 仅对 BoundSubquery 有效；Planner 必须显式 lowering。
 }
+
+// SubqueryBinder 是 expression Binder 与 query Binder 的窄桥；调用方负责保证不继承 outer relation Scope。
+type SubqueryBinder func(*ast.SelectStmt) (*BoundQuery, error)
 
 // Binder 将 Own AST 绑定为强类型逻辑表达式，不创建 physical operator。
 type Binder struct {
-	Functions *function.Catalog // Functions 是 generic FunctionCatalog。
-	Scope     Scope             // Scope 是当前 relation 可见列。
+	Functions  *function.Catalog // Functions 是 generic FunctionCatalog。
+	Scope      Scope             // Scope 是当前 relation 可见列。
+	Subqueries SubqueryBinder    // Subqueries 仅由 QueryBinder 注入，用于 Stable non-correlated scalar subquery。
 }
 
 // New 创建 expression Binder。
@@ -90,7 +97,17 @@ func (b *Binder) BindExpression(expr ast.Expr) (*BoundExpression, error) {
 		}
 		return &BoundExpression{Kind: BoundIsNull, Span: e.Span, Type: types.LogicalType{ID: types.Boolean}, Nullable: false, Op: nullPredicateOp(e.Not), Children: []*BoundExpression{child}}, nil
 	case *ast.SubqueryExpr:
-		return nil, fmt.Errorf("binder %d:%d: subquery requires query binder", e.Span.Start.Line, e.Span.Start.Column)
+		if b.Subqueries == nil {
+			return nil, fmt.Errorf("binder %d:%d: subquery requires query binder", e.Span.Start.Line, e.Span.Start.Column)
+		}
+		q, err := b.Subqueries(e.Query)
+		if err != nil {
+			return nil, err
+		}
+		if q == nil || len(q.Output) != 1 {
+			return nil, b.errorAt(e.Span, "scalar subquery must return exactly one column")
+		}
+		return &BoundExpression{Kind: BoundSubquery, Span: e.Span, Type: cloneLogicalType(q.Output[0].Type), Nullable: true, Subquery: q}, nil
 	default:
 		return nil, fmt.Errorf("binder: unsupported expression %T", expr)
 	}
@@ -144,7 +161,7 @@ func (b *Binder) bindName(e *ast.NameExpr) (*BoundExpression, error) {
 	if err != nil {
 		return nil, b.errorAt(e.Span, err.Error())
 	}
-	return &BoundExpression{Kind: BoundColumn, Span: e.Span, Type: c.Type, Nullable: true, ColumnIndex: c.Index}, nil
+	return &BoundExpression{Kind: BoundColumn, Span: e.Span, Type: cloneLogicalType(c.Type), Nullable: c.Nullable, ColumnIndex: c.Index}, nil
 }
 
 // Resolve 按 SQL 标识符规则解析列；双引号名称区分大小写，未限定名称出现多个匹配时拒绝绑定。
