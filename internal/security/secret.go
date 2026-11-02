@@ -81,6 +81,8 @@ func (s SecretScope) Allows(subject string, target *url.URL) bool {
 type SecretSpec struct {
 	// Name 是稳定 secret 名称。
 	Name string
+	// Type 是非 credential 的 adapter metadata；空值保留旧的 programmatic SecretManager 兼容行为。
+	Type string
 	// Values 保存 credential 字段；SecretManager 会立即复制，不保留调用方 map 引用。
 	Values map[string]string
 	// Scope 定义 secret 的 ACL 和 endpoint 范围。
@@ -91,6 +93,8 @@ type SecretSpec struct {
 type ResolvedSecret struct {
 	// name 是 secret 稳定名称。
 	name string
+	// typeName 是非 credential adapter metadata，不通过 Value 暴露。
+	typeName string
 	// version 是轮换后单调增加的版本号。
 	version uint64
 	// values 是该版本 credential 的私有快照。
@@ -99,6 +103,9 @@ type ResolvedSecret struct {
 
 // Name 返回 secret 稳定名称。
 func (s ResolvedSecret) Name() string { return s.name }
+
+// Type 返回 secret adapter metadata；它与 credential Values 分离。
+func (s ResolvedSecret) Type() string { return s.typeName }
 
 // Version 返回单调 credential 版本号。
 func (s ResolvedSecret) Version() uint64 { return s.version }
@@ -116,6 +123,8 @@ func (s ResolvedSecret) Value(key string) (string, bool) {
 type secretEntry struct {
 	// name 是 secret 稳定名称。
 	name string
+	// typeName 是与 credential map 分离的 adapter metadata。
+	typeName string
 	// version 是最新 credential 版本。
 	version uint64
 	// values 保存最新 credential 的私有副本。
@@ -153,13 +162,15 @@ func (m *SecretManager) Create(spec SecretSpec) error {
 		return fmt.Errorf("%w: %s", ErrSecretExists, spec.Name)
 	}
 	m.secrets[spec.Name] = secretEntry{
-		name: spec.Name, version: 1, values: cloneSecretValues(spec.Values), scope: cloneSecretScope(spec.Scope),
+		name: spec.Name, typeName: normalizeSecretType(spec.Type), version: 1,
+		values: cloneSecretValues(spec.Values), scope: cloneSecretScope(spec.Scope),
 	}
 	m.auditor.Record(AuditEvent{Time: time.Now(), Action: "secret.create", Resource: spec.Name, Allowed: true, CredentialVersion: "1"})
 	return nil
 }
 
 // Rotate 原子替换 credential 和 scope，并生成新的单调版本；旧 ResolvedSecret 快照不被修改。
+// 已设置的 Type 不允许在 credential rotation 中改变，避免同名 secret 静默切换 adapter 语义。
 func (m *SecretManager) Rotate(spec SecretSpec) (uint64, error) {
 	if err := validateSecretSpec(spec); err != nil {
 		return 0, err
@@ -169,6 +180,12 @@ func (m *SecretManager) Rotate(spec SecretSpec) (uint64, error) {
 	current, exists := m.secrets[spec.Name]
 	if !exists {
 		return 0, fmt.Errorf("%w: %s", ErrSecretNotFound, spec.Name)
+	}
+	if nextType := normalizeSecretType(spec.Type); nextType != "" {
+		if current.typeName != "" && current.typeName != nextType {
+			return 0, fmt.Errorf("security: secret type cannot change during rotation: %s -> %s", current.typeName, nextType)
+		}
+		current.typeName = nextType
 	}
 	current.version++
 	current.values = cloneSecretValues(spec.Values)
@@ -204,7 +221,7 @@ func (m *SecretManager) Resolve(name, subject, targetRaw string) (ResolvedSecret
 		return ResolvedSecret{}, fmt.Errorf("%w: %s", ErrSecretUnauthorized, name)
 	}
 	m.auditResolve(name, subject, targetRaw, true, "", version)
-	return ResolvedSecret{name: entry.name, version: entry.version, values: cloneSecretValues(entry.values)}, nil
+	return ResolvedSecret{name: entry.name, typeName: entry.typeName, version: entry.version, values: cloneSecretValues(entry.values)}, nil
 }
 
 // auditResolve 写入不包含 secret 明文的访问审计。
@@ -215,10 +232,13 @@ func (m *SecretManager) auditResolve(name, subject, target string, allowed bool,
 	})
 }
 
-// validateSecretSpec 拒绝空名称、空 credential 和没有主体 ACL 的 secret。
+// validateSecretSpec 拒绝空名称、空 credential、非法 TYPE metadata 和没有主体 ACL 的 secret。
 func validateSecretSpec(spec SecretSpec) error {
 	if strings.TrimSpace(spec.Name) == "" {
 		return errors.New("security: secret name must not be empty")
+	}
+	if spec.Type != "" && strings.TrimSpace(spec.Type) == "" {
+		return errors.New("security: secret type must not be blank")
 	}
 	if len(spec.Values) == 0 {
 		return errors.New("security: secret values must not be empty")
@@ -228,6 +248,9 @@ func validateSecretSpec(spec SecretSpec) error {
 	}
 	return nil
 }
+
+// normalizeSecretType 规范化非 credential TYPE metadata；空值用于旧 programmatic API 兼容。
+func normalizeSecretType(value string) string { return strings.ToLower(strings.TrimSpace(value)) }
 
 // containsSubject 判断主体 ACL，只有显式 "*" 才表示通配。
 func containsSubject(subjects []string, subject string) bool {
