@@ -87,48 +87,79 @@ func (w *DatasetWriter) writeRoute(ctx context.Context, chunk *vector.DataChunk,
 	return w.writeCompleteFile(ctx, route.Path, selected)
 }
 
+// Close completes SingleFile output. If the query produced no chunks, it still
+// opens and closes the configured single file so format writers can emit their
+// valid empty representation (for example a CSV header or empty Parquet file).
 func (w *DatasetWriter) Close(ctx context.Context) error {
-	if w == nil || w.single == nil {
+	if w == nil {
 		return nil
 	}
+	if w.single == nil {
+		if w.router == nil || w.router.config.Mode != LayoutSingleFile {
+			return nil
+		}
+		filePath := w.router.config.SingleFilePath
+		if err := w.manifest.PlanFile(filePath); err != nil {
+			return err
+		}
+		entry, _ := w.manifest.LookupFile(filePath)
+		if entry.State == FileStateComplete {
+			return nil
+		}
+		if err := w.openSingle(ctx, filePath); err != nil {
+			return err
+		}
+	}
 	result, err := w.single.Close(ctx)
+	filePath := w.singlePath
 	w.single = nil
+	w.singlePath = ""
 	if err != nil {
-		_ = w.manifest.TransitionFile(w.singlePath, FileStateFailed, 0, "")
+		_ = w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
 		return err
 	}
-	return w.completeFile(w.singlePath, result)
+	return w.completeFile(filePath, result)
 }
 
 func (w *DatasetWriter) Abort(ctx context.Context) error {
 	if w == nil || w.single == nil {
 		return nil
 	}
+	filePath := w.singlePath
 	err := w.single.Abort(ctx)
 	w.single = nil
-	stateErr := w.manifest.TransitionFile(w.singlePath, FileStateFailed, 0, "")
+	w.singlePath = ""
+	stateErr := w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
 	return errors.Join(err, stateErr)
 }
 
 func (w *DatasetWriter) writeSingle(ctx context.Context, filePath string, chunk *vector.DataChunk) error {
 	if w.single == nil {
-		if err := w.manifest.TransitionFile(filePath, FileStateWriting, 0, ""); err != nil {
+		if err := w.openSingle(ctx, filePath); err != nil {
 			return err
 		}
-		writer, err := w.open(ctx, w.fileURI(filePath), vfs.WriteOptions{})
-		if err != nil {
-			_ = w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
-			return err
-		}
-		w.single = writer
-		w.singlePath = filePath
 	}
 	if err := w.single.WriteChunk(ctx, chunk); err != nil {
 		abortErr := w.single.Abort(context.Background())
 		w.single = nil
+		w.singlePath = ""
 		stateErr := w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
 		return errors.Join(err, abortErr, stateErr)
 	}
+	return nil
+}
+
+func (w *DatasetWriter) openSingle(ctx context.Context, filePath string) error {
+	if err := w.manifest.TransitionFile(filePath, FileStateWriting, 0, ""); err != nil {
+		return err
+	}
+	writer, err := w.open(ctx, w.fileURI(filePath), vfs.WriteOptions{})
+	if err != nil {
+		_ = w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
+		return err
+	}
+	w.single = writer
+	w.singlePath = filePath
 	return nil
 }
 

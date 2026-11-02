@@ -35,7 +35,7 @@ type singleFileTestDriver struct {
 	statErr error
 }
 
-func (d *singleFileTestDriver) Scheme() string { return "test" }
+func (d *singleFileTestDriver) Scheme() string                        { return "test" }
 func (d *singleFileTestDriver) StaticCapabilities() vfs.CapabilitySet { return d.caps }
 func (d *singleFileTestDriver) Probe(context.Context) (vfs.ProbeResult, error) {
 	return vfs.ProbeResult{Supported: d.caps, Endpoint: "test://host"}, nil
@@ -133,7 +133,9 @@ func TestSingleFileCommitterTransientStatFailureRemainsCommitting(t *testing.T) 
 
 func TestSingleFileCommitterRequiresDurableIdentityAndAtomicCapability(t *testing.T) {
 	m, err := NewManifest("job", "query-fp", "source-fp", "test://host/output", "csv", "none", "atomic", []string{"result.csv"})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = m.TransitionExport(ExportStateWriting)
 	_ = m.TransitionFile("result.csv", FileStateWriting, 0, "")
 	_ = m.TransitionFile("result.csv", FileStateComplete, 1, "checksum")
@@ -159,9 +161,13 @@ func TestSingleFileCommitterRequiresDurableIdentityAndAtomicCapability(t *testin
 func TestPublishedIdentityManifestRoundTrip(t *testing.T) {
 	m := preparedSingleFileManifest(t, PublishedObjectIdentity{ETag: "etag", VersionID: "v3", Size: 11})
 	data, err := m.MarshalBinary()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, err := UnmarshalManifest(data)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	identity := got.FileStates[0].PublishedIdentity
 	if identity == nil || identity.ETag != "etag" || identity.VersionID != "v3" || identity.Size != 11 {
 		t.Fatalf("identity=%+v", identity)
@@ -170,6 +176,8 @@ func TestPublishedIdentityManifestRoundTrip(t *testing.T) {
 
 func manifestStates(items []*Manifest) []ExportState {
 	states := make([]ExportState, len(items))
-	for i := range items { states[i] = items[i].ExportState }
+	for i := range items {
+		states[i] = items[i].ExportState
+	}
 	return states
 }

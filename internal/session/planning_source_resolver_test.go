@@ -107,7 +107,7 @@ func TestPlanningSourceResolverExternalObjectsHaveDistinctRelationIDs(t *testing
 	read, _ := memoryCatalog.Begin(ctx)
 	base, _ := NewSourceResolver(read, nil, []TableBindAdapter{{FunctionID: function.ReadCSVID, Bind: func(context.Context, string) (binder.ResolvedRelation, error) {
 		return binder.ResolvedRelation{ID: "tablefunc:read_csv:fp", Fingerprint: "fp", Columns: []binder.RelationColumn{{Name: "id", Type: types.LogicalType{ID: types.BigInt}}}}, nil
-	}})
+	}}})
 	resolver, _ := NewPlanningSourceResolver(base)
 	a, err := resolver.ResolveRelation(ctx, testQualifiedName("a"))
 	if err != nil {

@@ -10,13 +10,15 @@ import (
 
 type testReadOnlyDriver struct{ caps CapabilitySet }
 
-func (d *testReadOnlyDriver) Scheme() string { return "test" }
+func (d *testReadOnlyDriver) Scheme() string                    { return "test" }
 func (d *testReadOnlyDriver) StaticCapabilities() CapabilitySet { return d.caps }
 func (d *testReadOnlyDriver) Probe(context.Context) (ProbeResult, error) {
 	return ProbeResult{Supported: d.caps, Endpoint: "test://endpoint"}, nil
 }
 func (d *testReadOnlyDriver) Stat(context.Context, URI) (ObjectInfo, error) { return ObjectInfo{}, nil }
-func (d *testReadOnlyDriver) List(context.Context, URI, ListOptions) (ListPage, error) { return ListPage{}, nil }
+func (d *testReadOnlyDriver) List(context.Context, URI, ListOptions) (ListPage, error) {
+	return ListPage{}, nil
+}
 func (d *testReadOnlyDriver) ReadRange(context.Context, RangeRequest, *memory.Scope, *memory.BufferManager) (RangeResult, error) {
 	return RangeResult{}, nil
 }
@@ -44,9 +46,9 @@ func (d *testAtomicPublishDriver) OpenAtomicPublishWrite(context.Context, URI, W
 
 type testWriteHandle struct{}
 
-func (testWriteHandle) Write(context.Context, []byte) (int, error) { return 0, nil }
+func (testWriteHandle) Write(context.Context, []byte) (int, error)    { return 0, nil }
 func (testWriteHandle) Close(context.Context) (ObjectIdentity, error) { return ObjectIdentity{}, nil }
-func (testWriteHandle) Abort(context.Context) error { return nil }
+func (testWriteHandle) Abort(context.Context) error                   { return nil }
 
 func TestWriteDriverForRejectsReadOnlyDriver(t *testing.T) {
 	r, err := NewRegistry(&testReadOnlyDriver{caps: Capabilities(RandomRead)})
