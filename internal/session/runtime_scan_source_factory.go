@@ -8,6 +8,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
+	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
 const maxScanOpenAdapters = 32
@@ -25,7 +26,7 @@ type ScanOpenAdapter struct {
 // RuntimeScanSourceFactory 实现 PhysicalPlan lowering 的 generic scan source factory。
 // 它只负责 FunctionCatalog 校验与 immutable dispatch，不包含任何格式/协议实现。
 type RuntimeScanSourceFactory struct {
-	functions *function.Catalog          // functions 是唯一 FunctionCatalog。
+	functions *function.Catalog            // functions 是唯一 FunctionCatalog。
 	adapters  map[function.ID]ScanOpenFunc // adapters 构造后不可变。
 }
 
