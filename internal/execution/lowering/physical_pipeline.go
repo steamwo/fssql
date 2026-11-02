@@ -130,6 +130,8 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 		return loweredStage{}, err
 	}
 	switch plan.Kind {
+	case planner.PhysicalOneRow:
+		return loweredStage{source: &oneRowSource{}, relationID: "one-row"}, nil
 	case planner.PhysicalScan:
 		if plan.Scan == nil {
 			return loweredStage{}, fmt.Errorf("physical scan has no ScanSpec")
