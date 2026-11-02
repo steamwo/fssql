@@ -9,7 +9,7 @@ import (
 )
 
 // TransformSink 把一组 TransformOperator 适配成 Sink，供 join 等“直接 push 到 downstream Sink”的算子复用。
-// 输入 chunk ownership 仍属于上游调用者；只有 transform 创建的 replacement 由本 adapter 负责释放。
+// 输入 chunk ownership 仍属于上游调用者；replacement ownership 只有在 downstream 成功接管时才转移。
 type TransformSink struct {
 	Transforms []TransformOperator // Transforms 按 child-output -> parent-output 顺序执行。
 	Downstream Sink                // Downstream 接收最终 transformed chunk。
@@ -17,6 +17,7 @@ type TransformSink struct {
 
 var _ Sink = (*TransformSink)(nil)
 var _ CloseableSink = (*TransformSink)(nil)
+var _ OwnershipTakingSink = (*TransformSink)(nil)
 
 // NewTransformSink 创建 streaming sink adapter；空 transform 仍允许，用于统一 Close/Finalize 透传。
 func NewTransformSink(transforms []TransformOperator, downstream Sink) (*TransformSink, error) {
@@ -31,7 +32,13 @@ func NewTransformSink(transforms []TransformOperator, downstream Sink) (*Transfo
 	return &TransformSink{Transforms: append([]TransformOperator(nil), transforms...), Downstream: downstream}, nil
 }
 
-// Consume 执行 replacement-aware transform chain；原始 input 永不由 adapter 释放，避免与 Pipeline runner 双重 ownership。
+// TakesChunkOwnership 仅在最终 downstream 接管 chunk 时向上游传播 ownership transfer。
+func (s *TransformSink) TakesChunkOwnership() bool {
+	return s != nil && s.Downstream != nil && SinkTakesChunkOwnership(s.Downstream)
+}
+
+// Consume 执行 replacement-aware transform chain；原始 input 默认属于上游。
+// downstream 成功声明 ownership transfer 时，最终 chunk（可能是 input，也可能是 replacement）不再由本 adapter Release。
 func (s *TransformSink) Consume(ctx context.Context, input *vector.DataChunk) error {
 	if s == nil || s.Downstream == nil {
 		return fmt.Errorf("transform sink is uninitialized")
@@ -70,10 +77,17 @@ func (s *TransformSink) Consume(ctx context.Context, input *vector.DataChunk) er
 		}
 	}
 	err := s.Downstream.Consume(ctx, owned)
-	if ownsOwned {
+	if err != nil {
+		// Consume error 永不转移 ownership；replacement 仍由 adapter 回收，input 仍由上游回收。
+		if ownsOwned {
+			owned.Release()
+		}
+		return err
+	}
+	if ownsOwned && !SinkTakesChunkOwnership(s.Downstream) {
 		owned.Release()
 	}
-	return err
+	return nil
 }
 
 // Finalize 把 stage 终态传给真实 downstream；transform 自身无额外 finalize state。
