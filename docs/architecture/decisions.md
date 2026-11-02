@@ -472,3 +472,14 @@ Status: FROZEN
 - QueryService / QueryRegistry / QueryHandle / QueryContext / ResultCursor 是唯一 server lifecycle core；transport adapter 不得复制状态机、scheduler、introspection 或 resource ownership。
 - Query lifetime 与 transport request lifetime 分离。
 - HTTP / protobuf / gRPC / Arrow SDK types 不得进入 Core / Execution / Query / Resource ABI。
+
+## AD-044 Pre-Feature-Freeze Stable Contract Remediation
+Status: FROZEN
+
+按 ADR-0006 Option A：
+
+- v1 Stable Feature Contract 保持不变，不因当前实现缺口缩减或重新分类。
+- Phase 5 的既有 `ACCEPTED` 状态不足以证明 `Stable Feature Complete`；项目返回 Phase 5 remediation，状态为 `IN_PROGRESS`，Phase 6 保持 `LOCKED`。
+- remediation 仅允许补齐已经声明为 Stable v1 的能力，以及 AD-036/AD-041 要求的兼容性、测试和发布前验证基础设施；不得借此新增 Stable Feature。
+- 所有缺失 Stable 能力补齐后，必须重新执行完整 Phase 5 Gate 并重新 `ACCEPTED`，之后才允许再次进入 Phase 6 Feature Freeze / Release。
+- Phase 6 不得用 lower-level operator tests、known limitations 或文档声明替代 `Stable Feature Complete` 与端到端 SQL Compatibility Verification。
