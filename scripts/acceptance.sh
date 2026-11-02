@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 phase="${1:-phase-0}"
+
+# Phase 6 has its own release-only gate so Feature Freeze checks remain easy to
+# audit without duplicating or weakening the already accepted phase gates.
+if [[ "$phase" == "phase-6" || "$phase" == "6" ]]; then
+  exec bash ./scripts/phase6-release.sh
+fi
+
 case "$phase" in
   phase-0|0)
     go test ./...
