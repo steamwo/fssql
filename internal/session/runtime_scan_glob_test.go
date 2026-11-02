@@ -51,7 +51,7 @@ func TestGlobRuntimeSourceValidatesFrozenFingerprint(t *testing.T) {
 	}
 }
 
-// TestGlobRuntimeSourceBatchesLimitAndOwnsStrings 验证 limit、vector batch 与 StringHeap ownership。
+// TestGlobRuntimeSourceBatchesLimitAndOwnsStrings 验证安全 limit candidate、vector batch 与 StringHeap ownership。
 func TestGlobRuntimeSourceBatchesLimitAndOwnsStrings(t *testing.T) {
 	uris := make([]string, 2100)
 	for i := range uris {
@@ -105,25 +105,36 @@ func TestGlobRuntimeSourceBatchesLimitAndOwnsStrings(t *testing.T) {
 	}
 }
 
-// TestGlobRuntimeSourceRejectsUnsupportedPushdownBeforePlanning 防止 optimizer pushdown 被静默忽略。
-func TestGlobRuntimeSourceRejectsUnsupportedPushdownBeforePlanning(t *testing.T) {
+// TestGlobRuntimeSourceDeclinesFilterProjectionCandidates 验证未接受的 candidate 不会变成查询错误，source 仍输出完整 relation 交给 residual operator。
+func TestGlobRuntimeSourceDeclinesFilterProjectionCandidates(t *testing.T) {
 	calls := 0
 	manager, scope, adapter := globRuntimeFixture(t, func(context.Context, string) ([]string, string, error) {
 		calls++
 		return []string{"memory://bucket/a.parquet"}, "fp", nil
 	})
-	filterSpec := globRuntimeSpec("fp")
-	filterSpec.Pushdown.Filters = []*binder.BoundExpression{{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Boolean}, Literal: "true"}}
-	if source, err := adapter.Open(context.Background(), filterSpec); err == nil || source != nil {
-		t.Fatalf("filter source=%v err=%v", source, err)
+	spec := globRuntimeSpec("fp")
+	spec.Pushdown.Filters = []*binder.BoundExpression{{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Boolean}, Literal: "true"}}
+	// SELECT file,file 可产生重复 projection candidate；glob 当前不接受 projection，因此 source 仍输出完整单列 relation。
+	spec.Pushdown.Projection = []int{0, 0}
+	source, err := adapter.Open(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
 	}
-	projectionSpec := globRuntimeSpec("fp")
-	projectionSpec.Pushdown.Projection = []int{1}
-	if source, err := adapter.Open(context.Background(), projectionSpec); err == nil || source != nil {
-		t.Fatalf("projection source=%v err=%v", source, err)
+	if calls != 1 {
+		t.Fatalf("planner calls=%d", calls)
 	}
-	if calls != 0 {
-		t.Fatalf("planner called for unsupported pushdown: %d", calls)
+	chunk, ok, err := source.Next(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if len(chunk.Columns) != 1 || chunk.Cardinality != 1 {
+		chunk.Release()
+		t.Fatalf("columns=%d cardinality=%d", len(chunk.Columns), chunk.Cardinality)
+	}
+	value, valid := chunk.Columns[0].String(0)
+	chunk.Release()
+	if !valid || value != "memory://bucket/a.parquet" {
+		t.Fatalf("value=%q valid=%v", value, valid)
 	}
 	if manager.Used() != 0 {
 		t.Fatalf("managed leak=%d", manager.Used())
