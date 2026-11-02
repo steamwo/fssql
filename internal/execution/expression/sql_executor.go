@@ -33,12 +33,14 @@ func (e *Executor) ExecuteSQL(expr *binder.BoundExpression, chunk *vector.DataCh
 		return e.executeSQLUnary(expr, chunk)
 	case binder.BoundBinary:
 		return e.executeSQLBinary(expr, chunk)
+	case binder.BoundCast:
+		return e.executeSQLCast(expr, chunk)
 	default:
 		return nil, fmt.Errorf("SQL expression executor: no exact kernel for kind %d type %d op %q", expr.Kind, expr.Type.ID, expr.Op)
 	}
 }
 
-// executeSQLLiteral 物化 Binder 已确定类型的 INTEGER/VARCHAR literal；BIGINT/BOOLEAN 已由旧 executor 处理。
+// executeSQLLiteral 物化 Binder 已确定类型的 INTEGER/VARCHAR/DOUBLE literal；BIGINT/BOOLEAN 已由旧 executor 处理。
 func (e *Executor) executeSQLLiteral(expr *binder.BoundExpression, count int) (*vector.Vector, error) {
 	out, err := vector.NewConstant(e.Scope, e.Buffers, expr.Type, count)
 	if err != nil {
@@ -57,6 +59,13 @@ func (e *Executor) executeSQLLiteral(expr *binder.BoundExpression, count int) (*
 			out.Release()
 			return nil, err
 		}
+	case types.Double:
+		value, parseErr := strconv.ParseFloat(expr.Literal, 64)
+		if parseErr != nil {
+			out.Release()
+			return nil, fmt.Errorf("SQL expression executor: invalid DOUBLE literal %q", expr.Literal)
+		}
+		out.SetFloat64(0, value)
 	default:
 		out.Release()
 		return nil, fmt.Errorf("SQL expression executor: literal kernel for type %d is not implemented", expr.Type.ID)
@@ -77,13 +86,10 @@ func (e *Executor) executeSQLNull(expr *binder.BoundExpression, count int) (*vec
 	return out, nil
 }
 
-// executeSQLUnary 执行 INTEGER 的一元正负号；BIGINT NOT 等已有 kernel 继续由旧 executor 处理。
+// executeSQLUnary 执行 INTEGER/DOUBLE 的一元正负号；BOOLEAN NOT 等已有 kernel 继续由旧 executor 处理。
 func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if len(expr.Children) != 1 {
 		return nil, fmt.Errorf("SQL expression executor: unary %q requires one child", expr.Op)
-	}
-	if expr.Type.ID != types.Integer {
-		return nil, fmt.Errorf("SQL expression executor: unary numeric kernel for type %d is not implemented", expr.Type.ID)
 	}
 	child, err := e.ExecuteSQL(expr.Children[0], chunk)
 	if err != nil {
@@ -94,30 +100,85 @@ func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.D
 	if err != nil {
 		return nil, err
 	}
-	for row := 0; row < chunk.Cardinality; row++ {
-		value, ok := child.Int32(row)
-		if !ok {
-			out.SetNull(row)
-			continue
-		}
-		switch expr.Op {
-		case "+":
-			out.SetInt32(row, value)
-		case "-":
-			if value == math.MinInt32 {
-				out.Release()
-				return nil, fmt.Errorf("SQL expression executor: INTEGER negation overflow")
+	switch expr.Type.ID {
+	case types.Integer:
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Int32(row)
+			if !ok {
+				out.SetNull(row)
+				continue
 			}
-			out.SetInt32(row, -value)
-		default:
-			out.Release()
-			return nil, fmt.Errorf("SQL expression executor: unsupported INTEGER unary operator %q", expr.Op)
+			switch expr.Op {
+			case "+":
+				out.SetInt32(row, value)
+			case "-":
+				if value == math.MinInt32 {
+					out.Release()
+					return nil, fmt.Errorf("SQL expression executor: INTEGER negation overflow")
+				}
+				out.SetInt32(row, -value)
+			default:
+				out.Release()
+				return nil, fmt.Errorf("SQL expression executor: unsupported INTEGER unary operator %q", expr.Op)
+			}
 		}
+	case types.Double:
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Float64(row)
+			if !ok {
+				out.SetNull(row)
+				continue
+			}
+			switch expr.Op {
+			case "+":
+				out.SetFloat64(row, value)
+			case "-":
+				out.SetFloat64(row, -value)
+			default:
+				out.Release()
+				return nil, fmt.Errorf("SQL expression executor: unsupported DOUBLE unary operator %q", expr.Op)
+			}
+		}
+	default:
+		out.Release()
+		return nil, fmt.Errorf("SQL expression executor: unary numeric kernel for type %d is not implemented", expr.Type.ID)
 	}
 	return out, nil
 }
 
-// executeSQLBinary 分发新增 INTEGER/VARCHAR typed kernel；NULL 传播遵循 SQL 三值语义。
+// executeSQLCast 补齐 legacy executor 尚未覆盖的 Binder numeric widening；不实现 narrowing 或字符串转换。
+func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
+	if len(expr.Children) != 1 {
+		return nil, fmt.Errorf("SQL expression executor: CAST requires one child")
+	}
+	childExpr := expr.Children[0]
+	child, err := e.ExecuteSQL(childExpr, chunk)
+	if err != nil {
+		return nil, err
+	}
+	defer child.Release()
+	out, err := vector.NewFlat(e.Scope, e.Buffers, expr.Type, chunk.Cardinality)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case childExpr.Type.ID == types.Integer && expr.Type.ID == types.Double:
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Int32(row)
+			if !ok {
+				out.SetNull(row)
+				continue
+			}
+			out.SetFloat64(row, float64(value))
+		}
+	default:
+		out.Release()
+		return nil, fmt.Errorf("SQL expression executor: CAST kernel %d -> %d is not implemented", childExpr.Type.ID, expr.Type.ID)
+	}
+	return out, nil
+}
+
+// executeSQLBinary 分发 INTEGER/VARCHAR/DOUBLE typed kernel；NULL 传播遵循 SQL 三值语义。
 func (e *Executor) executeSQLBinary(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if len(expr.Children) != 2 {
 		return nil, fmt.Errorf("SQL expression executor: binary %q requires two children", expr.Op)
@@ -132,6 +193,8 @@ func (e *Executor) executeSQLBinary(expr *binder.BoundExpression, chunk *vector.
 		return e.executeSQLIntegerBinary(expr, chunk)
 	case types.Varchar:
 		return e.executeSQLVarcharBinary(expr, chunk)
+	case types.Double:
+		return e.executeSQLDoubleBinary(expr, chunk)
 	default:
 		return nil, fmt.Errorf("SQL expression executor: binary kernel for type %d op %q is not implemented", leftType, expr.Op)
 	}
@@ -227,6 +290,80 @@ func (e *Executor) executeSQLVarcharBinary(expr *binder.BoundExpression, chunk *
 		out.SetBool(row, comparisonFromOrder(cmp, expr.Op))
 	}
 	return out, nil
+}
+
+// executeSQLDoubleBinary 执行 DOUBLE arithmetic/comparison。
+// 除零保留 IEEE 754 Inf/NaN；比较使用 DuckDB total-order 规则而不是 Go 原生 NaN 比较。
+func (e *Executor) executeSQLDoubleBinary(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
+	left, err := e.ExecuteSQL(expr.Children[0], chunk)
+	if err != nil {
+		return nil, err
+	}
+	defer left.Release()
+	right, err := e.ExecuteSQL(expr.Children[1], chunk)
+	if err != nil {
+		return nil, err
+	}
+	defer right.Release()
+	comparison := isComparisonOperator(expr.Op)
+	outType := expr.Type
+	if comparison {
+		outType = types.LogicalType{ID: types.Boolean}
+	}
+	out, err := vector.NewFlat(e.Scope, e.Buffers, outType, chunk.Cardinality)
+	if err != nil {
+		return nil, err
+	}
+	for row := 0; row < chunk.Cardinality; row++ {
+		x, xok := left.Float64(row)
+		y, yok := right.Float64(row)
+		if !xok || !yok {
+			out.SetNull(row)
+			continue
+		}
+		if comparison {
+			out.SetBool(row, comparisonFromOrder(compareDoubleDuckDB(x, y), expr.Op))
+			continue
+		}
+		switch expr.Op {
+		case "+":
+			out.SetFloat64(row, x+y)
+		case "-":
+			out.SetFloat64(row, x-y)
+		case "*":
+			out.SetFloat64(row, x*y)
+		case "/":
+			// DuckDB 默认开启 IEEE floating-point operations；Go float64 对运行时零值除法给出相同 Inf/NaN。
+			out.SetFloat64(row, x/y)
+		case "%":
+			out.Release()
+			return nil, fmt.Errorf("SQL expression executor: DOUBLE modulo kernel is not implemented")
+		default:
+			out.Release()
+			return nil, fmt.Errorf("SQL expression executor: unsupported DOUBLE operator %q", expr.Op)
+		}
+	}
+	return out, nil
+}
+
+// compareDoubleDuckDB 实现 DuckDB 浮点 total order：NaN=NaN 且 NaN 大于所有非 NaN 值。
+func compareDoubleDuckDB(x, y float64) int {
+	xNaN := math.IsNaN(x)
+	yNaN := math.IsNaN(y)
+	switch {
+	case xNaN && yNaN:
+		return 0
+	case xNaN:
+		return 1
+	case yNaN:
+		return -1
+	case x < y:
+		return -1
+	case x > y:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // compareInt32 执行已知为比较运算符的 INTEGER 比较。
