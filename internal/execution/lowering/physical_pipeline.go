@@ -33,7 +33,7 @@ func NewBuilder(sources ScanSourceFactory, executor *expression.Executor) (*Buil
 	return &Builder{Sources: sources, Executor: executor}, nil
 }
 
-// Build 只接受当前已接通的 Scan/Filter/Project 链；其他 physical kind 必须显式失败。
+// Build 接受当前已接通的 Scan/Filter/Project/Limit 链；blocking operator 在各自 lowering 完成前显式失败。
 func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pipeline.Sink) (*pipeline.Pipeline, error) {
 	if b == nil || b.Sources == nil || b.Executor == nil {
 		return nil, fmt.Errorf("physical pipeline lowering builder is not initialized")
@@ -62,7 +62,7 @@ func (b *Builder) Build(ctx context.Context, plan *planner.PhysicalPlan, sink pi
 	}, nil
 }
 
-// lowerNode 自底向上构造 source 与 transform 顺序，保证 Filter/Project 的 SQL 语义顺序与 PhysicalPlan 一致。
+// lowerNode 自底向上构造 source 与 transform 顺序，保证 Filter/Project/Limit 的 SQL 语义顺序与 PhysicalPlan 一致。
 func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (pipeline.Source, []pipeline.TransformOperator, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, "", err
@@ -103,6 +103,16 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (pi
 			return nil, nil, "", err
 		}
 		return source, append(transforms, project), relationID, nil
+	case planner.PhysicalLimit:
+		source, transforms, relationID, err := b.lowerNode(ctx, plan.Children[0])
+		if err != nil {
+			return nil, nil, "", err
+		}
+		limit, err := sqltransform.NewLimit(b.Executor, plan.Offset, plan.Limit, plan.Limit == planner.UnlimitedRows)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		return source, append(transforms, limit), relationID, nil
 	default:
 		return nil, nil, "", fmt.Errorf("physical operator %d is not wired to Push Pipeline yet", plan.Kind)
 	}
