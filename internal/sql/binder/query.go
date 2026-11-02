@@ -53,17 +53,17 @@ const (
 
 // BoundRelation 是 Planner 之前的 relation binding；不包含 runtime reader/operator。
 type BoundRelation struct {
-	Kind          BoundRelationKind       // Kind 是 relation 来源类别。
-	ID            string                  // ID 是 relation identity。
-	Alias         string                  // Alias 是列限定符。
-	Columns       []RelationColumn        // Columns 是该 relation 输出 schema。
-	Scope         Scope                   // Scope 保存表达式 Binder 使用的列序号/限定符。
-	Children      []*BoundRelation        // Children 仅 Join 使用。
-	Join          ast.JoinType            // Join 仅 RelationJoin 使用。
-	Condition     *BoundExpression        // Condition 是已绑定 ON 条件。
-	FunctionID    function.ID             // FunctionID 仅 table function 使用。
-	Source        string                  // Source 仅当前 Stable reader table function 使用。
-	Fingerprint   stats.DatasetFingerprint // Fingerprint 绑定真实 source snapshot。
+	Kind        BoundRelationKind        // Kind 是 relation 来源类别。
+	ID          string                   // ID 是 relation identity。
+	Alias       string                   // Alias 是列限定符。
+	Columns     []RelationColumn         // Columns 是该 relation 输出 schema。
+	Scope       Scope                    // Scope 保存表达式 Binder 使用的列序号/限定符。
+	Children    []*BoundRelation         // Children 仅 Join 使用。
+	Join        ast.JoinType             // Join 仅 RelationJoin 使用。
+	Condition   *BoundExpression         // Condition 是已绑定 ON 条件。
+	FunctionID  function.ID              // FunctionID 仅 table function 使用。
+	Source      string                   // Source 仅当前 Stable reader table function 使用。
+	Fingerprint stats.DatasetFingerprint // Fingerprint 绑定真实 source snapshot。
 }
 
 // BoundSelectItem 保存 SELECT projection 的强类型结果。
@@ -81,29 +81,30 @@ type BoundOrderTerm struct {
 
 // BoundQuery 是 Parser 与 Planner 之间的 Query Binder IR。
 type BoundQuery struct {
-	Source     *BoundRelation    // Source 是可选 FROM relation tree。
-	Projection []BoundSelectItem // Projection 已展开 SELECT *。
-	Output     []RelationColumn  // Output 是 query-visible schema。
-	Where      *BoundExpression  // Where 是布尔 predicate。
+	Source     *BoundRelation     // Source 是可选 FROM relation tree。
+	Projection []BoundSelectItem  // Projection 已展开 SELECT *。
+	Output     []RelationColumn   // Output 是 query-visible schema。
+	Where      *BoundExpression   // Where 是布尔 predicate。
 	GroupBy    []*BoundExpression // GroupBy 是强类型 grouping expressions。
-	Having     *BoundExpression  // Having 是布尔 predicate。
-	OrderBy    []BoundOrderTerm  // OrderBy 保存排序语义。
-	Limit      *BoundExpression  // Limit 是可选整数表达式。
-	Offset     *BoundExpression  // Offset 是可选整数表达式。
-	Distinct   bool              // Distinct 对应 SELECT DISTINCT。
+	Having     *BoundExpression   // Having 是布尔 predicate。
+	OrderBy    []BoundOrderTerm   // OrderBy 保存排序语义。
+	Limit      *BoundExpression   // Limit 是可选整数表达式。
+	Offset     *BoundExpression   // Offset 是可选整数表达式。
+	Distinct   bool               // Distinct 对应 SELECT DISTINCT。
 }
 
 // QueryBinder 绑定 SELECT/CTE/relation/table-function schema，不创建 Logical/Physical operator。
 type QueryBinder struct {
-	Functions      *function.Catalog    // Functions 是统一 FunctionCatalog。
-	Relations      RelationResolver     // Relations 解析 Catalog relation/view。
+	Functions      *function.Catalog     // Functions 是统一 FunctionCatalog。
+	Relations      RelationResolver      // Relations 解析 Catalog relation/view。
 	TableFunctions TableFunctionResolver // TableFunctions 调用真实 TableFunction.Bind schema path。
-	SourceSQL      string               // SourceSQL 仅用于无 alias projection 的稳定输出标签。
-	ctes           []boundCTE           // ctes 仅在当前 statement Query Binder 内可见。
+	SourceSQL      string                // SourceSQL 仅用于无 alias projection 的稳定输出标签。
+	ctes           []boundCTE            // ctes 仅在当前 statement Query Binder 内可见。
+	blockedCTEs    []ast.Identifier      // blockedCTEs 阻止 self/forward CTE 被错误回退到 Catalog relation。
 }
 
 type boundCTE struct {
-	Name   ast.Identifier // Name 保留 quoted identifier 语义。
+	Name   ast.Identifier   // Name 保留 quoted identifier 语义。
 	Output []RelationColumn // Output 是已绑定 CTE schema。
 }
 
@@ -125,13 +126,21 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 	}
 	local := *b
 	local.ctes = append([]boundCTE(nil), b.ctes...)
+	local.blockedCTEs = append([]ast.Identifier(nil), b.blockedCTEs...)
 	if stmt.With != nil {
-		for _, cte := range stmt.With.CTEs {
-			if local.findCTE(cte.Name) != nil {
-				return nil, local.errorAt(cte.Span, "duplicate CTE "+cte.Name.Name)
+		names := make([]ast.Identifier, len(stmt.With.CTEs))
+		for i, cte := range stmt.With.CTEs {
+			names[i] = cte.Name
+			for j := 0; j < i; j++ {
+				if sameIdentifier(names[j], cte.Name) {
+					return nil, local.errorAt(cte.Span, "duplicate CTE "+cte.Name.Name)
+				}
 			}
-			// 当前 CTE 在自身绑定完成前不加入 scope，因此 recursive/self-reference 不会被解析为 CTE。
-			q, err := local.BindSelect(ctx, cte.Query)
+		}
+		for i, cte := range stmt.With.CTEs {
+			child := local
+			child.blockedCTEs = append(append([]ast.Identifier(nil), local.blockedCTEs...), names[i:]...)
+			q, err := child.BindSelect(ctx, cte.Query)
 			if err != nil {
 				return nil, err
 			}
@@ -140,8 +149,8 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 				if len(cte.Columns) != len(out) {
 					return nil, local.errorAt(cte.Span, fmt.Sprintf("CTE column count %d does not match query output %d", len(cte.Columns), len(out)))
 				}
-				for i := range out {
-					out[i].Name = cte.Columns[i].Name
+				for j := range out {
+					out[j].Name = cte.Columns[j].Name
 				}
 			}
 			local.ctes = append(local.ctes, boundCTE{Name: cte.Name, Output: out})
@@ -163,12 +172,13 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 
 	for i, item := range stmt.Projection {
 		if item.Star {
-			if len(scope.Columns) == 0 {
+			if source == nil || len(scope.Columns) == 0 {
 				return nil, local.errorAt(item.Span, "SELECT * requires a FROM relation")
 			}
-			for _, col := range scope.Columns {
-				e := &BoundExpression{Kind: BoundColumn, Span: item.Span, Type: col.Type, Nullable: true, ColumnIndex: col.Index}
-				o := RelationColumn{Name: col.Name, Type: col.Type, Nullable: true}
+			for j, col := range scope.Columns {
+				schemaCol := source.Columns[j]
+				e := &BoundExpression{Kind: BoundColumn, Span: item.Span, Type: col.Type, Nullable: schemaCol.Nullable, ColumnIndex: col.Index}
+				o := RelationColumn{Name: schemaCol.Name, Type: cloneLogicalType(schemaCol.Type), Nullable: schemaCol.Nullable}
 				out.Projection = append(out.Projection, BoundSelectItem{Expression: e, Output: o})
 				out.Output = append(out.Output, o)
 			}
@@ -182,7 +192,7 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 			return nil, local.errorAt(item.Span, "bare NULL projection requires a resolved logical type")
 		}
 		name := local.projectionName(item, i)
-		o := RelationColumn{Name: name, Type: e.Type, Nullable: e.Nullable}
+		o := RelationColumn{Name: name, Type: cloneLogicalType(e.Type), Nullable: e.Nullable}
 		out.Projection = append(out.Projection, BoundSelectItem{Expression: e, Output: o})
 		out.Output = append(out.Output, o)
 	}
@@ -267,6 +277,9 @@ func (b *QueryBinder) bindTableName(ctx context.Context, t *ast.TableName) (*Bou
 		if cte := b.findCTE(t.Name.Parts[0]); cte != nil {
 			cols := cloneRelationColumns(cte.Output)
 			return &BoundRelation{Kind: RelationCTE, ID: "cte:" + cte.Name.Name, Alias: alias, Columns: cols, Scope: makeScope(alias, cols)}, nil
+		}
+		if b.isBlockedCTE(t.Name.Parts[0]) {
+			return nil, b.errorAt(t.Span, "recursive or forward CTE reference is not Stable v1: "+t.Name.Parts[0].Name)
 		}
 	}
 	if b.Relations == nil {
@@ -366,10 +379,10 @@ func (b *QueryBinder) bindJoin(ctx context.Context, j *ast.JoinExpr) (*BoundRela
 		cols = cloneRelationColumns(left.Columns)
 		input = cloneScope(left.Scope)
 	} else {
-		applyOuterNullability(j.Type, input.Columns, len(left.Scope.Columns))
+		leftCount := len(left.Columns)
 		for i := range cols {
-			if i < len(input.Columns) {
-				cols[i].Nullable = input.Columns[i].Nullable
+			if (j.Type == ast.JoinLeft && i >= leftCount) || (j.Type == ast.JoinRight && i < leftCount) || j.Type == ast.JoinFull {
+				cols[i].Nullable = true
 			}
 		}
 	}
@@ -395,11 +408,24 @@ func (b *QueryBinder) bindRowCountExpression(exprs *Binder, raw ast.Expr, label 
 
 func (b *QueryBinder) findCTE(name ast.Identifier) *boundCTE {
 	for i := len(b.ctes) - 1; i >= 0; i-- {
-		if matchesIdentifier(b.ctes[i].Name.Name, name) {
+		if sameIdentifier(b.ctes[i].Name, name) {
 			return &b.ctes[i]
 		}
 	}
 	return nil
+}
+
+func (b *QueryBinder) isBlockedCTE(name ast.Identifier) bool {
+	for _, blocked := range b.blockedCTEs {
+		if sameIdentifier(blocked, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func sameIdentifier(a, b ast.Identifier) bool {
+	return matchesIdentifier(a.Name, b) && matchesIdentifier(b.Name, a)
 }
 
 func relationAlias(name ast.QualifiedName, alias *ast.Identifier) string {
@@ -415,7 +441,7 @@ func relationAlias(name ast.QualifiedName, alias *ast.Identifier) string {
 func makeScope(alias string, cols []RelationColumn) Scope {
 	s := Scope{Columns: make([]ColumnBinding, len(cols))}
 	for i, c := range cols {
-		s.Columns[i] = ColumnBinding{Table: alias, Name: c.Name, Type: c.Type, Index: i}
+		s.Columns[i] = ColumnBinding{Table: alias, Name: c.Name, Type: cloneLogicalType(c.Type), Index: i}
 	}
 	return s
 }
@@ -434,19 +460,36 @@ func combineScopes(left, right Scope) Scope {
 }
 
 func cloneScope(in Scope) Scope {
-	return Scope{Columns: append([]ColumnBinding(nil), in.Columns...)}
-}
-
-func applyOuterNullability(join ast.JoinType, cols []ColumnBinding, leftCount int) {
-	for i := range cols {
-		if (join == ast.JoinLeft && i >= leftCount) || (join == ast.JoinRight && i < leftCount) || join == ast.JoinFull {
-			// ColumnBinding 目前没有 nullable 字段；BoundExpression/输出 schema 在 join 层保守标记可空。
-		}
+	out := Scope{Columns: make([]ColumnBinding, len(in.Columns))}
+	for i, c := range in.Columns {
+		out.Columns[i] = c
+		out.Columns[i].Type = cloneLogicalType(c.Type)
 	}
+	return out
 }
 
 func cloneRelationColumns(in []RelationColumn) []RelationColumn {
-	return append([]RelationColumn(nil), in...)
+	out := make([]RelationColumn, len(in))
+	for i, c := range in {
+		out[i] = c
+		out[i].Type = cloneLogicalType(c.Type)
+	}
+	return out
+}
+
+func cloneLogicalType(t types.LogicalType) types.LogicalType {
+	out := t
+	if t.Child != nil {
+		child := cloneLogicalType(*t.Child)
+		out.Child = &child
+	}
+	if t.Fields != nil {
+		out.Fields = make([]types.StructField, len(t.Fields))
+		for i, field := range t.Fields {
+			out.Fields[i] = types.StructField{Name: field.Name, Type: cloneLogicalType(field.Type)}
+		}
+	}
+	return out
 }
 
 func containsAggregate(e *BoundExpression) bool {
