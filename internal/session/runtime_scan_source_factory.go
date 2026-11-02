@@ -12,6 +12,7 @@ import (
 )
 
 const maxScanOpenAdapters = 32
+const internalScanFunctionPrefix = "__fssql_"
 
 // ScanOpenFunc 是 Engine composition root 注入的 runtime scan callback。
 // callback 可以依赖具体格式/VFS，但必须消费传入的 frozen ScanSpec，不能重新做 SQL binding。
@@ -23,11 +24,19 @@ type ScanOpenAdapter struct {
 	Open       ScanOpenFunc // Open 打开真实 runtime source；返回 nil source 视为错误。
 }
 
+// InternalScanOpenAdapter 只用于 Planner 生成的保留 virtual scan 名称。
+// 它不会注册到 FunctionCatalog，因此 SQL table-function Binder 无法直接调用这些内部来源。
+type InternalScanOpenAdapter struct {
+	Function string       // Function 必须使用 __fssql_ 保留前缀。
+	Open     ScanOpenFunc // Open 必须消费 frozen ScanSpec，不得重新读取 Catalog metadata。
+}
+
 // RuntimeScanSourceFactory 实现 PhysicalPlan lowering 的 generic scan source factory。
 // 它只负责 FunctionCatalog 校验与 immutable dispatch，不包含任何格式/协议实现。
 type RuntimeScanSourceFactory struct {
 	functions *function.Catalog            // functions 是唯一 FunctionCatalog。
 	adapters  map[function.ID]ScanOpenFunc // adapters 构造后不可变。
+	internal  map[string]ScanOpenFunc      // internal 保存 statement-scoped virtual source callback，不构成 SQL FunctionCatalog surface。
 }
 
 // NewRuntimeScanSourceFactory 冻结 runtime table-function scan registry。
@@ -52,10 +61,43 @@ func NewRuntimeScanSourceFactory(functions *function.Catalog, adapters []ScanOpe
 		}
 		bound[adapter.FunctionID] = adapter.Open
 	}
-	return &RuntimeScanSourceFactory{functions: functions, adapters: bound}, nil
+	return &RuntimeScanSourceFactory{functions: functions, adapters: bound, internal: make(map[string]ScanOpenFunc)}, nil
 }
 
-// Open 根据 ScanSpec.Function 通过唯一 FunctionCatalog 查找内部 ID，再分派到实际 runtime callback。
+// WithInternalAdapters 返回带 statement-scoped virtual scan callback 的新 immutable registry。
+// 原 factory 不被修改，避免跨 Query 泄漏 Catalog snapshot/provenance。
+func (f *RuntimeScanSourceFactory) WithInternalAdapters(adapters []InternalScanOpenAdapter) (*RuntimeScanSourceFactory, error) {
+	if f == nil || f.functions == nil {
+		return nil, fmt.Errorf("session: runtime scan source factory is uninitialized")
+	}
+	if len(adapters) > maxScanOpenAdapters {
+		return nil, fmt.Errorf("session: too many internal scan adapters: %d > %d", len(adapters), maxScanOpenAdapters)
+	}
+	out := &RuntimeScanSourceFactory{
+		functions: f.functions,
+		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)),
+		internal:  make(map[string]ScanOpenFunc, len(f.internal)+len(adapters)),
+	}
+	for id, open := range f.adapters {
+		out.adapters[id] = open
+	}
+	for name, open := range f.internal {
+		out.internal[name] = open
+	}
+	for _, adapter := range adapters {
+		name := strings.TrimSpace(adapter.Function)
+		if !strings.HasPrefix(name, internalScanFunctionPrefix) || adapter.Open == nil {
+			return nil, fmt.Errorf("session: invalid internal scan adapter %q", adapter.Function)
+		}
+		if _, exists := out.internal[name]; exists {
+			return nil, fmt.Errorf("session: duplicate internal scan adapter %s", name)
+		}
+		out.internal[name] = adapter.Open
+	}
+	return out, nil
+}
+
+// Open 根据 ScanSpec.Function 分派真实 Stable table function 或 Planner-only virtual source。
 func (f *RuntimeScanSourceFactory) Open(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
 	if f == nil || f.functions == nil {
 		return nil, fmt.Errorf("session: runtime scan source factory is uninitialized")
@@ -66,7 +108,8 @@ func (f *RuntimeScanSourceFactory) Open(ctx context.Context, spec planner.ScanSp
 	if strings.TrimSpace(spec.RelationID) == "" {
 		return nil, fmt.Errorf("session: runtime scan requires relation identity")
 	}
-	if strings.TrimSpace(spec.Function) == "" {
+	functionName := strings.TrimSpace(spec.Function)
+	if functionName == "" {
 		return nil, fmt.Errorf("session: runtime scan requires table function")
 	}
 	if strings.TrimSpace(spec.Source) == "" {
@@ -75,15 +118,30 @@ func (f *RuntimeScanSourceFactory) Open(ctx context.Context, spec planner.ScanSp
 	if spec.Fingerprint == "" {
 		return nil, fmt.Errorf("session: runtime scan %s requires dataset fingerprint", spec.RelationID)
 	}
-	def, ok := f.functions.Lookup(spec.Function)
+	prepared := cloneRuntimeScanSpec(spec)
+	if strings.HasPrefix(functionName, internalScanFunctionPrefix) {
+		open := f.internal[functionName]
+		if open == nil {
+			return nil, fmt.Errorf("session: no runtime internal scan adapter registered for %s", functionName)
+		}
+		prepared.Function = functionName
+		source, err := open(ctx, prepared)
+		if err != nil {
+			return nil, fmt.Errorf("session: open internal runtime scan %s: %w", functionName, err)
+		}
+		if source == nil {
+			return nil, fmt.Errorf("session: internal runtime scan adapter %s returned nil source", functionName)
+		}
+		return source, nil
+	}
+	def, ok := f.functions.Lookup(functionName)
 	if !ok || def.Kind != function.Table {
-		return nil, fmt.Errorf("session: runtime scan references unknown/non-table function %s", spec.Function)
+		return nil, fmt.Errorf("session: runtime scan references unknown/non-table function %s", functionName)
 	}
 	open := f.adapters[def.ID]
 	if open == nil {
 		return nil, fmt.Errorf("session: no runtime scan adapter registered for table function %s", def.Name)
 	}
-	prepared := cloneRuntimeScanSpec(spec)
 	prepared.Function = def.Name
 	source, err := open(ctx, prepared)
 	if err != nil {
