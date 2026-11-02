@@ -21,6 +21,9 @@ const (
 	CapabilityServerSideList
 	// CapabilityIncompleteWriteRecovery 表示驱动可在 job 独占 staging scope 内发现并清理跨进程遗留的隐藏写 ownership。
 	CapabilityIncompleteWriteRecovery
+	// CapabilityAtomicPublishWrite 表示单对象写入在 Close 成功前不会暴露 incomplete final object，
+	// 且 Close/Abort 失败时保持此前完整 final object 不变。
+	CapabilityAtomicPublishWrite
 )
 
 // Compatibility aliases keep the Phase 1 storage implementations on one capability model.
@@ -38,6 +41,7 @@ const (
 	VersionedObject         = CapabilityVersionedObject
 	ServerSideList          = CapabilityServerSideList
 	IncompleteWriteRecovery = CapabilityIncompleteWriteRecovery
+	AtomicPublishWrite      = CapabilityAtomicPublishWrite
 )
 
 // CapabilitySet is a compact immutable-style bitset used to advertise VFS capabilities.

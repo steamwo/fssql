@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	ErrWriteUnsupported = errors.New("vfs: write unsupported")
-	ErrWriteClosed      = errors.New("vfs: write handle closed")
+	ErrWriteUnsupported         = errors.New("vfs: write unsupported")
+	ErrWriteClosed              = errors.New("vfs: write handle closed")
+	ErrAtomicPublishUnsupported = errors.New("vfs: atomic publish write unsupported")
 )
 
 // WriteOptions 描述一次 VFS 对象写入的语义要求；格式与压缩层不得出现在这里。
@@ -40,6 +41,17 @@ type WritableDriver interface {
 	OpenWrite(context.Context, URI, WriteOptions, *memory.Scope, *memory.BufferManager) (WriteHandle, error)
 	// Delete 删除 staging/incomplete 对象；它不是 dataset 目录 rename 的替代品。
 	Delete(context.Context, URI, *ObjectIdentity) error
+}
+
+// AtomicPublishDriver 是 WritableDriver 的可选单对象原子发布扩展。
+//
+// 语义由 CapabilityAtomicPublishWrite 冻结：调用方传入的 URI 是 final destination；
+// OpenAtomicPublishWrite 返回后产生的 incomplete bytes 不得作为 final object 可见；
+// Close 成功才发布完整新对象，Close/Abort 失败必须保持此前完整 final object 不变。
+// staging 名称、multipart token 与协议特有 ownership 必须留在 driver 内部。
+type AtomicPublishDriver interface {
+	WritableDriver
+	OpenAtomicPublishWrite(context.Context, URI, WriteOptions, *memory.Scope, *memory.BufferManager) (WriteHandle, error)
 }
 
 // WriteDriverFor 返回目标 URI 的可写驱动，并验证端点运行时至少提供一种正式写能力。
@@ -81,4 +93,40 @@ func (r *Registry) OpenWrite(ctx context.Context, u URI, opts WriteOptions, scop
 		return nil, fmt.Errorf("%w: conditional overwrite unavailable for %s", ErrWriteUnsupported, u.Scheme)
 	}
 	return wd.OpenWrite(ctx, u, opts, scope, bm)
+}
+
+// AtomicPublishDriverFor 返回满足单对象 atomic-publish 契约的驱动。
+// capability 与 concrete interface 必须同时存在；仅声明 capability 或仅实现方法都不能绕过 gate。
+func (r *Registry) AtomicPublishDriverFor(ctx context.Context, u URI) (AtomicPublishDriver, CapabilitySet, error) {
+	wd, caps, err := r.WriteDriverFor(ctx, u)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !caps.Has(AtomicPublishWrite) {
+		return nil, caps, fmt.Errorf("%w: scheme %s", ErrAtomicPublishUnsupported, u.Scheme)
+	}
+	atomic, ok := wd.(AtomicPublishDriver)
+	if !ok {
+		return nil, caps, fmt.Errorf("%w: scheme %s advertises AtomicPublishWrite without AtomicPublishDriver", ErrAtomicPublishUnsupported, u.Scheme)
+	}
+	return atomic, caps, nil
+}
+
+// OpenAtomicPublishWrite 只在 effective capability 与 driver contract 都成立时打开 final destination。
+// 该 gate 必须在任何数据输出开始前完成，禁止回退到普通 OpenWrite/direct in-place streaming。
+func (r *Registry) OpenAtomicPublishWrite(ctx context.Context, u URI, opts WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (WriteHandle, error) {
+	if scope == nil || bm == nil {
+		return nil, errors.New("vfs: managed memory scope and buffer manager are required for atomic publish write")
+	}
+	atomic, caps, err := r.AtomicPublishDriverFor(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	if opts.IfNoneMatch && !caps.Has(ConditionalWrite) {
+		return nil, fmt.Errorf("%w: conditional create unavailable for %s", ErrWriteUnsupported, u.Scheme)
+	}
+	if opts.Expected != nil && !caps.Has(ConditionalWrite) {
+		return nil, fmt.Errorf("%w: conditional overwrite unavailable for %s", ErrWriteUnsupported, u.Scheme)
+	}
+	return atomic.OpenAtomicPublishWrite(ctx, u, opts, scope, bm)
 }
