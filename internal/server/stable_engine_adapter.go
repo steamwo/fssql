@@ -47,6 +47,14 @@ func (p *stablePreparedQuery) Run(q *querypkg.Context, cursor *ResultCursor) err
 	if p == nil || p.prepared == nil || q == nil || cursor == nil {
 		return fmt.Errorf("server: Stable prepared query requires query context and result cursor")
 	}
+	output := p.prepared.Output()
+	columns := make([]ResultColumn, len(output))
+	for i, column := range output {
+		columns[i] = ResultColumn{Name: column.Name, Type: cloneResultLogicalType(column.Type), Nullable: column.Nullable}
+	}
+	if err := cursor.SetColumns(columns); err != nil {
+		return fmt.Errorf("server: publish prepared result schema: %w", err)
+	}
 	return p.prepared.Run(q, &resultCursorSink{cursor: cursor})
 }
 
@@ -58,10 +66,8 @@ type resultCursorSink struct {
 var _ pipeline.Sink = (*resultCursorSink)(nil)
 var _ pipeline.OwnershipTakingSink = (*resultCursorSink)(nil)
 
-// TakesChunkOwnership 声明 Consume 成功后 ResultCursor 已接管 chunk；Pipeline 不得再次 Release。
 func (*resultCursorSink) TakesChunkOwnership() bool { return true }
 
-// Consume 复用 ResultCursor 的 bounded queued+inflight backpressure；Push 失败时 ownership 不转移。
 func (s *resultCursorSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	if s == nil || s.cursor == nil {
 		return fmt.Errorf("server: result cursor sink is uninitialized")
@@ -69,5 +75,4 @@ func (s *resultCursorSink) Consume(ctx context.Context, chunk *vector.DataChunk)
 	return s.cursor.Push(ctx, chunk)
 }
 
-// Finalize no-op：QueryService 在 PreparedQuery.Run 返回后统一调用 ResultCursor.Finish(runErr)，避免双 terminal ownership。
 func (*resultCursorSink) Finalize(context.Context) error { return nil }
