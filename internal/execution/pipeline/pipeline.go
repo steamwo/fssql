@@ -38,6 +38,20 @@ type Sink interface {
 	Finalize(context.Context) error
 }
 
+// OwnershipTakingSink 是最终 Native Chunk/ResultCursor 一类 Sink 的可选扩展。
+// Consume 成功后若返回 true，chunk ownership 转移给 Sink，调用方不得再 Release；
+// Consume 返回 error 时 ownership 永远没有转移，调用方仍负责 Release。
+type OwnershipTakingSink interface {
+	Sink
+	TakesChunkOwnership() bool
+}
+
+// SinkTakesChunkOwnership 统一判断 Sink 的成功消费 ownership 语义，供 Pipeline 与直接 push 的 join emitter 共用。
+func SinkTakesChunkOwnership(sink Sink) bool {
+	owner, ok := sink.(OwnershipTakingSink)
+	return ok && owner.TakesChunkOwnership()
+}
+
 // CloseableSink 是持有 blocking state/temp ownership 的可选 Sink 扩展。
 // Pipeline 仅在执行失败或 Finalize 失败时调用 Close；成功 Finalize 后 Sink 可能继续作为下一 stage 的 Source，不能提前关闭。
 type CloseableSink interface {
@@ -104,7 +118,9 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 					owned.Release()
 					return scheduler.FAILED, err
 				}
-				owned.Release()
+				if !SinkTakesChunkOwnership(p.Sink) {
+					owned.Release()
+				}
 			}
 		})
 	}
