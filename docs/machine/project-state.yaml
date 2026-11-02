@@ -2,15 +2,15 @@ project:
   name: gosql
   architecture_version: "2.1-agent-ready"
   status: "ARCHITECTURE_FROZEN"
-current_phase: 5
+current_phase: 6
 phase_status:
   phase_0: ACCEPTED
   phase_1: ACCEPTED
   phase_2: ACCEPTED
   phase_3: ACCEPTED
   phase_4: ACCEPTED
-  phase_5: IN_PROGRESS
-  phase_6: LOCKED
+  phase_5: ACCEPTED
+  phase_6: IN_PROGRESS
 rules:
   next_phase_requires_previous_acceptance: true
   frozen_architecture_requires_adr: true
