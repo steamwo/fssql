@@ -497,3 +497,17 @@ Status: FROZEN
 - Parser 只构造带 source span 的 Own AST；Binder 负责 statement semantic validation；Catalog/Security/Export/VFS/format adapter 不得进入 Parser。
 - `OR REPLACE`、`IF NOT EXISTS`、persistent secret、provider chain、`COPY FROM`、`SHOW` / `DESC` 等未明确列出的扩展不属于 v1 Stable。
 - unsupported syntax/options 必须显式失败，不得 silent downgrade。
+
+## AD-046 Stable Single-File COPY Commit
+Status: FROZEN
+
+按 ADR-0008 Option A：
+
+- Stable v1 ordinary single-file `COPY ... TO '<destination>'` 以 SQL destination 对象本身作为唯一 user-visible commit object；不得要求 sibling manifest/success-marker。
+- SingleFile COPY 仍必须复用 `QueryContext SourceSnapshot → ExportCoordinator → Manifest → WriterPool/FileWriterFactory → SingleFile writer → SingleFileCommitter`，不得建立第二套 Export state machine。
+- VFS 提供 protocol-neutral `AtomicPublishWrite` capability：写入期间不完整数据不得以 final destination 可见；成功 Close 原子发布完整新对象；失败/Abort 保持此前完整 final object 不变。
+- driver 不能证明 `AtomicPublishWrite` 时，Stable single-file COPY 必须在数据输出开始前显式失败；禁止退化为 direct in-place streaming。
+- 成功 publish 可替换已有 destination，语义为 replace 而非 append。
+- hidden staging object、multipart token 与 protocol-specific recovery identity 保持在 VFS adapter 内；不得进入 Core/Execution/Query ABI。
+- Manifest 继续作为 SingleFile export/recovery state source，并保持 `WRITING → COMMITTING → COMMITTED` 生命周期；publish 成功但 Manifest 未落到 COMMITTED 时，resume 必须先 reconcile final object identity。
+- MultiFile / Partitioned Export 的 dataset final manifest/success-marker commit 语义保持 AD-009/ADR-0003 不变。

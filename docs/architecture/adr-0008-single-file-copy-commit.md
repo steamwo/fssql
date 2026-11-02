@@ -1,8 +1,13 @@
 # ADR-0008 — Stable SQL COPY Single-File Commit Semantics
 
-Status: **PROPOSED**
+Status: **ACCEPTED**
 
 Date: 2026-11-02
+Accepted: 2026-11-02
+
+## Decision
+
+**Option A is accepted.** Stable v1 single-file SQL COPY uses the destination object itself as the commit point, with protocol-neutral atomic publish semantics. MultiFile/Partitioned Export retains the existing dataset manifest/success-marker commit model.
 
 ## Context
 
@@ -57,7 +62,7 @@ Stable SQL COPY cannot be wired to the existing Phase 4 commit machinery without
 
 ## Option A — Single-file target object is the commit point; dataset marker remains for multi-file exports
 
-**Recommended.**
+**Accepted.**
 
 Clarify AD-009 so ordinary Stable SQL COPY in v1 uses a dedicated SingleFile commit path while preserving all existing Phase 4 components and failure guarantees.
 
@@ -173,7 +178,7 @@ Advantages:
 - minimal change to existing `export.Committer`;
 - preserves the Phase 4 dataset commit mechanism literally.
 
-Rejected as recommendation because the extra durable object is externally observable and differs from ordinary DuckDB single-file COPY behavior. It would become a permanent Stable storage-side ABI, including naming/collision/security semantics.
+Rejected because the extra durable object is externally observable and differs from ordinary DuckDB single-file COPY behavior. It would become a permanent Stable storage-side ABI, including naming/collision/security semantics.
 
 ## Option C — Interpret SQL destination as a dataset root
 
@@ -185,21 +190,9 @@ COPY (...) TO 's3://bucket/output'
 
 as a dataset directory/prefix containing generated data file(s) plus final manifest.
 
-Rejected as recommendation because AD-045 freezes ordinary COPY TO as a destination path/URI and DuckDB-compatible single-file behavior is the default target. This option silently changes the meaning of the user's destination.
+Rejected because AD-045 freezes ordinary COPY TO as a destination path/URI and DuckDB-compatible single-file behavior is the default target. This option silently changes the meaning of the user's destination.
 
-## Recommendation
-
-Accept **Option A**.
-
-It is the only option that simultaneously:
-
-- preserves the Stable SQL destination as the actual output file;
-- avoids inventing a public sidecar namespace;
-- matches DuckDB's successful-replacement behavior for ordinary single-file COPY;
-- preserves QueryContext/Manifest/WriterPool/ExportCoordinator ownership and crash recovery;
-- keeps the existing final-manifest dataset commit model for MultiFile/Partitioned exports.
-
-## Implementation order after acceptance
+## Implementation order
 
 1. Add the protocol-neutral VFS atomic-publish write capability/contract and driver capability tests.
 2. Implement atomic publish in the existing writable adapters that can prove the contract; unsupported drivers fail capability gating.
@@ -212,18 +205,17 @@ It is the only option that simultaneously:
 
 ## Acceptance impact
 
-Until this ADR is accepted or replaced:
+With Option A accepted:
 
 ```text
-ADR-0006 remediation #6 COPY execution is BLOCKED at final single-file commit semantics.
-DESCRIBE and other unrelated remediation work may continue.
+ADR-0006 remediation #6 COPY execution may continue under this frozen commit contract.
 Phase 5 remains IN_PROGRESS.
 Phase 6 remains LOCKED.
 ```
 
 ## Architecture invariants
 
-If Option A is accepted:
+Option A preserves the existing execution invariants and strengthens explicit failure/lifecycle behavior:
 
 - I-04 remains: writer/staging buffers stay MemoryManager-owned;
 - I-05 remains: no whole-file read fallback is introduced;
@@ -233,4 +225,4 @@ If Option A is accepted:
 - I-10 is strengthened: hidden staging/multipart ownership must be closed/recovered before terminal success;
 - I-12 is strengthened: drivers without atomic single-file publish fail explicitly rather than silently using unsafe in-place writes.
 
-This ADR would amend the SingleFile interpretation of AD-009 / ADR-0003 only. MultiFile/Partitioned dataset commit semantics remain frozen as they are today.
+This ADR amends the SingleFile interpretation of AD-009 / ADR-0003 only. MultiFile/Partitioned dataset commit semantics remain frozen as they are today.
