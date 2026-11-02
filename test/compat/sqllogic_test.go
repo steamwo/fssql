@@ -26,6 +26,8 @@ type sltRecord struct {
 	expected []string
 }
 
+func (r sltRecord) caseID() string { return fmt.Sprintf("stable.slt:%d", r.line) }
+
 func loadCorpus(t *testing.T) []sltRecord {
 	t.Helper()
 	file, err := os.Open("stable.slt")
@@ -192,6 +194,8 @@ func TestDuckDBDifferentialCorpus(t *testing.T) {
 		t.Skip("set FSSQL_REQUIRE_DUCKDB=1 in the acceptance gate")
 	}
 	records := loadCorpus(t)
+	registry := loadDeviationRegistry(t)
+	stableDeviations := validateDeviationRegistry(t, registry, records)
 	request := duckDBRequest{Queries: make([]string, len(records))}
 	for i := range records {
 		request.Queries[i] = records[i].sql
@@ -216,19 +220,37 @@ func TestDuckDBDifferentialCorpus(t *testing.T) {
 	if reference.DuckDBVersion == "" || len(reference.Results) != len(records) {
 		t.Fatalf("invalid DuckDB response version=%q results=%d want=%d", reference.DuckDBVersion, len(reference.Results), len(records))
 	}
+	if reference.DuckDBVersion != registry.Reference.Version {
+		t.Fatalf("DuckDB runner version=%q registry=%q", reference.DuckDBVersion, registry.Reference.Version)
+	}
 
 	db := openCompatibilityDB(t)
 	defer db.Close()
 	for i, record := range records {
-		if reference.Results[i].Error != "" {
-			t.Fatalf("DuckDB rejected stable.slt:%d: %s", record.line, reference.Results[i].Error)
+		ours, oursErr := queryValues(context.Background(), db, record.sql)
+		duck := reference.Results[i]
+		matches := oursErr == nil && duck.Error == "" && reflect.DeepEqual(ours, duck.Values)
+		deviation, classified := stableDeviations[record.caseID()]
+		if matches {
+			if classified {
+				t.Fatalf("%s: stale %s deviation %s; fssql now matches DuckDB %s", record.caseID(), deviation.Classification, deviation.ID, reference.DuckDBVersion)
+			}
+			continue
 		}
-		ours, err := queryValues(context.Background(), db, record.sql)
-		if err != nil {
-			t.Fatalf("fssql stable.slt:%d: %v", record.line, err)
+
+		mismatch := formatDifferentialMismatch(record, ours, oursErr, duck)
+		if !classified {
+			t.Fatalf("%s DuckDB %s unclassified mismatch\n%s", record.caseID(), reference.DuckDBVersion, mismatch)
 		}
-		if !reflect.DeepEqual(ours, reference.Results[i].Values) {
-			t.Fatalf("stable.slt:%d DuckDB %s mismatch\nSQL: %s\nfssql=%v\nduckdb=%v", record.line, reference.DuckDBVersion, record.sql, ours, reference.Results[i].Values)
+		switch deviation.Classification {
+		case "intentional_deviation":
+			t.Logf("%s intentional DuckDB deviation %s: %s", record.caseID(), deviation.ID, deviation.Rationale)
+		case "bug":
+			t.Fatalf("%s known compatibility bug %s still fails acceptance: %s\n%s", record.caseID(), deviation.ID, deviation.Rationale, mismatch)
+		case "unsupported_feature":
+			t.Fatalf("%s unsupported_feature %s cannot waive a frozen Stable SQL mismatch: %s\n%s", record.caseID(), deviation.ID, deviation.Rationale, mismatch)
+		default:
+			t.Fatalf("%s invalid deviation classification %q", record.caseID(), deviation.Classification)
 		}
 	}
 }
