@@ -71,6 +71,7 @@ type Config struct {
 	Workers                int
 	BlockingQueue          int
 	S3                     *S3Config
+	LocalFiles             *LocalFileConfig
 }
 
 // DB is the transport-neutral native Go composition root.
@@ -85,9 +86,9 @@ type DB struct {
 	closed    atomic.Bool
 }
 
-// Open creates a bounded in-process Stable engine. Remote protocols are never
-// auto-discovered: an S3 driver is registered only when S3 is configured, and
-// every unsupported scheme fails through VFS rather than bypassing capability
+// Open creates a bounded in-process Stable engine. File and remote protocols are
+// never auto-discovered: drivers are registered only when explicitly configured,
+// and every unsupported scheme fails through VFS rather than bypassing capability
 // or security checks.
 func Open(config Config) (*DB, error) {
 	if config.MemoryLimitBytes <= 0 {
@@ -124,7 +125,14 @@ func Open(config Config) (*DB, error) {
 		return nil, err
 	}
 	functions := function.NewBuiltinCatalog()
-	drivers := make([]vfs.Driver, 0, 1)
+	drivers := make([]vfs.Driver, 0, 2)
+	if config.LocalFiles != nil {
+		driver, err := publicLocalDriver(*config.LocalFiles)
+		if err != nil {
+			return nil, err
+		}
+		drivers = append(drivers, driver)
+	}
 	if config.S3 != nil {
 		driver, err := publicS3Driver(*config.S3)
 		if err != nil {
@@ -170,7 +178,7 @@ func Open(config Config) (*DB, error) {
 		return nil, err
 	}
 	secrets := security.NewSecretManager(nil)
-	control, err := session.NewSQLControlAdapter(secrets, []string{"s3", "sftp", "ftp", "webdav", "http", "https"})
+	control, err := session.NewSQLControlAdapter(secrets, []string{"file", "s3", "sftp", "ftp", "webdav", "http", "https"})
 	if err != nil {
 		return nil, err
 	}
