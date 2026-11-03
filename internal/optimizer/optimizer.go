@@ -45,22 +45,43 @@ func (o *Optimizer) markPushdownCandidates(p *planner.LogicalPlan) {
 		return
 	}
 	child := p.Children[0]
-	if child.Kind != planner.LogicalScan || child.Scan == nil {
-		return
-	}
 	switch p.Kind {
 	case planner.LogicalFilter:
-		child.Scan.Pushdown.Filters = append(child.Scan.Pushdown.Filters, p.Predicate)
+		if child.Kind == planner.LogicalScan && child.Scan != nil {
+			child.Scan.Pushdown.Filters = append(child.Scan.Pushdown.Filters, p.Predicate)
+		}
 	case planner.LogicalProject:
 		cols, ok := projectionColumns(p.Projection)
-		if ok {
-			child.Scan.Pushdown.Projection = cols
+		if !ok {
+			return
 		}
+		scan, filters := scanBelowResidualFilters(child)
+		if scan == nil || scan.Scan == nil {
+			return
+		}
+		needed := make(map[int]struct{}, len(cols))
+		for _, col := range cols {
+			needed[col] = struct{}{}
+		}
+		// Residual filters still execute against the Binder's original column
+		// indexes. Keep every referenced input column physically available even
+		// when the concrete format cannot translate that predicate for pruning.
+		for _, filter := range filters {
+			collectBoundColumnIndexes(filter, needed)
+		}
+		scan.Scan.Pushdown.Projection = sortedColumnIndexes(needed)
 	case planner.LogicalLimit:
+		// LIMIT may cross a pure-column Project because it neither changes row
+		// count nor evaluates expressions that could introduce observable errors.
+		// It must not cross Filter/Sort/Aggregate/Join.
+		scan := directScanBelowPureColumnProject(child)
+		if scan == nil || scan.Scan == nil {
+			return
+		}
 		// UnlimitedRows 只表示 OFFSET-only；不得把 sentinel 作为真实 scan LIMIT candidate 下推。
 		// LIMIT 0 由 residual PhysicalLimit 精确执行，ScanPushdown.Limit 的 0 仍保留“未接受 pushdown”语义。
-		if p.Offset == 0 && p.Limit != planner.UnlimitedRows && p.Limit > 0 && (child.Scan.Pushdown.Limit == 0 || p.Limit < child.Scan.Pushdown.Limit) {
-			child.Scan.Pushdown.Limit = p.Limit
+		if p.Offset == 0 && p.Limit != planner.UnlimitedRows && p.Limit > 0 && (scan.Scan.Pushdown.Limit == 0 || p.Limit < scan.Scan.Pushdown.Limit) {
+			scan.Scan.Pushdown.Limit = p.Limit
 		}
 	}
 }
@@ -75,6 +96,65 @@ func projectionColumns(exprs []*binder.BoundExpression) ([]int, bool) {
 		cols[i] = e.ColumnIndex
 	}
 	return cols, true
+}
+
+// scanBelowResidualFilters accepts only Filter* -> Scan. Filter outputs preserve
+// the scan schema/order, so Project ColumnIndex values still refer to the same
+// bound relation indexes. No other operator is crossed.
+func scanBelowResidualFilters(node *planner.LogicalPlan) (*planner.LogicalPlan, []*binder.BoundExpression) {
+	filters := make([]*binder.BoundExpression, 0, 2)
+	for node != nil && node.Kind == planner.LogicalFilter && len(node.Children) == 1 {
+		filters = append(filters, node.Predicate)
+		node = node.Children[0]
+	}
+	if node != nil && node.Kind == planner.LogicalScan && node.Scan != nil {
+		return node, filters
+	}
+	return nil, nil
+}
+
+// directScanBelowPureColumnProject permits exactly Project -> Scan in addition
+// to direct Scan. Multiple project layers would require index remapping and are
+// deliberately left residual until that contract exists.
+func directScanBelowPureColumnProject(node *planner.LogicalPlan) *planner.LogicalPlan {
+	if node == nil {
+		return nil
+	}
+	if node.Kind == planner.LogicalScan && node.Scan != nil {
+		return node
+	}
+	if node.Kind != planner.LogicalProject || len(node.Children) != 1 {
+		return nil
+	}
+	if _, ok := projectionColumns(node.Projection); !ok {
+		return nil
+	}
+	child := node.Children[0]
+	if child != nil && child.Kind == planner.LogicalScan && child.Scan != nil {
+		return child
+	}
+	return nil
+}
+
+func collectBoundColumnIndexes(expression *binder.BoundExpression, out map[int]struct{}) {
+	if expression == nil {
+		return
+	}
+	if expression.Kind == binder.BoundColumn && expression.ColumnIndex >= 0 {
+		out[expression.ColumnIndex] = struct{}{}
+	}
+	for _, child := range expression.Children {
+		collectBoundColumnIndexes(child, out)
+	}
+}
+
+func sortedColumnIndexes(indexes map[int]struct{}) []int {
+	out := make([]int, 0, len(indexes))
+	for index := range indexes {
+		out = append(out, index)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // lower 将 logical node 映射到 generic physical node，并保留 Push Pipeline 所需语义顺序。
