@@ -2,6 +2,15 @@
 
 fssql 是 Go 实现的单节点、可嵌入 OLAP 查询引擎。本页记录贡献者必须保持的架构约束；0.1 封板后不再维护阶段流程文档。
 
+详细约束：
+
+- [架构决策注册表](docs/architecture/decisions.md)
+- [Architecture Invariants](docs/architecture/invariants.md)
+- [Feature Contract](docs/architecture/feature-contract.md)
+- [Module Boundaries](docs/architecture/module-boundaries.md)
+- [Release Verification Contract](docs/architecture/release-contract.md)
+- [Memory / VFS / Testing / Source Introspection contracts](docs/contracts/)
+
 ## 执行模型
 
 - 内部执行格式是自研 Vector/DataChunk ABI；Arrow 只用于外部交换，不作为内部执行格式。
