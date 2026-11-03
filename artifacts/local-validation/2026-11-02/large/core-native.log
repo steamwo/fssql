@@ -1,9 +1,0 @@
-goos: windows
-goarch: amd64
-pkg: github.com/steamwo/fssql/pkg/gosql
-cpu: 12th Gen Intel(R) Core(TM) i5-12400F
-BenchmarkNativeQueryChunks-12    	     301	    343703 ns/op	   18714 B/op	     174 allocs/op
-BenchmarkNativeQueryChunks-12    	     321	    337255 ns/op	   18690 B/op	     174 allocs/op
-BenchmarkNativeQueryChunks-12    	     363	    358496 ns/op	   18696 B/op	     174 allocs/op
-PASS
-ok  	github.com/steamwo/fssql/pkg/gosql	0.499s

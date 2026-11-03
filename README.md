@@ -77,8 +77,6 @@ database/sql: 42
 - [Stable / Experimental / Deferred 功能契约](docs/architecture/feature-contract.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
 - [架构文档与开发流程](docs/README.md)
-- [使用现有 MinIO / PostgreSQL 做本机测试](docs/testing-local-services.md)
-- [大文件、资源占用与 Benchmark 测试](docs/testing-large-minio.md)
 - [项目阶段状态](docs/machine/project-state.yaml)
 
 仓库按 `pkg/gosql`（公共入口）、`internal`（引擎实现）、`cmd`（阶段工具）、`test`（跨模块测试）和 `docs`（契约与文档）组织。外部项目应通过公共包访问引擎。

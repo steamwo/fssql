@@ -157,7 +157,7 @@ def main():
              '- [完整原始矩阵](normal.log)、[抽样边界复核](recheck.log)、[四 worker](workers.log)、[默认内存预算](defaults.log)、[RIGHT/FULL/CROSS Join 补充](join-extra.log)、[COPY 全行内容校验](copy-full.log)。',
              '- [三次 end-to-end benchmark](bench.log)、[CPU 热点](cpu-top.txt)、[累计分配热点](alloc-top.txt)、[存活 heap 热点](heap-live-top.txt)。',
              '- [初轮 race](race.log)、[Top-N race 重测](race-topn-retry.log)、[四 worker race](workers-race.log)。',
-             '- [结构化汇总](summary.json)、[指标 CSV](metrics.csv)、[数据与 SQL 描述](manifest.json)、[运行方法](../../../../docs/testing-large-minio.md)。',
+             '- [结构化汇总](summary.json)、[指标 CSV](metrics.csv)、[数据与 SQL 描述](manifest.json)。',
              '- CPU/heap/临时文件采样存在开销；RSS 与临时文件瞬时峰值可能低估，受管内存峰值来自精确记账。小于 100ms 的 CPU 百分比不作为可比较数据。',
              '- 不使用 race 的 RSS/耗时作为正常运行基线；pprof 和普通基线独立运行。',
              '- 本轮大数据覆盖整型、浮点聚合、NULL 和宽字符串；没有执行大规模 DECIMAL/LIST/STRUCT、压缩编码全矩阵、任意规模极限、长时间 soak 或真实断电注入。仓库已有 unit/fault/interop 测试不等于这些维度的大文件规模验证；不宣称完整 Release Gate 通过。',

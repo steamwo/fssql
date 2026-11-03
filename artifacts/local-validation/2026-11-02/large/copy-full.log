@@ -1,7 +1,0 @@
-=== RUN   TestMinIOLargeMatrix
-=== RUN   TestMinIOLargeMatrix/copy_large
-    minio_large_test.go:655: {"name":"copy_large","kind":"copy","status":"pass","rows":100000,"seconds":8.8693592,"cpu_seconds":4.765625,"cpu_percent":53.73133382623628,"peak_cpu_percent":169.4414043470427,"logical_cpus":12,"rss_base_bytes":9318400,"rss_peak_bytes":46448640,"go_heap_peak_bytes":25365920,"go_allocated_bytes":1999212232,"gc_cycles":273,"managed_peak_bytes":12175412,"managed_after_bytes":0,"memory_limit_bytes":67108864,"temp_peak_bytes":0,"temp_after_bytes":0,"io_requests":5265,"io_bytes":328015808,"range_requests":5253,"full_get_requests":0,"non_206_range_responses":0}
---- PASS: TestMinIOLargeMatrix (8.88s)
-    --- PASS: TestMinIOLargeMatrix/copy_large (8.87s)
-PASS
-ok  	github.com/steamwo/fssql/pkg/gosql	9.624s

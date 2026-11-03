@@ -1,9 +1,0 @@
-goos: windows
-goarch: amd64
-pkg: github.com/steamwo/fssql/internal/execution/expression
-cpu: 12th Gen Intel(R) Core(TM) i5-12400F
-BenchmarkNumericAdd2048-12    	    1148	     99046 ns/op	 165.42 MB/s	   25884 B/op	      14 allocs/op
-BenchmarkNumericAdd2048-12    	    1233	     98954 ns/op	 165.57 MB/s	   25880 B/op	      14 allocs/op
-BenchmarkNumericAdd2048-12    	    1203	    101118 ns/op	 162.03 MB/s	   25880 B/op	      14 allocs/op
-PASS
-ok  	github.com/steamwo/fssql/internal/execution/expression	1.128s

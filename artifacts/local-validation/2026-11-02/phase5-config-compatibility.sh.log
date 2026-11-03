@@ -1,5 +1,0 @@
-[P5-D14] settings/config compatibility
-ok  	github.com/steamwo/fssql/internal/settings	0.406s
-[P5-D14] settings/config race safety
-ok  	github.com/steamwo/fssql/internal/settings	1.121s
-P5-D14 config compatibility gate: PASS
