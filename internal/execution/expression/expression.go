@@ -7,6 +7,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
@@ -94,6 +95,7 @@ func (e *Executor) Execute(expr *BoundExpression, chunk *vector.DataChunk) (*vec
 		return e.caseExpr(expr, chunk)
 	case ScalarCall:
 		if expr.SQL == nil { return nil, errors.New("scalar call missing SQL expression") }
+		if function.IsWindowID(expr.SQL.FunctionID) { return e.executePhase5Window(expr.SQL, chunk) }
 		if isPhase4CastFunction(expr.SQL) { return e.executePhase4CastFunction(expr.SQL, chunk) }
 		return e.executeScalarFunction(expr.SQL, chunk)
 	case SQLPhase4:

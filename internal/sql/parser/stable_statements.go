@@ -309,13 +309,3 @@ func (p *Parser) parseDescribeStatement() (ast.Statement, bool, error) {
 	s.Span = ast.Span{Start: start, End: p.previous().Span.End}
 	return s, true, nil
 }
-
-// acceptWord 消费 unquoted identifier 形式的非保留 statement keyword，避免 TYPE/VIEW 等破坏普通列名兼容性。
-func (p *Parser) acceptWord(word string) bool {
-	t := p.peek()
-	if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, word) {
-		p.pos++
-		return true
-	}
-	return false
-}

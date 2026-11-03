@@ -87,7 +87,7 @@ func Open(config Config) (*DB, error) {
 	buffers := memory.NewBufferManager(nil)
 	cat, err := catalog.NewMemoryCatalog(config.CatalogMaxEntries)
 	if err != nil { return nil, err }
-	functions := function.NewPhase4Catalog()
+	functions := function.NewPhase5Catalog()
 	functions, registeredTables, err := registerTableFunctions(functions, config.TableFunctions)
 	if err != nil { return nil, err }
 	functions, scalars, err := registerScalarFunctions(functions, config.ScalarFunctions)
