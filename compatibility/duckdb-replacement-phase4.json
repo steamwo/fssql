@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "phase": 4,
+  "plan": "docs/duckdb-replacement-plan.md",
+  "implementation_status": "implemented_small_scale",
+  "validated_at": "2026-11-03",
+  "validation": {
+    "command": "go test -timeout 90s ./...",
+    "workflow_runs": [41627442608, 41627497374],
+    "result": "success"
+  },
+  "capabilities": {
+    "sql": [
+      "CAST",
+      "CASE",
+      "varchar_concat",
+      "exact_decimal_literals",
+      "integer_and_decimal_arithmetic",
+      "length",
+      "substr",
+      "strpos",
+      "replace",
+      "repeat",
+      "lower",
+      "hex",
+      "floor",
+      "mod",
+      "least",
+      "greatest",
+      "coalesce",
+      "nullif",
+      "md5",
+      "strftime",
+      "strptime",
+      "date_trunc",
+      "timezone_utc",
+      "random_per_row"
+    ],
+    "udf": [
+      "per_db_scalar_callbacks",
+      "data_plane_hmac_sha256",
+      "null_handling",
+      "error_propagation",
+      "per_instance_key_isolation"
+    ],
+    "csv": [
+      "header",
+      "columns",
+      "auto_detect",
+      "allow_quoted_nulls",
+      "explicit_decimal_date_timestamp_schema"
+    ]
+  },
+  "evidence": [
+    "pkg/gosql/phase4_test.go",
+    "pkg/gosql/phase4_decimal_test.go",
+    "pkg/gosql/phase4_udf_test.go",
+    "internal/execution/expression/phase4_repr_test.go"
+  ],
+  "acceptance": {
+    "hmac_known_vector_null_unicode_tenant_isolation": "passed",
+    "udf_error_aborts_query": "passed",
+    "flat_constant_dictionary_consistency": "passed",
+    "csv_explicit_decimal_datetime_all_null_quoted_empty": "passed",
+    "full_repository_tests": "passed",
+    "caller_phase0_masking_corpus": "blocked_external_baseline"
+  },
+  "external_blocker": "The caller masking/compiler corpus referenced by phase 0 is not available in this repository or through the connected GitHub installation, so external corpus equivalence is not claimed."
+}
