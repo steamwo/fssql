@@ -18,24 +18,36 @@ import (
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-// CopyManifestStoreFactory creates durable recovery state for one COPY job.
-// The returned store is control/recovery state only; it is not a public output
-// sidecar and must remain separate from query temporary spill storage.
 type CopyManifestStoreFactory func(*query.Context, string) (exportpkg.ManifestStore, error)
 
-// ExportCopyExecutorConfig binds Stable COPY to the existing Export/VFS stack.
+type ParquetKeyResolver func(context.Context, string, string) ([]byte, error)
+
 type ExportCopyExecutorConfig struct {
 	Registry             *vfs.Registry
 	Buffers              *memory.BufferManager
 	ManifestStore        CopyManifestStoreFactory
+	ParquetKeys          ParquetKeyResolver
 	MaxWriters           int
 	PerWriterReservation int64
 }
 
-// ExportCopyExecutor is the production Stable COPY adapter. It does not parse,
-// bind or plan SQL and it never opens a protocol driver outside VFS.
-type ExportCopyExecutor struct {
-	config ExportCopyExecutorConfig
+type ExportCopyExecutor struct{ config ExportCopyExecutorConfig }
+
+type CopyRequest struct {
+	Destination         string
+	Format              string
+	Compression         string
+	Header              bool
+	Delimiter           byte
+	Quote               byte
+	EncryptionAlgorithm string
+	KeyID               string
+}
+
+type CopyExportResult struct {
+	Rows   int64
+	Bytes  int64
+	Schema []exportpkg.Column
 }
 
 func NewExportCopyExecutor(config ExportCopyExecutorConfig) (*ExportCopyExecutor, error) {
@@ -45,8 +57,6 @@ func NewExportCopyExecutor(config ExportCopyExecutorConfig) (*ExportCopyExecutor
 	if config.MaxWriters <= 0 {
 		config.MaxWriters = 1
 	}
-	// Stable SQL COPY is single-file in v1; accepting a larger pool would only
-	// reserve unused concurrency and obscure the one-file ownership contract.
 	if config.MaxWriters != 1 {
 		return nil, fmt.Errorf("session: Stable COPY requires exactly one writer slot")
 	}
@@ -56,36 +66,11 @@ func NewExportCopyExecutor(config ExportCopyExecutorConfig) (*ExportCopyExecutor
 	return &ExportCopyExecutor{config: config}, nil
 }
 
+// Run keeps SQL COPY behavior unchanged while sharing the same Phase 6 execution path.
 func (e *ExportCopyExecutor) Run(q *query.Context, bound *binder.BoundCopyTo, prepared *PreparedSQLQuery, sql string) error {
-	if e == nil || e.config.Registry == nil || e.config.Buffers == nil || e.config.ManifestStore == nil {
-		return errors.New("session: COPY export executor is uninitialized")
+	if bound == nil {
+		return errors.New("session: COPY bound statement is nil")
 	}
-	if q == nil || q.Memory == nil || q.Closed() || bound == nil || prepared == nil {
-		return errors.New("session: COPY requires live query, bound statement and prepared query")
-	}
-	if err := q.Context().Err(); err != nil {
-		return err
-	}
-	snapshot, ok := q.SourceSnapshot()
-	if !ok || strings.TrimSpace(snapshot.Fingerprint) == "" {
-		return errors.New("session: COPY refuses to start without frozen Query SourceSnapshot")
-	}
-
-	root, filePath, err := copyDestination(bound.Destination)
-	if err != nil {
-		return err
-	}
-	finalURI := root
-	finalURI.Path = pathpkg.Join(root.Path, filePath)
-	finalURI.Raw = finalURI.String()
-	caps, err := e.config.Registry.EffectiveCapabilities(q.Context(), finalURI)
-	if err != nil {
-		return err
-	}
-	if !caps.Has(vfs.AtomicPublishWrite) {
-		return fmt.Errorf("session: COPY destination %s does not provide AtomicPublishWrite", finalURI.Scheme)
-	}
-
 	schema, err := copyExportSchema(prepared)
 	if err != nil {
 		return err
@@ -94,62 +79,140 @@ func (e *ExportCopyExecutor) Run(q *query.Context, bound *binder.BoundCopyTo, pr
 	if err != nil {
 		return err
 	}
-	queryFingerprint := fingerprintText(sql)
-	jobID := fingerprintText(queryFingerprint + "\x00" + snapshot.Fingerprint + "\x00" + finalURI.String())
-	manifest, err := exportpkg.NewManifest(
-		jobID,
-		queryFingerprint,
-		snapshot.Fingerprint,
-		root.String(),
-		string(writerConfig.Format),
-		writerConfig.Compression,
-		"atomic_publish",
-		[]string{filePath},
-	)
-	if err != nil {
-		return err
-	}
-	if err := manifest.TransitionExport(exportpkg.ExportStateWriting); err != nil {
-		return err
-	}
-	store, err := e.config.ManifestStore(q, jobID)
-	if err != nil {
-		return err
-	}
-	if store == nil {
-		return errors.New("session: COPY ManifestStore factory returned nil")
-	}
-	// Persist intent before opening any final-object writer. A crash before the
-	// next durable snapshot therefore restarts by redoing the one incomplete file.
-	if err := store.Save(q.Context(), manifest); err != nil {
-		return fmt.Errorf("session: persist COPY WRITING manifest: %w", err)
-	}
+	_, err = e.runPrepared(q, prepared, bound.Destination, writerConfig, sql)
+	return err
+}
 
+// RunPrepared is the typed API entrypoint used by gosql.DB.CopyTo.
+func (e *ExportCopyExecutor) RunPrepared(q *query.Context, prepared *PreparedSQLQuery, request CopyRequest, queryText string) (CopyExportResult, error) {
+	schema, err := copyExportSchema(prepared)
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	config, err := copyRequestWriterConfig(request, schema)
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	if request.EncryptionAlgorithm != "" || request.KeyID != "" {
+		if config.Format != exportpkg.FormatParquet {
+			return CopyExportResult{}, errors.New("session: encryption is only supported for Parquet COPY")
+		}
+		algorithm, err := exportpkg.NormalizeParquetEncryptionAlgorithm(request.EncryptionAlgorithm)
+		if err != nil {
+			return CopyExportResult{}, err
+		}
+		keyID := strings.TrimSpace(request.KeyID)
+		if keyID == "" {
+			return CopyExportResult{}, errors.New("session: encrypted Parquet COPY requires keyId")
+		}
+		if e.config.ParquetKeys == nil {
+			return CopyExportResult{}, errors.New("session: encrypted Parquet COPY requires Config.ParquetKeys")
+		}
+		resolved, err := e.config.ParquetKeys(q.Context(), keyID, algorithm)
+		if err != nil {
+			return CopyExportResult{}, fmt.Errorf("session: resolve Parquet key %q: %w", keyID, err)
+		}
+		key := append([]byte(nil), resolved...)
+		defer zeroKeyBytes(key)
+		config.Parquet.Encryption = &exportpkg.ParquetEncryptionConfig{Algorithm: algorithm, KeyID: keyID, Key: key}
+		if err := exportpkg.ValidateParquetEncryption(config.Parquet.Encryption); err != nil {
+			return CopyExportResult{}, err
+		}
+	}
+	return e.runPrepared(q, prepared, request.Destination, config, queryText)
+}
+
+func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQLQuery, destination string, writerConfig exportpkg.FileWriterConfig, queryText string) (CopyExportResult, error) {
+	if e == nil || e.config.Registry == nil || e.config.Buffers == nil || e.config.ManifestStore == nil {
+		return CopyExportResult{}, errors.New("session: COPY export executor is uninitialized")
+	}
+	if q == nil || q.Memory == nil || q.Closed() || prepared == nil {
+		return CopyExportResult{}, errors.New("session: COPY requires live query and prepared query")
+	}
+	if err := q.Context().Err(); err != nil {
+		return CopyExportResult{}, err
+	}
+	snapshot, ok := q.SourceSnapshot()
+	if !ok || strings.TrimSpace(snapshot.Fingerprint) == "" {
+		return CopyExportResult{}, errors.New("session: COPY refuses to start without frozen Query SourceSnapshot")
+	}
+	// Validate the factory, including encryption key length and page codec, before any output writer is opened.
 	pool, err := exportpkg.NewWriterPool(e.config.MaxWriters, e.config.PerWriterReservation, q.Memory)
 	if err != nil {
-		return err
+		return CopyExportResult{}, err
 	}
 	factory, err := exportpkg.NewFileWriterFactory(writerConfig, e.config.Registry, q.Memory, e.config.Buffers, pool)
 	if err != nil {
-		return err
+		return CopyExportResult{}, err
 	}
-	router, err := exportpkg.NewFileRouter(exportpkg.RoutingConfig{Mode: exportpkg.LayoutSingleFile, SingleFilePath: filePath}, schema)
+
+	root, filePath, err := copyDestination(destination)
 	if err != nil {
-		return err
+		return CopyExportResult{}, err
+	}
+	finalURI := root
+	finalURI.Path = pathpkg.Join(root.Path, filePath)
+	finalURI.Raw = finalURI.String()
+	caps, err := e.config.Registry.EffectiveCapabilities(q.Context(), finalURI)
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	if !caps.Has(vfs.AtomicPublishWrite) {
+		return CopyExportResult{}, fmt.Errorf("session: COPY destination %s does not provide AtomicPublishWrite", finalURI.Scheme)
+	}
+
+	queryFingerprint := fingerprintText(queryText)
+	exportIdentity := string(writerConfig.Format) + "\x00" + writerConfig.Compression
+	if writerConfig.Parquet.Encryption != nil {
+		exportIdentity += "\x00" + writerConfig.Parquet.Encryption.Algorithm + "\x00" + writerConfig.Parquet.Encryption.KeyID
+	}
+	jobID := fingerprintText(queryFingerprint + "\x00" + snapshot.Fingerprint + "\x00" + finalURI.String() + "\x00" + exportIdentity)
+	manifest, err := exportpkg.NewManifest(jobID, queryFingerprint, snapshot.Fingerprint, root.String(), string(writerConfig.Format), writerConfig.Compression, "atomic_publish", []string{filePath})
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	manifest.Codec = writerConfig.Compression
+	if writerConfig.Parquet.Encryption != nil {
+		manifest.EncryptionAlgorithm = writerConfig.Parquet.Encryption.Algorithm
+		manifest.KeyID = writerConfig.Parquet.Encryption.KeyID
+	}
+	if err := manifest.Validate(); err != nil {
+		return CopyExportResult{}, err
+	}
+	if err := manifest.TransitionExport(exportpkg.ExportStateWriting); err != nil {
+		return CopyExportResult{}, err
+	}
+	store, err := e.config.ManifestStore(q, jobID)
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	if store == nil {
+		return CopyExportResult{}, errors.New("session: COPY ManifestStore factory returned nil")
+	}
+	if err := store.Save(q.Context(), manifest); err != nil {
+		return CopyExportResult{}, fmt.Errorf("session: persist COPY WRITING manifest: %w", err)
+	}
+
+	router, err := exportpkg.NewFileRouter(exportpkg.RoutingConfig{Mode: exportpkg.LayoutSingleFile, SingleFilePath: filePath}, writerConfig.Schema)
+	if err != nil {
+		return CopyExportResult{}, err
 	}
 	dataset, err := exportpkg.NewAtomicSingleFileDatasetWriter(manifest, router, factory)
 	if err != nil {
-		return err
+		return CopyExportResult{}, err
 	}
 	commit := &exportpkg.SingleFileCommitter{Manifest: manifest, Store: store, Registry: e.config.Registry}
 	copySink := &copyExportSink{dataset: dataset, manifest: manifest, store: store, commit: commit}
 	if err := prepared.Run(q, copySink); err != nil {
-		return err
+		return CopyExportResult{}, err
 	}
 	if pool.Active() != 0 {
-		return fmt.Errorf("session: COPY writer ownership leak: active=%d", pool.Active())
+		return CopyExportResult{}, fmt.Errorf("session: COPY writer ownership leak: active=%d", pool.Active())
 	}
-	return nil
+	if len(manifest.FileStates) != 1 || manifest.FileStates[0].State != exportpkg.FileStateComplete {
+		return CopyExportResult{}, errors.New("session: COPY completed without one COMPLETE output file")
+	}
+	return CopyExportResult{Rows: copySink.rows, Bytes: manifest.FileStates[0].Size, Schema: append([]exportpkg.Column(nil), writerConfig.Schema...)}, nil
 }
 
 func copyDestination(raw string) (vfs.URI, string, error) {
@@ -171,6 +234,9 @@ func copyDestination(raw string) (vfs.URI, string, error) {
 }
 
 func copyExportSchema(prepared *PreparedSQLQuery) ([]exportpkg.Column, error) {
+	if prepared == nil {
+		return nil, errors.New("session: COPY prepared query is nil")
+	}
 	columns := prepared.Output()
 	if len(columns) == 0 {
 		return nil, errors.New("session: COPY query has empty output schema")
@@ -200,18 +266,53 @@ func copyWriterConfig(options binder.BoundCopyOptions, schema []exportpkg.Column
 	return config, nil
 }
 
+func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (exportpkg.FileWriterConfig, error) {
+	format := strings.ToLower(strings.TrimSpace(request.Format))
+	if format == "" {
+		format = "csv"
+	}
+	compression := strings.ToLower(strings.TrimSpace(request.Compression))
+	if compression == "" || compression == "none" {
+		compression = "identity"
+	}
+	config := exportpkg.FileWriterConfig{Schema: schema, Compression: compression}
+	switch format {
+	case "csv":
+		config.Format = exportpkg.FormatCSV
+		delimiter, quote := request.Delimiter, request.Quote
+		if delimiter == 0 {
+			delimiter = ','
+		}
+		if quote == 0 {
+			quote = '"'
+		}
+		if delimiter == quote {
+			return exportpkg.FileWriterConfig{}, errors.New("session: CSV delimiter and quote must differ")
+		}
+		config.CSV = exportpkg.CSVWriteOptions{Header: request.Header, Delimiter: delimiter, Quote: quote}
+	case "json":
+		config.Format = exportpkg.FormatJSON
+	case "ndjson":
+		config.Format = exportpkg.FormatNDJSON
+	case "parquet":
+		config.Format = exportpkg.FormatParquet
+	default:
+		return exportpkg.FileWriterConfig{}, fmt.Errorf("session: unsupported COPY format %q", request.Format)
+	}
+	return config, nil
+}
+
 func fingerprintText(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
 
-// copyExportSink is the Push Pipeline sink for Stable COPY. It consumes native
-// DataChunks directly and owns only the existing DatasetWriter/Manifest lifecycle.
 type copyExportSink struct {
 	dataset  *exportpkg.DatasetWriter
 	manifest *exportpkg.Manifest
 	store    exportpkg.ManifestStore
 	commit   *exportpkg.SingleFileCommitter
+	rows     int64
 	terminal bool
 }
 
@@ -219,7 +320,11 @@ func (s *copyExportSink) Consume(ctx context.Context, chunk *vector.DataChunk) e
 	if s == nil || s.dataset == nil || s.terminal {
 		return errors.New("session: COPY sink is closed")
 	}
-	return s.dataset.WriteChunk(ctx, chunk, "")
+	if err := s.dataset.WriteChunk(ctx, chunk, ""); err != nil {
+		return err
+	}
+	s.rows += int64(chunk.Cardinality)
+	return nil
 }
 
 func (s *copyExportSink) Finalize(ctx context.Context) error {
@@ -239,9 +344,6 @@ func (s *copyExportSink) Finalize(ctx context.Context) error {
 	return nil
 }
 
-// Close is invoked by pipeline failure paths. It aborts any incomplete writer,
-// persists FAILED where possible, and never deletes/replaces a previously
-// complete final object itself; atomic VFS ownership remains below DatasetWriter.
 func (s *copyExportSink) Close() error {
 	if s == nil || s.terminal {
 		return nil
@@ -264,6 +366,12 @@ func (s *copyExportSink) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func zeroKeyBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
 }
 
 var _ pipeline.CloseableSink = (*copyExportSink)(nil)

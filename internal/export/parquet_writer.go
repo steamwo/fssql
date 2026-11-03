@@ -2,12 +2,15 @@ package export
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"strings"
 
+	"github.com/golang/snappy"
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/format/parquet"
@@ -19,50 +22,43 @@ const (
 	defaultParquetPageBuffer   = 64 << 10
 )
 
-var parquetMagic = []byte{'P', 'A', 'R', '1'}
+var (
+	parquetMagic          = []byte{'P', 'A', 'R', '1'}
+	encryptedParquetMagic = []byte{'P', 'A', 'R', 'E'}
+)
 
-// ParquetWriteOptions 控制 Parquet 格式内部 row-group/page 边界；multipart 边界仍完全属于 VFS 层。
+// ParquetWriteOptions controls row-group/page boundaries, internal compression and native encryption.
 type ParquetWriteOptions struct {
-	// RowGroupRows 是一个 row group 的目标行数，与 DataChunk 和 multipart 大小独立。
-	RowGroupRows int
-	// PageRows 是单个 data page 的最大逻辑行数，与 row-group 大小独立。
-	PageRows int
-	// PageBufferSize 是单页 plain 编码的初始 Managed Buffer 大小。
+	RowGroupRows   int
+	PageRows       int
 	PageBufferSize int
+	// Compression is an internal page codec. Supported values are identity and snappy.
+	Compression string
+	// Encryption enables encrypted-footer Parquet Modular Encryption when non-nil.
+	Encryption *ParquetEncryptionConfig
 }
 
-// ParquetWriter 是 Phase 4 memory-governed Parquet writer 的 baseline。
-// 它直接消费自研 Vector/DataChunk，并写标准 PLAIN + uncompressed DataPage v1。
+// ParquetWriter is the memory-governed Controlled Parquet writer.
 type ParquetWriter struct {
-	// schema 是绑定后固定的查询输出 schema。
 	schema []Column
-	// opts 是规范化后的格式内部边界参数。
-	opts ParquetWriteOptions
-	// scope 管理 row-group vector、page payload 与 metadata reservation。
-	scope *memory.Scope
-	// bm 分配所有大块 writer 缓冲。
-	bm *memory.BufferManager
-	// sink 是最终字节流；标准 Parquet 不允许再被 whole-file compression 改写内部 offset。
-	sink ByteSink
-	// rows 是当前 row group 的 managed scalar vectors。
-	rows []*vector.Vector
-	// rowCount 是当前 row group 已缓存的行数。
-	rowCount int
-	// totalRows 是整个文件已接受的行数。
+	opts   ParquetWriteOptions
+	scope  *memory.Scope
+	bm     *memory.BufferManager
+	sink   ByteSink
+
+	rows      []*vector.Vector
+	rowCount  int
 	totalRows int64
-	// offset 是已成功写入 Parquet 文件字节流的绝对偏移。
-	offset int64
-	// rowGroups 是 footer 所需的小型 metadata；增长前先扩 metadataReservation。
+	offset    int64
 	rowGroups []parquet.RowGroup
-	// metadataReservation 记账 rowGroups/footer 的 Go heap metadata。
+
 	metadataReservation *memory.Reservation
-	// started 表示文件头 magic 已成功写出。
-	started bool
-	// terminal 表示 Close/Abort 后不可继续使用。
-	terminal bool
+	fileAAD             [parquetUniqueFileIDBytes]byte
+	started             bool
+	terminal            bool
 }
 
-// NewParquetWriter 验证 schema 后预分配第一个受管 row-group buffer；不会绕过 MemoryManager。
+// NewParquetWriter validates all format options and allocates the first managed row group.
 func NewParquetWriter(schema []Column, opts ParquetWriteOptions, scope *memory.Scope, bm *memory.BufferManager, sink ByteSink) (*ParquetWriter, error) {
 	if len(schema) == 0 {
 		return nil, errors.New("export: Parquet schema is empty")
@@ -85,25 +81,57 @@ func NewParquetWriter(schema []Column, opts ParquetWriteOptions, scope *memory.S
 	if opts.PageRows > opts.RowGroupRows {
 		return nil, fmt.Errorf("export: parquet page rows %d exceed row-group rows %d", opts.PageRows, opts.RowGroupRows)
 	}
+	opts.Compression = strings.ToLower(strings.TrimSpace(opts.Compression))
+	if opts.Compression == "" || opts.Compression == "none" {
+		opts.Compression = "identity"
+	}
+	if opts.Compression != "identity" && opts.Compression != "snappy" {
+		return nil, fmt.Errorf("export: unsupported Parquet page compression %q", opts.Compression)
+	}
+	if opts.Encryption != nil {
+		enc := *opts.Encryption
+		enc.Key = append([]byte(nil), opts.Encryption.Key...)
+		opts.Encryption = &enc
+		if err := ValidateParquetEncryption(opts.Encryption); err != nil {
+			zeroBytes(enc.Key)
+			return nil, err
+		}
+	}
+
 	copySchema := append([]Column(nil), schema...)
 	for i := range copySchema {
 		if _, err := parquetPhysicalType(copySchema[i].Type); err != nil {
+			if opts.Encryption != nil {
+				zeroBytes(opts.Encryption.Key)
+			}
 			return nil, fmt.Errorf("export: parquet column %d %q: %w", i, copySchema[i].Name, err)
 		}
 	}
 	metaRes, err := scope.Reserve(memory.TagMetadata, 0)
 	if err != nil {
+		if opts.Encryption != nil {
+			zeroBytes(opts.Encryption.Key)
+		}
 		return nil, err
 	}
 	w := &ParquetWriter{schema: copySchema, opts: opts, scope: scope, bm: bm, sink: sink, metadataReservation: metaRes}
+	if opts.Encryption != nil {
+		if _, err := rand.Read(w.fileAAD[:]); err != nil {
+			metaRes.Release()
+			zeroBytes(opts.Encryption.Key)
+			return nil, fmt.Errorf("export: generate Parquet file AAD: %w", err)
+		}
+	}
 	if err := w.allocateRowGroup(); err != nil {
 		metaRes.Release()
+		if opts.Encryption != nil {
+			zeroBytes(opts.Encryption.Key)
+		}
 		return nil, err
 	}
 	return w, nil
 }
 
-// WriteChunk 把输入按 RowGroupRows 切分并复制进受管 row-group vectors；边界不依赖输入 chunk 大小。
 func (w *ParquetWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk) error {
 	if w == nil || w.terminal {
 		return ErrWriterClosed
@@ -143,7 +171,6 @@ func (w *ParquetWriter) WriteChunk(ctx context.Context, chunk *vector.DataChunk)
 	return nil
 }
 
-// Flush 完成当前 partial row group 并推进下游；显式 Flush 可以提前结束 row group，但不会改变 page/multipart 规则。
 func (w *ParquetWriter) Flush(ctx context.Context) error {
 	if w == nil || w.terminal {
 		return ErrWriterClosed
@@ -159,7 +186,7 @@ func (w *ParquetWriter) Flush(ctx context.Context) error {
 	return w.sink.Flush(ctx)
 }
 
-// Close 写完最后 row group、footer length 与尾部 magic，然后关闭文件 sink。
+// Close writes the standard footer or PARE encrypted-footer envelope and atomically closes the sink.
 func (w *ParquetWriter) Close(ctx context.Context) (WriteResult, error) {
 	if w == nil || w.terminal {
 		return WriteResult{}, ErrWriterClosed
@@ -177,22 +204,52 @@ func (w *ParquetWriter) Close(ctx context.Context) (WriteResult, error) {
 	if err != nil {
 		return WriteResult{}, w.fail(err)
 	}
-	footer, err := parquet.EncodeFileMetaData(meta)
-	if err != nil {
-		return WriteResult{}, w.fail(err)
+
+	footerStart := w.offset
+	if w.opts.Encryption != nil {
+		cryptoMeta, err := parquet.EncodeFileCryptoMetaData(w.fileAAD[:], []byte(w.opts.Encryption.KeyMetadata))
+		if err != nil {
+			return WriteResult{}, w.fail(err)
+		}
+		plainFooter, err := parquet.EncodeEncryptedFileMetaData(meta)
+		if err != nil {
+			return WriteResult{}, w.fail(err)
+		}
+		if err := w.writeBytes(ctx, cryptoMeta); err != nil {
+			return WriteResult{}, w.fail(err)
+		}
+		frame, buffer, err := w.encryptManaged(plainFooter, parquetModuleFooter, -1, -1, -1)
+		if err != nil {
+			return WriteResult{}, w.fail(err)
+		}
+		writeErr := w.writeBytes(ctx, frame)
+		buffer.Release()
+		if writeErr != nil {
+			return WriteResult{}, w.fail(writeErr)
+		}
+	} else {
+		footer, err := parquet.EncodeFileMetaData(meta)
+		if err != nil {
+			return WriteResult{}, w.fail(err)
+		}
+		if err := w.writeBytes(ctx, footer); err != nil {
+			return WriteResult{}, w.fail(err)
+		}
 	}
-	if len(footer) > math.MaxUint32 {
+	footerSize := w.offset - footerStart
+	if footerSize < 0 || footerSize > math.MaxUint32 {
 		return WriteResult{}, w.fail(errors.New("export: parquet footer exceeds uint32"))
 	}
-	if err := w.writeBytes(ctx, footer); err != nil {
-		return WriteResult{}, w.fail(err)
-	}
 	var footerLen [4]byte
-	binary.LittleEndian.PutUint32(footerLen[:], uint32(len(footer)))
+	binary.LittleEndian.PutUint32(footerLen[:], uint32(footerSize))
 	if err := w.writeBytes(ctx, footerLen[:]); err != nil {
 		return WriteResult{}, w.fail(err)
 	}
-	if err := w.writeBytes(ctx, parquetMagic); err != nil {
+	magic := parquetMagic
+	if w.opts.Encryption != nil {
+		magic = encryptedParquetMagic
+	}
+	if err := w.writeBytes(ctx, magic); err != nil {
 		return WriteResult{}, w.fail(err)
 	}
 	result, err := w.sink.Close(ctx)
@@ -204,7 +261,6 @@ func (w *ParquetWriter) Close(ctx context.Context) (WriteResult, error) {
 	return result, nil
 }
 
-// Abort 丢弃当前 incomplete Parquet file，并释放 row-group/page metadata ownership。
 func (w *ParquetWriter) Abort(ctx context.Context) error {
 	if w == nil || w.terminal {
 		return nil
@@ -215,19 +271,21 @@ func (w *ParquetWriter) Abort(ctx context.Context) error {
 	return err
 }
 
-// ensureStarted 写文件头 magic；任何 short write 都会作为完整文件失败处理。
 func (w *ParquetWriter) ensureStarted(ctx context.Context) error {
 	if w.started {
 		return nil
 	}
-	if err := w.writeBytes(ctx, parquetMagic); err != nil {
+	magic := parquetMagic
+	if w.opts.Encryption != nil {
+		magic = encryptedParquetMagic
+	}
+	if err := w.writeBytes(ctx, magic); err != nil {
 		return err
 	}
 	w.started = true
 	return nil
 }
 
-// allocateRowGroup 为每个 scalar 列预分配固定行数的 managed Vector。
 func (w *ParquetWriter) allocateRowGroup() error {
 	rows := make([]*vector.Vector, len(w.schema))
 	for i := range w.schema {
@@ -245,30 +303,33 @@ func (w *ParquetWriter) allocateRowGroup() error {
 	return nil
 }
 
-// flushRowGroup 按列连续写出当前 row group，并在 footer metadata 增长前 Reserve Metadata。
 func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) error {
 	if w.rowCount == 0 {
 		return nil
 	}
-	group := parquet.RowGroup{Columns: make([]parquet.ColumnChunk, len(w.schema)), NumRows: int64(w.rowCount)}
+	if len(w.rowGroups) > math.MaxInt16 {
+		return errors.New("export: Parquet row-group ordinal exceeds int16")
+	}
+	ordinal := int16(len(w.rowGroups))
+	group := parquet.RowGroup{Columns: make([]parquet.ColumnChunk, len(w.schema)), NumRows: int64(w.rowCount), Ordinal: &ordinal}
 	groupStart := w.offset
-	var total int64
+	var totalUncompressed, totalCompressed int64
 	for col := range w.schema {
-		chunk, bytesWritten, err := w.writeColumnChunk(ctx, col)
+		if col > math.MaxInt16 {
+			return errors.New("export: Parquet column ordinal exceeds int16")
+		}
+		chunk, uncompressed, compressed, err := w.writeColumnChunk(ctx, col, ordinal)
 		if err != nil {
 			return err
 		}
 		group.Columns[col] = chunk
-		total += bytesWritten
+		totalUncompressed += uncompressed
+		totalCompressed += compressed
 	}
-	group.TotalByteSize = total
-	compressed := total
-	group.TotalCompressedSize = &compressed
+	group.TotalByteSize = totalUncompressed
+	group.TotalCompressedSize = &totalCompressed
 	group.FileOffset = &groupStart
-	ordinal := int16(len(w.rowGroups))
-	group.Ordinal = &ordinal
 
-	// row-group metadata 是可增长 control structure；先扩大 reservation 再 append。
 	estimate := int64((len(w.rowGroups) + 1) * (256 + len(w.schema)*320))
 	if err := w.metadataReservation.Resize(estimate); err != nil {
 		return err
@@ -281,14 +342,14 @@ func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) er
 	return nil
 }
 
-// writeColumnChunk 把一个 scalar column 按 PageRows 切成独立 DataPage v1，返回 footer ColumnChunk metadata。
-func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int) (parquet.ColumnChunk, int64, error) {
+func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupOrdinal int16) (parquet.ColumnChunk, int64, int64, error) {
 	physical, err := parquetPhysicalType(w.schema[col].Type)
 	if err != nil {
-		return parquet.ColumnChunk{}, 0, err
+		return parquet.ColumnChunk{}, 0, 0, err
 	}
 	start := w.offset
-	var total int64
+	var totalUncompressed, totalCompressed int64
+	pageOrdinal := int16(0)
 	for pageStart := 0; pageStart < w.rowCount; pageStart += w.opts.PageRows {
 		count := w.rowCount - pageStart
 		if count > w.opts.PageRows {
@@ -296,24 +357,59 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int) (parquet.
 		}
 		body, err := newParquetPageBuffer(w.scope, w.bm, w.opts.PageBufferSize)
 		if err != nil {
-			return parquet.ColumnChunk{}, total, err
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 		if err := encodeDefinitionLevels(body, w.rows[col], pageStart, count); err != nil {
 			body.Release()
-			return parquet.ColumnChunk{}, total, err
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 		if err := encodeParquetPlain(body, w.rows[col], w.schema[col].Type, pageStart, count); err != nil {
 			body.Release()
-			return parquet.ColumnChunk{}, total, err
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 		if body.Len() > math.MaxInt32 {
 			body.Release()
-			return parquet.ColumnChunk{}, total, errors.New("export: parquet page exceeds int32 size")
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet page exceeds int32 size")
+		}
+
+		payload := body.Bytes()
+		var compressedBuffer *memory.Buffer
+		if w.opts.Compression == "snappy" {
+			max := snappy.MaxEncodedLen(len(payload))
+			if max < 0 {
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet page exceeds Snappy block limit")
+			}
+			compressedBuffer, err = w.bm.Allocate(w.scope, memory.TagExportBuffer, max)
+			if err != nil {
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
+			payload = snappy.Encode(compressedBuffer.Bytes(), payload)
+		}
+		compressedPageSize := len(payload)
+		if w.opts.Encryption != nil {
+			frameSize, err := parquetEncryptedFrameSize(len(payload))
+			if err != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
+			compressedPageSize = frameSize
+		}
+		if compressedPageSize > math.MaxInt32 {
+			if compressedBuffer != nil {
+				compressedBuffer.Release()
+			}
+			body.Release()
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet compressed page exceeds int32 size")
 		}
 		header, err := parquet.EncodePageHeader(parquet.PageHeader{
 			Type:                 parquet.PageData,
 			UncompressedPageSize: int32(body.Len()),
-			CompressedPageSize:   int32(body.Len()),
+			CompressedPageSize:   int32(compressedPageSize),
 			Data: &parquet.DataPageHeader{
 				NumValues:               int32(count),
 				Encoding:                parquet.EncodingPlain,
@@ -322,19 +418,76 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int) (parquet.
 			},
 		})
 		if err != nil {
+			if compressedBuffer != nil {
+				compressedBuffer.Release()
+			}
 			body.Release()
-			return parquet.ColumnChunk{}, total, err
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
-		if err := w.writeBytes(ctx, header); err != nil {
-			body.Release()
-			return parquet.ColumnChunk{}, total, err
+
+		headerOnDisk := len(header)
+		if w.opts.Encryption != nil {
+			headerFrame, headerBuffer, err := w.encryptManaged(header, parquetModuleDataPageHeader, rowGroupOrdinal, int16(col), pageOrdinal)
+			if err != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
+			headerOnDisk = len(headerFrame)
+			writeErr := w.writeBytes(ctx, headerFrame)
+			headerBuffer.Release()
+			if writeErr != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, writeErr
+			}
+			dataFrame, dataBuffer, err := w.encryptManaged(payload, parquetModuleDataPage, rowGroupOrdinal, int16(col), pageOrdinal)
+			if err != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
+			writeErr = w.writeBytes(ctx, dataFrame)
+			dataBuffer.Release()
+			if writeErr != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, writeErr
+			}
+		} else {
+			if err := w.writeBytes(ctx, header); err != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
+			if err := w.writeBytes(ctx, payload); err != nil {
+				if compressedBuffer != nil {
+					compressedBuffer.Release()
+				}
+				body.Release()
+				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
+			}
 		}
-		if err := w.writeBytes(ctx, body.Bytes()); err != nil {
-			body.Release()
-			return parquet.ColumnChunk{}, total, err
+		totalUncompressed += int64(headerOnDisk + body.Len())
+		totalCompressed += int64(headerOnDisk + compressedPageSize)
+		if compressedBuffer != nil {
+			compressedBuffer.Release()
 		}
-		total += int64(len(header) + body.Len())
 		body.Release()
+		if pageOrdinal == math.MaxInt16 && pageStart+count < w.rowCount {
+			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: Parquet page ordinal exceeds int16")
+		}
+		pageOrdinal++
 	}
 	meta := &parquet.ColumnMetaData{
 		Type:                  physical,
@@ -342,14 +495,33 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int) (parquet.
 		PathInSchema:          []string{w.schema[col].Name},
 		Codec:                 parquet.CodecUncompressed,
 		NumValues:             int64(w.rowCount),
-		TotalUncompressedSize: total,
-		TotalCompressedSize:   total,
+		TotalUncompressedSize: totalUncompressed,
+		TotalCompressedSize:   totalCompressed,
 		DataPageOffset:        start,
 	}
-	return parquet.ColumnChunk{FileOffset: start, MetaData: meta}, total, nil
+	if w.opts.Compression == "snappy" {
+		meta.Codec = parquet.CodecSnappy
+	}
+	return parquet.ColumnChunk{FileOffset: start, MetaData: meta}, totalUncompressed, totalCompressed, nil
 }
 
-// fileMetadata 根据固定 export schema 与已写 row groups 构造 footer metadata。
+func (w *ParquetWriter) encryptManaged(plain []byte, module int8, rowGroup, column, page int16) ([]byte, *memory.Buffer, error) {
+	size, err := parquetEncryptedFrameSize(len(plain))
+	if err != nil {
+		return nil, nil, err
+	}
+	buf, err := w.bm.Allocate(w.scope, memory.TagExportBuffer, size)
+	if err != nil {
+		return nil, nil, err
+	}
+	sealed, err := sealParquetModule(buf.Bytes(), w.opts.Encryption, w.fileAAD[:], module, rowGroup, column, page, plain)
+	if err != nil {
+		buf.Release()
+		return nil, nil, err
+	}
+	return sealed, buf, nil
+}
+
 func (w *ParquetWriter) fileMetadata() (parquet.FileMetaData, error) {
 	rootChildren := int32(len(w.schema))
 	flat := make([]parquet.SchemaElement, 0, len(w.schema)+1)
@@ -361,10 +533,9 @@ func (w *ParquetWriter) fileMetadata() (parquet.FileMetaData, error) {
 		}
 		flat = append(flat, e)
 	}
-	return parquet.FileMetaData{Version: 1, Schema: flat, NumRows: w.totalRows, RowGroups: append([]parquet.RowGroup(nil), w.rowGroups...), CreatedBy: "fssql phase4 controlled parquet writer"}, nil
+	return parquet.FileMetaData{Version: 1, Schema: flat, NumRows: w.totalRows, RowGroups: append([]parquet.RowGroup(nil), w.rowGroups...), CreatedBy: "fssql phase6 controlled parquet writer"}, nil
 }
 
-// writeBytes 完整写入一段字节并更新文件 offset；short write 绝不静默接受。
 func (w *ParquetWriter) writeBytes(ctx context.Context, p []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -380,14 +551,12 @@ func (w *ParquetWriter) writeBytes(ctx context.Context, p []byte) error {
 	return nil
 }
 
-// fail 统一 Abort incomplete file，并释放所有 managed ownership。
 func (w *ParquetWriter) fail(cause error) error {
 	abortErr := w.sink.Abort(context.Background())
 	w.releaseResources()
 	return errors.Join(cause, abortErr)
 }
 
-// releaseRowGroup 释放当前 row-group vectors；STRING heap 等子资源由 Vector 递归释放。
 func (w *ParquetWriter) releaseRowGroup() {
 	for _, v := range w.rows {
 		if v != nil {
@@ -398,7 +567,6 @@ func (w *ParquetWriter) releaseRowGroup() {
 	w.rowCount = 0
 }
 
-// releaseResources 是 writer 的唯一终态资源释放点。
 func (w *ParquetWriter) releaseResources() {
 	w.releaseRowGroup()
 	if w.metadataReservation != nil {
@@ -406,4 +574,14 @@ func (w *ParquetWriter) releaseResources() {
 		w.metadataReservation = nil
 	}
 	w.rowGroups = nil
+	if w.opts.Encryption != nil {
+		zeroBytes(w.opts.Encryption.Key)
+		w.opts.Encryption.Key = nil
+	}
+}
+
+func zeroBytes(value []byte) {
+	for i := range value {
+		value[i] = 0
+	}
 }
