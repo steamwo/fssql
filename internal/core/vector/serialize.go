@@ -9,44 +9,108 @@ import (
 	"github.com/steamwo/fssql/internal/core/types"
 )
 
+const (
+	serializedFlagUnsigned byte = 1 << iota
+	serializedFlagBinary
+	serializedFlagAdjustedUTC
+	serializedFlagUnitNanos
+	serializedFlagUnitMillis
+)
+
+func serializedTypeFlags(t types.LogicalType) byte {
+	var flags byte
+	if t.Unsigned {
+		flags |= serializedFlagUnsigned
+	}
+	if t.Binary {
+		flags |= serializedFlagBinary
+	}
+	if t.Timestamp.AdjustedToUTC {
+		flags |= serializedFlagAdjustedUTC
+	}
+	switch t.Timestamp.Unit {
+	case types.TimestampNanos:
+		flags |= serializedFlagUnitNanos
+	case types.TimestampMillis:
+		flags |= serializedFlagUnitMillis
+	}
+	return flags
+}
+
+func logicalTypeFromSerialized(id types.LogicalTypeID, flags byte, decimal types.DecimalInfo) (types.LogicalType, error) {
+	t := types.LogicalType{ID: id, Decimal: decimal}
+	if flags&serializedFlagUnsigned != 0 {
+		switch id {
+		case types.TinyInt, types.SmallInt, types.Integer, types.BigInt:
+			t.Unsigned = true
+		default:
+			return types.LogicalType{}, fmt.Errorf("serialized unsigned modifier on type %d", id)
+		}
+	}
+	if flags&serializedFlagBinary != 0 {
+		if id != types.Varchar {
+			return types.LogicalType{}, fmt.Errorf("serialized binary modifier on type %d", id)
+		}
+		t.Binary = true
+	}
+	if id == types.TimestampType {
+		t.Timestamp.AdjustedToUTC = flags&serializedFlagAdjustedUTC != 0
+		switch {
+		case flags&serializedFlagUnitNanos != 0 && flags&serializedFlagUnitMillis != 0:
+			return types.LogicalType{}, errors.New("serialized timestamp has conflicting units")
+		case flags&serializedFlagUnitNanos != 0:
+			t.Timestamp.Unit = types.TimestampNanos
+		case flags&serializedFlagUnitMillis != 0:
+			t.Timestamp.Unit = types.TimestampMillis
+		default:
+			t.Timestamp.Unit = types.TimestampMicros
+		}
+	} else if flags&(serializedFlagAdjustedUTC|serializedFlagUnitNanos|serializedFlagUnitMillis) != 0 {
+		return types.LogicalType{}, fmt.Errorf("serialized timestamp modifier on type %d", id)
+	}
+	return t, nil
+}
+
 func serializedChunkSize(c *DataChunk) (int, error) {
+	if c == nil {
+		return 0, errors.New("nil chunk")
+	}
 	size := 4
 	for _, v := range c.Columns {
+		if v == nil {
+			return 0, errors.New("nil vector")
+		}
 		switch v.Type.ID {
-		case types.BigInt, types.HugeInt, types.Varchar, types.Boolean, types.Decimal:
+		case types.Boolean, types.TinyInt, types.SmallInt, types.Integer, types.BigInt,
+			types.HugeInt, types.Float, types.Double, types.Decimal, types.Varchar,
+			types.DateType, types.TimestampType:
 		default:
 			return 0, fmt.Errorf("serialization unsupported type %v", v.Type.ID)
 		}
-		size++
+		size += 2 // logical ID + semantic flags
 		if v.Type.ID == types.Decimal {
 			size += 2
 		}
+		fixed, fixedOK := v.Type.FixedSize()
 		for i := 0; i < c.Cardinality; i++ {
 			size++
 			if !v.IsValid(i) {
 				continue
 			}
-			switch v.Type.ID {
-			case types.BigInt:
-				size += 8
-			case types.HugeInt:
-				size += 16
-			case types.Boolean:
-				size++
-			case types.Varchar:
+			if v.Type.ID == types.Varchar {
 				r, _, _ := v.StringRefAt(i)
 				size += 4 + int(r.Length)
-			case types.Decimal:
-				if v.Type.Physical() == types.PhysicalInt128 {
-					size += 16
-				} else {
-					size += 8
-				}
+				continue
 			}
+			if !fixedOK {
+				return 0, fmt.Errorf("serialization unsupported physical type %v", v.Type.Physical())
+			}
+			size += fixed
 		}
 	}
 	return size, nil
 }
+
 func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager) (*memory.Buffer, error) {
 	n, err := serializedChunkSize(c)
 	if err != nil {
@@ -64,12 +128,14 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 	pos += 2
 	for _, v := range c.Columns {
 		dst[pos] = byte(v.Type.ID)
-		pos++
+		dst[pos+1] = serializedTypeFlags(v.Type)
+		pos += 2
 		if v.Type.ID == types.Decimal {
 			dst[pos] = v.Type.Decimal.Width
 			dst[pos+1] = v.Type.Decimal.Scale
 			pos += 2
 		}
+		fixed, _ := v.Type.FixedSize()
 		for i := 0; i < c.Cardinality; i++ {
 			if !v.IsValid(i) {
 				dst[pos] = 0
@@ -78,50 +144,22 @@ func SerializeChunk(c *DataChunk, scope *memory.Scope, bm *memory.BufferManager)
 			}
 			dst[pos] = 1
 			pos++
-			switch v.Type.ID {
-			case types.BigInt:
-				x, _ := v.Int64(i)
-				binary.LittleEndian.PutUint64(dst[pos:pos+8], uint64(x))
-				pos += 8
-			case types.HugeInt:
-				x, _ := v.Int128(i)
-				binary.LittleEndian.PutUint64(dst[pos:pos+8], x.Lo)
-				binary.LittleEndian.PutUint64(dst[pos+8:pos+16], uint64(x.Hi))
-				pos += 16
-			case types.Boolean:
-				x, _ := v.Bool(i)
-				if x {
-					dst[pos] = 1
-				}
-				pos++
-			case types.Varchar:
-				r, h, _ := v.StringRefAt(i)
-				binary.LittleEndian.PutUint32(dst[pos:pos+4], r.Length)
+			if v.Type.ID == types.Varchar {
+				value, _ := v.Bytes(i)
+				binary.LittleEndian.PutUint32(dst[pos:pos+4], uint32(len(value)))
 				pos += 4
-				var src []byte
-				if r.External {
-					src = h.ExternalBytes(r)
-				} else {
-					src = r.Inline[:r.Length]
-				}
-				copy(dst[pos:pos+len(src)], src)
-				pos += len(src)
-			case types.Decimal:
-				if v.Type.Physical() == types.PhysicalInt128 {
-					x, _ := v.Int128(i)
-					binary.LittleEndian.PutUint64(dst[pos:pos+8], x.Lo)
-					binary.LittleEndian.PutUint64(dst[pos+8:pos+16], uint64(x.Hi))
-					pos += 16
-				} else {
-					x, _ := v.Int64(i)
-					binary.LittleEndian.PutUint64(dst[pos:pos+8], uint64(x))
-					pos += 8
-				}
+				copy(dst[pos:pos+len(value)], value)
+				pos += len(value)
+				continue
 			}
+			idx, base := v.resolve(i)
+			copy(dst[pos:pos+fixed], base.data.Bytes()[idx*fixed:(idx+1)*fixed])
+			pos += fixed
 		}
 	}
 	return out, nil
 }
+
 func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*DataChunk, error) {
 	if len(data) < 4 {
 		return nil, errors.New("short chunk")
@@ -144,25 +182,30 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 		return nil
 	}
 	for ci := 0; ci < cols; ci++ {
-		if err := need(1); err != nil {
+		if err := need(2); err != nil {
 			cleanup()
 			return nil, err
 		}
 		id := types.LogicalTypeID(data[pos])
-		pos++
-		typ := types.LogicalType{ID: id}
+		flags := data[pos+1]
+		pos += 2
+		decimal := types.DecimalInfo{}
 		if id == types.Decimal {
 			if err := need(2); err != nil {
 				cleanup()
 				return nil, err
 			}
-			var err error
-			typ, err = types.NewDecimal(data[pos], data[pos+1])
-			if err != nil {
+			decimal = types.DecimalInfo{Width: data[pos], Scale: data[pos+1]}
+			if _, err := types.NewDecimal(decimal.Width, decimal.Scale); err != nil {
 				cleanup()
 				return nil, err
 			}
 			pos += 2
+		}
+		typ, err := logicalTypeFromSerialized(id, flags, decimal)
+		if err != nil {
+			cleanup()
+			return nil, err
 		}
 		v, err := NewFlat(scope, bm, typ, card)
 		if err != nil {
@@ -170,6 +213,7 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 			return nil, err
 		}
 		vs = append(vs, v)
+		fixed, fixedOK := typ.FixedSize()
 		for i := 0; i < card; i++ {
 			if err := need(1); err != nil {
 				cleanup()
@@ -181,29 +225,11 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 				v.SetNull(i)
 				continue
 			}
-			switch id {
-			case types.BigInt:
-				if err := need(8); err != nil {
-					cleanup()
-					return nil, err
-				}
-				v.SetInt64(i, int64(binary.LittleEndian.Uint64(data[pos:pos+8])))
-				pos += 8
-			case types.HugeInt:
-				if err := need(16); err != nil {
-					cleanup()
-					return nil, err
-				}
-				v.SetInt128(i, types.Int128{Lo: binary.LittleEndian.Uint64(data[pos : pos+8]), Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16]))})
-				pos += 16
-			case types.Boolean:
-				if err := need(1); err != nil {
-					cleanup()
-					return nil, err
-				}
-				v.SetBool(i, data[pos] != 0)
-				pos++
-			case types.Varchar:
+			if valid != 1 {
+				cleanup()
+				return nil, errors.New("invalid serialized validity byte")
+			}
+			if typ.ID == types.Varchar {
 				if err := need(4); err != nil {
 					cleanup()
 					return nil, err
@@ -219,26 +245,19 @@ func DeserializeChunk(data []byte, scope *memory.Scope, bm *memory.BufferManager
 					return nil, err
 				}
 				pos += n
-			case types.Decimal:
-				if typ.Physical() == types.PhysicalInt128 {
-					if err := need(16); err != nil {
-						cleanup()
-						return nil, err
-					}
-					v.SetInt128(i, types.Int128{Lo: binary.LittleEndian.Uint64(data[pos : pos+8]), Hi: int64(binary.LittleEndian.Uint64(data[pos+8 : pos+16]))})
-					pos += 16
-				} else {
-					if err := need(8); err != nil {
-						cleanup()
-						return nil, err
-					}
-					v.SetInt64(i, int64(binary.LittleEndian.Uint64(data[pos:pos+8])))
-					pos += 8
-				}
-			default:
+				continue
+			}
+			if !fixedOK {
 				cleanup()
 				return nil, fmt.Errorf("unsupported type %d", id)
 			}
+			if err := need(fixed); err != nil {
+				cleanup()
+				return nil, err
+			}
+			copy(v.data.Bytes()[i*fixed:(i+1)*fixed], data[pos:pos+fixed])
+			v.SetValid(i)
+			pos += fixed
 		}
 	}
 	if pos != len(data) {

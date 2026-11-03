@@ -185,34 +185,42 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 		if s.off+4 > len(s.data) {
 			return errors.New("parquet: int32 stream exhausted")
 		}
-		v := int32(binary.LittleEndian.Uint32(s.data[s.off : s.off+4]))
+		raw := binary.LittleEndian.Uint32(s.data[s.off : s.off+4])
 		s.off += 4
 		if dst.Type.ID == coretypes.Decimal {
-			return setDecimalFromInt64(dst, row, int64(v), 9)
+			return setDecimalFromInt64(dst, row, int64(int32(raw)), 9)
 		}
-		dst.SetInt32(row, v)
-		return nil
+		return setInt32Logical(dst, row, raw)
 	case TypeInt64:
 		if s.off+8 > len(s.data) {
 			return errors.New("parquet: int64 stream exhausted")
 		}
-		v := int64(binary.LittleEndian.Uint64(s.data[s.off : s.off+8]))
+		raw := binary.LittleEndian.Uint64(s.data[s.off : s.off+8])
 		s.off += 8
 		if dst.Type.ID == coretypes.Decimal {
-			return setDecimalFromInt64(dst, row, v, 18)
+			return setDecimalFromInt64(dst, row, int64(raw), 18)
 		}
-		if s.leaf != nil {
+		if dst.Type.IsUnsignedInteger() {
+			dst.SetUint64(row, raw)
+			return nil
+		}
+		v := int64(raw)
+		if dst.Type.ID == coretypes.TimestampType && s.leaf != nil {
 			e := s.leaf.Element
 			if e.Logical != nil && e.Logical.Kind == LogicalTimestamp && e.Logical.Timestamp != nil {
-				switch e.Logical.Timestamp.Unit {
-				case UnitMillis:
+				sourceUnit := e.Logical.Timestamp.Unit
+				switch {
+				case sourceUnit == UnitMillis && dst.Type.Timestamp.Unit == coretypes.TimestampMicros:
 					var err error
 					v, err = checkedMul1000(v)
 					if err != nil {
 						return err
 					}
-				case UnitNanos:
-					v /= 1000
+				case sourceUnit == UnitNanos && dst.Type.Timestamp.Unit == coretypes.TimestampNanos:
+					// Preserve nanoseconds exactly; no implicit /1000 conversion.
+				case sourceUnit == UnitMicros && dst.Type.Timestamp.Unit == coretypes.TimestampMicros:
+				default:
+					return errors.New("parquet: timestamp source/destination unit mismatch")
 				}
 			} else if e.Converted != nil && *e.Converted == ConvertedTimestampMillis {
 				var err error
@@ -281,6 +289,46 @@ func (s *valueStream) NextInto(dst *vector.Vector, row int) error {
 	default:
 		return fmt.Errorf("parquet: physical value stream %d not implemented", s.physical)
 	}
+}
+
+func setInt32Logical(dst *vector.Vector, row int, raw uint32) error {
+	if dst.Type.IsUnsignedInteger() {
+		switch dst.Type.ID {
+		case coretypes.TinyInt:
+			if raw > math.MaxUint8 {
+				return errors.New("parquet: UTINYINT value out of range")
+			}
+			dst.SetUint8(row, uint8(raw))
+		case coretypes.SmallInt:
+			if raw > math.MaxUint16 {
+				return errors.New("parquet: USMALLINT value out of range")
+			}
+			dst.SetUint16(row, uint16(raw))
+		case coretypes.Integer:
+			dst.SetUint32(row, raw)
+		default:
+			return errors.New("parquet: unsigned INT32 logical type mismatch")
+		}
+		return nil
+	}
+	v := int32(raw)
+	switch dst.Type.ID {
+	case coretypes.TinyInt:
+		if v < math.MinInt8 || v > math.MaxInt8 {
+			return errors.New("parquet: TINYINT value out of range")
+		}
+		dst.SetInt8(row, int8(v))
+	case coretypes.SmallInt:
+		if v < math.MinInt16 || v > math.MaxInt16 {
+			return errors.New("parquet: SMALLINT value out of range")
+		}
+		dst.SetInt16(row, int16(v))
+	case coretypes.Integer, coretypes.DateType:
+		dst.SetInt32(row, v)
+	default:
+		return errors.New("parquet: INT32 logical type mismatch")
+	}
+	return nil
 }
 
 type uint128Magnitude struct {
@@ -471,7 +519,6 @@ func (s *dictionaryIndexStream) Read(dst []uint32) error {
 }
 
 // Read up to 32 packed bits using byte/word loads instead of a per-bit loop.
-// Callers validate the packed-run length before entering this hot path.
 func packedWord(data []byte, bitPosition, width int) uint32 {
 	if width == 0 {
 		return 0

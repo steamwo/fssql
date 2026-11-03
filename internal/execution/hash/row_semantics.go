@@ -19,6 +19,18 @@ const (
 )
 
 func hashEncoded(col ColumnLayout, data []byte) (uint64, error) {
+	if col.Type.IsUnsignedInteger() {
+		switch col.Type.ID {
+		case types.TinyInt:
+			return semantics.HashUint64(uint64(data[0])), nil
+		case types.SmallInt:
+			return semantics.HashUint64(uint64(binary.LittleEndian.Uint16(data))), nil
+		case types.Integer:
+			return semantics.HashUint64(uint64(binary.LittleEndian.Uint32(data))), nil
+		case types.BigInt:
+			return semantics.HashUint64(binary.LittleEndian.Uint64(data)), nil
+		}
+	}
 	switch col.Type.ID {
 	case types.Boolean:
 		return semantics.HashBool(data[0] != 0), nil
@@ -133,6 +145,19 @@ func (l RowLayout) MaterializeRow(row []byte, dst []*vector.Vector, dstRow int) 
 			dst[i].SetNull(dstRow)
 			continue
 		}
+		if col.Type.IsUnsignedInteger() {
+			switch col.Type.ID {
+			case types.TinyInt:
+				dst[i].SetUint8(dstRow, data[0])
+			case types.SmallInt:
+				dst[i].SetUint16(dstRow, binary.LittleEndian.Uint16(data))
+			case types.Integer:
+				dst[i].SetUint32(dstRow, binary.LittleEndian.Uint32(data))
+			case types.BigInt:
+				dst[i].SetUint64(dstRow, binary.LittleEndian.Uint64(data))
+			}
+			continue
+		}
 		switch col.Type.ID {
 		case types.Boolean:
 			dst[i].SetBool(dstRow, data[0] != 0)
@@ -189,7 +214,7 @@ func EqualProjectedRows(aLayout RowLayout, a []byte, aColumns []int, bLayout Row
 		if ac < 0 || ac >= len(aLayout.Columns) || bc < 0 || bc >= len(bLayout.Columns) {
 			return false, errors.New("projected row key index out of range")
 		}
-		if aLayout.Columns[ac].Type.ID != bLayout.Columns[bc].Type.ID || aLayout.Columns[ac].Type.Decimal != bLayout.Columns[bc].Type.Decimal {
+		if !aLayout.Columns[ac].Type.Same(bLayout.Columns[bc].Type) {
 			return false, errors.New("projected row key type mismatch")
 		}
 		ad, av, err := aLayout.ColumnData(a, ac)

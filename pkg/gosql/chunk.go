@@ -33,7 +33,6 @@ type Int128 struct {
 }
 
 func (v Int128) String() string {
-	// Reconstruct signed two's-complement as a big.Int at the external API edge.
 	unsigned := new(big.Int).SetUint64(uint64(v.Hi))
 	unsigned.Lsh(unsigned, 64)
 	unsigned.Or(unsigned, new(big.Int).SetUint64(v.Lo))
@@ -74,13 +73,15 @@ func (c *Chunk) IsNull(row, column int) (bool, error) {
 	return !v.IsValid(row), nil
 }
 
-// Int64 returns exact values for integer/date/timestamp and narrow DECIMAL
-// physical representations. The caller uses Type() to interpret DATE,
-// TIMESTAMP and DECIMAL scale.
+// Int64 returns exact values for signed integer/date/timestamp and narrow
+// DECIMAL representations. Unsigned integers must use Uint64.
 func (c *Chunk) Int64(row, column int) (int64, bool, error) {
 	v, err := c.cell(row, column)
 	if err != nil {
 		return 0, false, err
+	}
+	if v.Type.IsUnsignedInteger() {
+		return 0, false, fmt.Errorf("gosql: column %d type %s requires Uint64", column, logicalTypeNameOf(v.Type))
 	}
 	switch v.Type.ID {
 	case types.TinyInt:
@@ -102,7 +103,33 @@ func (c *Chunk) Int64(row, column int) (int64, bool, error) {
 		}
 		return 0, false, fmt.Errorf("gosql: DECIMAL(%d,%d) requires Int128", v.Type.Decimal.Width, v.Type.Decimal.Scale)
 	default:
-		return 0, false, fmt.Errorf("gosql: column %d type %s is not Int64-compatible", column, logicalTypeName(v.Type.ID))
+		return 0, false, fmt.Errorf("gosql: column %d type %s is not Int64-compatible", column, logicalTypeNameOf(v.Type))
+	}
+}
+
+// Uint64 returns exact values for UTINYINT, USMALLINT, UINTEGER and UBIGINT.
+func (c *Chunk) Uint64(row, column int) (uint64, bool, error) {
+	v, err := c.cell(row, column)
+	if err != nil {
+		return 0, false, err
+	}
+	if !v.Type.IsUnsignedInteger() {
+		return 0, false, fmt.Errorf("gosql: column %d type %s is not unsigned", column, logicalTypeNameOf(v.Type))
+	}
+	switch v.Type.ID {
+	case types.TinyInt:
+		x, ok := v.Uint8(row)
+		return uint64(x), ok, nil
+	case types.SmallInt:
+		x, ok := v.Uint16(row)
+		return uint64(x), ok, nil
+	case types.Integer:
+		x, ok := v.Uint32(row)
+		return uint64(x), ok, nil
+	case types.BigInt:
+		return v.Uint64(row)
+	default:
+		return 0, false, fmt.Errorf("gosql: column %d type %s is not unsigned", column, logicalTypeNameOf(v.Type))
 	}
 }
 
@@ -119,7 +146,7 @@ func (c *Chunk) Float64(row, column int) (float64, bool, error) {
 		x, ok := v.Float64(row)
 		return x, ok, nil
 	default:
-		return 0, false, fmt.Errorf("gosql: column %d type %s is not floating-point", column, logicalTypeName(v.Type.ID))
+		return 0, false, fmt.Errorf("gosql: column %d type %s is not floating-point", column, logicalTypeNameOf(v.Type))
 	}
 }
 
@@ -129,7 +156,7 @@ func (c *Chunk) Bool(row, column int) (bool, bool, error) {
 		return false, false, err
 	}
 	if v.Type.ID != types.Boolean {
-		return false, false, fmt.Errorf("gosql: column %d type %s is not BOOLEAN", column, logicalTypeName(v.Type.ID))
+		return false, false, fmt.Errorf("gosql: column %d type %s is not BOOLEAN", column, logicalTypeNameOf(v.Type))
 	}
 	x, ok := v.Bool(row)
 	return x, ok, nil
@@ -140,11 +167,28 @@ func (c *Chunk) String(row, column int) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	if v.Type.ID != types.Varchar {
-		return "", false, fmt.Errorf("gosql: column %d type %s is not VARCHAR", column, logicalTypeName(v.Type.ID))
+	if v.Type.ID != types.Varchar || v.Type.Binary {
+		return "", false, fmt.Errorf("gosql: column %d type %s is not VARCHAR", column, logicalTypeNameOf(v.Type))
 	}
 	x, ok := v.String(row)
 	return x, ok, nil
+}
+
+// Bytes returns a copy of a BLOB value, so callers may retain it after the
+// borrowed Chunk callback returns.
+func (c *Chunk) Bytes(row, column int) ([]byte, bool, error) {
+	v, err := c.cell(row, column)
+	if err != nil {
+		return nil, false, err
+	}
+	if !v.Type.IsBlob() {
+		return nil, false, fmt.Errorf("gosql: column %d type %s is not BLOB", column, logicalTypeNameOf(v.Type))
+	}
+	x, ok := v.Bytes(row)
+	if !ok {
+		return nil, false, nil
+	}
+	return append([]byte(nil), x...), true, nil
 }
 
 func (c *Chunk) Int128(row, column int) (Int128, bool, error) {
@@ -153,7 +197,7 @@ func (c *Chunk) Int128(row, column int) (Int128, bool, error) {
 		return Int128{}, false, err
 	}
 	if v.Type.ID != types.HugeInt && !(v.Type.ID == types.Decimal && v.Type.Decimal.Width > 18) {
-		return Int128{}, false, fmt.Errorf("gosql: column %d type %s is not Int128-compatible", column, logicalTypeName(v.Type.ID))
+		return Int128{}, false, fmt.Errorf("gosql: column %d type %s is not Int128-compatible", column, logicalTypeNameOf(v.Type))
 	}
 	x, ok := v.Int128(row)
 	return Int128{Lo: x.Lo, Hi: x.Hi}, ok, nil
@@ -180,7 +224,7 @@ func (c *Chunk) cell(row, column int) (*vector.Vector, error) {
 }
 
 func publicType(t types.LogicalType) Type {
-	out := Type{ID: logicalTypeName(t.ID), Width: t.Decimal.Width, Scale: t.Decimal.Scale}
+	out := Type{ID: logicalTypeNameOf(t), Width: t.Decimal.Width, Scale: t.Decimal.Scale}
 	if t.Child != nil {
 		child := publicType(*t.Child)
 		out.Child = &child
@@ -192,6 +236,33 @@ func publicType(t types.LogicalType) Type {
 		}
 	}
 	return out
+}
+
+func logicalTypeNameOf(t types.LogicalType) string {
+	if t.IsUnsignedInteger() {
+		switch t.ID {
+		case types.TinyInt:
+			return "UTINYINT"
+		case types.SmallInt:
+			return "USMALLINT"
+		case types.Integer:
+			return "UINTEGER"
+		case types.BigInt:
+			return "UBIGINT"
+		}
+	}
+	if t.IsBlob() {
+		return "BLOB"
+	}
+	if t.ID == types.TimestampType {
+		if t.Timestamp.AdjustedToUTC {
+			return "TIMESTAMPTZ"
+		}
+		if t.Timestamp.Unit == types.TimestampNanos {
+			return "TIMESTAMP_NS"
+		}
+	}
+	return logicalTypeName(t.ID)
 }
 
 func logicalTypeName(id types.LogicalTypeID) string {

@@ -11,15 +11,11 @@ import (
 	"github.com/steamwo/fssql/internal/core/vector"
 )
 
-// parquetPageBuffer 是单页生命周期的可增长 Managed Buffer；增长始终先经 Reservation.Resize。
 type parquetPageBuffer struct {
-	// buffer 是 page payload 的 Managed Buffer。
 	buffer *memory.Buffer
-	// used 是已经写入的 payload 字节数。
-	used int
+	used   int
 }
 
-// newParquetPageBuffer 创建 page payload buffer。
 func newParquetPageBuffer(scope *memory.Scope, bm *memory.BufferManager, initial int) (*parquetPageBuffer, error) {
 	if initial < 1 {
 		initial = defaultParquetPageBuffer
@@ -30,14 +26,8 @@ func newParquetPageBuffer(scope *memory.Scope, bm *memory.BufferManager, initial
 	}
 	return &parquetPageBuffer{buffer: buf}, nil
 }
-
-// Len 返回当前有效 payload 长度。
-func (b *parquetPageBuffer) Len() int { return b.used }
-
-// Bytes 返回当前有效 payload 视图；只在 buffer 未释放时使用。
+func (b *parquetPageBuffer) Len() int      { return b.used }
 func (b *parquetPageBuffer) Bytes() []byte { return b.buffer.Bytes()[:b.used] }
-
-// Reserve 先扩 Managed reservation/backing buffer，随后调用者才写新数据。
 func (b *parquetPageBuffer) Reserve(extra int) error {
 	if extra < 0 || extra > math.MaxInt-b.used {
 		return errors.New("export: parquet page buffer size overflow")
@@ -52,8 +42,6 @@ func (b *parquetPageBuffer) Reserve(extra int) error {
 	}
 	return b.buffer.Resize(cap, nil)
 }
-
-// Append 追加字节到受管 page buffer。
 func (b *parquetPageBuffer) Append(p []byte) error {
 	if err := b.Reserve(len(p)); err != nil {
 		return err
@@ -62,8 +50,6 @@ func (b *parquetPageBuffer) Append(p []byte) error {
 	b.used += len(p)
 	return nil
 }
-
-// AppendByte 追加一个字节。
 func (b *parquetPageBuffer) AppendByte(v byte) error {
 	if err := b.Reserve(1); err != nil {
 		return err
@@ -72,15 +58,11 @@ func (b *parquetPageBuffer) AppendByte(v byte) error {
 	b.used++
 	return nil
 }
-
-// AppendUvarint 追加 unsigned varint，供 definition-level RLE run 使用。
 func (b *parquetPageBuffer) AppendUvarint(v uint64) error {
 	var scratch [10]byte
 	n := binary.PutUvarint(scratch[:], v)
 	return b.Append(scratch[:n])
 }
-
-// Release 释放当前 page payload ownership。
 func (b *parquetPageBuffer) Release() {
 	if b != nil && b.buffer != nil {
 		b.buffer.Release()
@@ -89,7 +71,6 @@ func (b *parquetPageBuffer) Release() {
 	}
 }
 
-// encodeDefinitionLevels 写 DataPage v1 的 4-byte length + RLE hybrid definition levels。
 func encodeDefinitionLevels(out *parquetPageBuffer, vec *vector.Vector, start, count int) error {
 	prefixPos := out.used
 	if err := out.Append([]byte{0, 0, 0, 0}); err != nil {
@@ -124,7 +105,6 @@ func encodeDefinitionLevels(out *parquetPageBuffer, vec *vector.Vector, start, c
 	return nil
 }
 
-// encodeParquetPlain 按 parquet-format PLAIN 规则写当前 page 的非 NULL values。
 func encodeParquetPlain(out *parquetPageBuffer, vec *vector.Vector, typ coretypes.LogicalType, start, count int) error {
 	if typ.ID == coretypes.Boolean {
 		var packed byte
@@ -155,70 +135,71 @@ func encodeParquetPlain(out *parquetPageBuffer, vec *vector.Vector, typ coretype
 		if !vec.IsValid(row) {
 			continue
 		}
+		if typ.IsUnsignedInteger() {
+			switch typ.ID {
+			case coretypes.TinyInt:
+				v, _ := vec.Uint8(row)
+				binary.LittleEndian.PutUint32(scratch[:4], uint32(v))
+				if err := out.Append(scratch[:4]); err != nil { return err }
+			case coretypes.SmallInt:
+				v, _ := vec.Uint16(row)
+				binary.LittleEndian.PutUint32(scratch[:4], uint32(v))
+				if err := out.Append(scratch[:4]); err != nil { return err }
+			case coretypes.Integer:
+				v, _ := vec.Uint32(row)
+				binary.LittleEndian.PutUint32(scratch[:4], v)
+				if err := out.Append(scratch[:4]); err != nil { return err }
+			case coretypes.BigInt:
+				v, _ := vec.Uint64(row)
+				binary.LittleEndian.PutUint64(scratch[:8], v)
+				if err := out.Append(scratch[:8]); err != nil { return err }
+			}
+			continue
+		}
 		switch typ.ID {
 		case coretypes.TinyInt:
 			v, _ := vec.Int8(row)
 			binary.LittleEndian.PutUint32(scratch[:4], uint32(int32(v)))
-			if err := out.Append(scratch[:4]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:4]); err != nil { return err }
 		case coretypes.SmallInt:
 			v, _ := vec.Int16(row)
 			binary.LittleEndian.PutUint32(scratch[:4], uint32(int32(v)))
-			if err := out.Append(scratch[:4]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:4]); err != nil { return err }
 		case coretypes.Integer, coretypes.DateType:
 			v, _ := vec.Int32(row)
 			binary.LittleEndian.PutUint32(scratch[:4], uint32(v))
-			if err := out.Append(scratch[:4]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:4]); err != nil { return err }
 		case coretypes.BigInt, coretypes.TimestampType:
 			v, _ := vec.Int64(row)
 			binary.LittleEndian.PutUint64(scratch[:8], uint64(v))
-			if err := out.Append(scratch[:8]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:8]); err != nil { return err }
 		case coretypes.Float:
 			v, _ := vec.Float32(row)
 			binary.LittleEndian.PutUint32(scratch[:4], math.Float32bits(v))
-			if err := out.Append(scratch[:4]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:4]); err != nil { return err }
 		case coretypes.Double:
 			v, _ := vec.Float64(row)
 			binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(v))
-			if err := out.Append(scratch[:8]); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:8]); err != nil { return err }
 		case coretypes.Decimal:
 			if typ.Decimal.Width <= 18 {
 				v, _ := vec.Int64(row)
 				binary.LittleEndian.PutUint64(scratch[:8], uint64(v))
-				if err := out.Append(scratch[:8]); err != nil {
-					return err
-				}
+				if err := out.Append(scratch[:8]); err != nil { return err }
 			} else {
 				v, _ := vec.Int128(row)
 				binary.BigEndian.PutUint64(scratch[:8], uint64(v.Hi))
 				binary.BigEndian.PutUint64(scratch[8:16], v.Lo)
-				if err := out.Append(scratch[:16]); err != nil {
-					return err
-				}
+				if err := out.Append(scratch[:16]); err != nil { return err }
 			}
 		case coretypes.Varchar:
-			v, _ := vec.String(row)
+			v, _ := vec.Bytes(row)
 			if uint64(len(v)) > math.MaxUint32 {
-				return errors.New("export: parquet string exceeds uint32")
+				return errors.New("export: parquet byte array exceeds uint32")
 			}
 			binary.LittleEndian.PutUint32(scratch[:4], uint32(len(v)))
-			if err := out.Append(scratch[:4]); err != nil {
-				return err
-			}
-			if err := out.Append([]byte(v)); err != nil {
-				return err
-			}
+			if err := out.Append(scratch[:4]); err != nil { return err }
+			if err := out.Append(v); err != nil { return err }
 		default:
 			return fmt.Errorf("export: unsupported parquet plain type %d", typ.ID)
 		}

@@ -12,11 +12,28 @@ func CopyValue(src *Vector, srcRow int, dst *Vector, dstRow int) error {
 	if src == nil || dst == nil {
 		return errors.New("nil vector")
 	}
-	if src.Type.ID != dst.Type.ID || src.Type.Decimal != dst.Type.Decimal {
+	if !src.Type.Same(dst.Type) {
 		return errors.New("vector type mismatch")
 	}
 	if !src.IsValid(srcRow) {
 		dst.SetNull(dstRow)
+		return nil
+	}
+	if src.Type.IsUnsignedInteger() {
+		switch src.Type.ID {
+		case types.TinyInt:
+			x, _ := src.Uint8(srcRow)
+			dst.SetUint8(dstRow, x)
+		case types.SmallInt:
+			x, _ := src.Uint16(srcRow)
+			dst.SetUint16(dstRow, x)
+		case types.Integer:
+			x, _ := src.Uint32(srcRow)
+			dst.SetUint32(dstRow, x)
+		case types.BigInt:
+			x, _ := src.Uint64(srcRow)
+			dst.SetUint64(dstRow, x)
+		}
 		return nil
 	}
 	switch src.Type.ID {
@@ -53,11 +70,8 @@ func CopyValue(src *Vector, srcRow int, dst *Vector, dstRow int) error {
 			dst.SetInt128(dstRow, x)
 		}
 	case types.Varchar:
-		r, h, _ := src.StringRefAt(srcRow)
-		if r.External {
-			return dst.SetStringBytes(dstRow, h.ExternalBytes(r))
-		}
-		return dst.SetStringBytes(dstRow, r.Inline[:r.Length])
+		value, _ := src.Bytes(srcRow)
+		return dst.SetStringBytes(dstRow, value)
 	default:
 		return errors.New("copy unsupported vector type")
 	}

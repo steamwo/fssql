@@ -61,6 +61,22 @@ func compareInputRow(layout exechash.RowLayout, keys []Key, chunk *vector.DataCh
 }
 
 func compareInputValue(v *vector.Vector, row int, data []byte) (int, error) {
+	if v.Type.IsUnsignedInteger() {
+		switch v.Type.ID {
+		case types.TinyInt:
+			x, _ := v.Uint8(row)
+			return semantics.CompareUint64(uint64(x), uint64(data[0])), nil
+		case types.SmallInt:
+			x, _ := v.Uint16(row)
+			return semantics.CompareUint64(uint64(x), uint64(binary.LittleEndian.Uint16(data))), nil
+		case types.Integer:
+			x, _ := v.Uint32(row)
+			return semantics.CompareUint64(uint64(x), uint64(binary.LittleEndian.Uint32(data))), nil
+		case types.BigInt:
+			x, _ := v.Uint64(row)
+			return semantics.CompareUint64(x, binary.LittleEndian.Uint64(data)), nil
+		}
+	}
 	switch v.Type.ID {
 	case types.Varchar:
 		r, h, _ := v.StringRefAt(row)

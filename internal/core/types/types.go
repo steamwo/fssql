@@ -40,6 +40,19 @@ const (
 	PhysicalStruct
 )
 
+type TimestampUnit uint8
+
+const (
+	TimestampMicros TimestampUnit = iota
+	TimestampNanos
+	TimestampMillis
+)
+
+type TimestampInfo struct {
+	Unit          TimestampUnit
+	AdjustedToUTC bool
+}
+
 type DecimalInfo struct {
 	Width uint8
 	Scale uint8
@@ -49,10 +62,13 @@ type StructField struct {
 	Type LogicalType
 }
 type LogicalType struct {
-	ID      LogicalTypeID
-	Decimal DecimalInfo
-	Child   *LogicalType
-	Fields  []StructField
+	ID        LogicalTypeID
+	Decimal   DecimalInfo
+	Child     *LogicalType
+	Fields    []StructField
+	Unsigned  bool
+	Binary    bool
+	Timestamp TimestampInfo
 }
 
 func NewDecimal(width, scale uint8) (LogicalType, error) {
@@ -65,6 +81,70 @@ func NewList(child LogicalType) LogicalType { c := child; return LogicalType{ID:
 func NewStruct(fields ...StructField) LogicalType {
 	return LogicalType{ID: Struct, Fields: append([]StructField(nil), fields...)}
 }
+
+func NewUnsigned(id LogicalTypeID) (LogicalType, error) {
+	switch id {
+	case TinyInt, SmallInt, Integer, BigInt:
+		return LogicalType{ID: id, Unsigned: true}, nil
+	default:
+		return LogicalType{}, fmt.Errorf("unsigned modifier is invalid for logical type %d", id)
+	}
+}
+
+func UTinyIntType() LogicalType  { return LogicalType{ID: TinyInt, Unsigned: true} }
+func USmallIntType() LogicalType { return LogicalType{ID: SmallInt, Unsigned: true} }
+func UIntegerType() LogicalType  { return LogicalType{ID: Integer, Unsigned: true} }
+func UBigIntType() LogicalType   { return LogicalType{ID: BigInt, Unsigned: true} }
+func BlobType() LogicalType      { return LogicalType{ID: Varchar, Binary: true} }
+func TimestampNSType() LogicalType {
+	return LogicalType{ID: TimestampType, Timestamp: TimestampInfo{Unit: TimestampNanos}}
+}
+func TimestampTZType() LogicalType {
+	return LogicalType{ID: TimestampType, Timestamp: TimestampInfo{Unit: TimestampMicros, AdjustedToUTC: true}}
+}
+func NewTimestamp(unit TimestampUnit, adjustedToUTC bool) (LogicalType, error) {
+	if unit > TimestampMillis {
+		return LogicalType{}, fmt.Errorf("invalid timestamp unit %d", unit)
+	}
+	return LogicalType{ID: TimestampType, Timestamp: TimestampInfo{Unit: unit, AdjustedToUTC: adjustedToUTC}}, nil
+}
+
+func (t LogicalType) IsUnsignedInteger() bool {
+	if !t.Unsigned {
+		return false
+	}
+	switch t.ID {
+	case TinyInt, SmallInt, Integer, BigInt:
+		return true
+	default:
+		return false
+	}
+}
+func (t LogicalType) IsBlob() bool { return t.ID == Varchar && t.Binary }
+func (t LogicalType) IsTimestampNS() bool {
+	return t.ID == TimestampType && t.Timestamp.Unit == TimestampNanos
+}
+func (t LogicalType) IsTimestampTZ() bool {
+	return t.ID == TimestampType && t.Timestamp.AdjustedToUTC
+}
+func (t LogicalType) Same(other LogicalType) bool {
+	if t.ID != other.ID || t.Decimal != other.Decimal || t.Unsigned != other.Unsigned || t.Binary != other.Binary || t.Timestamp != other.Timestamp {
+		return false
+	}
+	if (t.Child == nil) != (other.Child == nil) || len(t.Fields) != len(other.Fields) {
+		return false
+	}
+	if t.Child != nil && !t.Child.Same(*other.Child) {
+		return false
+	}
+	for i := range t.Fields {
+		if t.Fields[i].Name != other.Fields[i].Name || !t.Fields[i].Type.Same(other.Fields[i].Type) {
+			return false
+		}
+	}
+	return true
+}
+
 func (t LogicalType) Physical() PhysicalType {
 	switch t.ID {
 	case Boolean:
@@ -124,6 +204,8 @@ func (t LogicalType) IsNumeric() bool {
 
 type Date int32
 type Timestamp int64
+type TimestampNS int64
+type TimestampTZ int64
 type Decimal64 int64
 type TypeOperations struct{}
 

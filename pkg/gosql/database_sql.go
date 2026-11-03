@@ -269,6 +269,27 @@ func sqlDriverValue(v *vector.Vector, row int) (driver.Value, error) {
 	if !v.IsValid(row) {
 		return nil, nil
 	}
+	if v.Type.IsUnsignedInteger() {
+		switch v.Type.ID {
+		case types.TinyInt:
+			x, _ := v.Uint8(row)
+			return int64(x), nil
+		case types.SmallInt:
+			x, _ := v.Uint16(row)
+			return int64(x), nil
+		case types.Integer:
+			x, _ := v.Uint32(row)
+			return int64(x), nil
+		case types.BigInt:
+			x, _ := v.Uint64(row)
+			// database/sql has no uint64 driver.Value. Preserve UBIGINT exactly.
+			return strconv.FormatUint(x, 10), nil
+		}
+	}
+	if v.Type.IsBlob() {
+		x, _ := v.Bytes(row)
+		return append([]byte(nil), x...), nil
+	}
 	switch v.Type.ID {
 	case types.Boolean:
 		x, _ := v.Bool(row)
@@ -298,10 +319,17 @@ func sqlDriverValue(v *vector.Vector, row int) (driver.Value, error) {
 		days, _ := v.Int32(row)
 		return time.Unix(int64(days)*86400, 0).UTC(), nil
 	case types.TimestampType:
-		micros, _ := v.Int64(row)
-		seconds := micros / 1_000_000
-		nanos := (micros % 1_000_000) * 1_000
-		return time.Unix(seconds, nanos).UTC(), nil
+		raw, _ := v.Int64(row)
+		switch v.Type.Timestamp.Unit {
+		case types.TimestampNanos:
+			seconds := raw / 1_000_000_000
+			nanos := raw % 1_000_000_000
+			return time.Unix(seconds, nanos).UTC(), nil
+		case types.TimestampMillis:
+			return time.UnixMilli(raw).UTC(), nil
+		default:
+			return time.UnixMicro(raw).UTC(), nil
+		}
 	case types.Decimal:
 		if v.Type.Decimal.Width <= 18 {
 			raw, _ := v.Int64(row)
@@ -313,9 +341,9 @@ func sqlDriverValue(v *vector.Vector, row int) (driver.Value, error) {
 		raw, _ := v.Int128(row)
 		return (Int128{Lo: raw.Lo, Hi: raw.Hi}).String(), nil
 	case types.List, types.Struct:
-		return nil, fmt.Errorf("gosql: database/sql does not expose %s values; use QueryChunks", logicalTypeName(v.Type.ID))
+		return nil, fmt.Errorf("gosql: database/sql does not expose %s values; use QueryChunks", logicalTypeNameOf(v.Type))
 	default:
-		return nil, fmt.Errorf("gosql: unsupported database/sql type %s", logicalTypeName(v.Type.ID))
+		return nil, fmt.Errorf("gosql: unsupported database/sql type %s", logicalTypeNameOf(v.Type))
 	}
 }
 
