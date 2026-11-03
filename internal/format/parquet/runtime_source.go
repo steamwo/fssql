@@ -36,25 +36,36 @@ type runtimePreparedFile struct {
 	newScanner func(RowGroup) (runtimeRowGroupScanner, error)
 }
 
-// RuntimeSource 串行管理一个 frozen ScanSet 中的多文件、多 row-group Parquet reader。
-// Next 受互斥锁保护，因此 Push Pipeline 多 worker 不会重复消费同一个 row group。
-type RuntimeSource struct {
-	mu          sync.Mutex             // mu 保护 file/row-group/scanner 游标与 Close。
-	files       []fileset.FileSnapshot // files 来自 runtime Bind 后再次验证过 fingerprint 的 immutable ScanSet。
-	prepareFile runtimePrepareFileFunc // prepareFile 只在真正访问文件时执行，避免偷跑 Experimental 全文件预验证。
-	fileIndex   int                    // fileIndex 是当前文件序号。
-	rowGroup    int                    // rowGroup 是当前文件下一 row group 序号。
-	prepared    *runtimePreparedFile   // prepared 是当前文件已加载 metadata。
-	scanner     runtimeRowGroupScanner // scanner 是当前 row group 的唯一 reader owner。
-	terminalErr error                  // terminalErr 记录不可恢复 reader/schema 错误，防止直接调用者重试同一损坏状态。
-	closed      bool                   // closed 防止终态后继续读取。
+// runtimeScanTask owns exactly one row-group scanner while it is either ready
+// or claimed by one Next call. A scanner is never used by two workers at once.
+type runtimeScanTask struct {
+	scanner runtimeRowGroupScanner
+}
 
-	outputTypes       []types.LogicalType // outputTypes 保持 Binder relation 的完整列布局。
-	projectionIndexes []int               // projectionIndexes 是 scanner 窄列输出到完整 relation 布局的映射；nil 表示完整扫描。
-	scope             *memory.Scope       // scope/buffers 只用于为未读取列构造廉价 NULL placeholder，供 residual ColumnIndex 保持稳定。
+// RuntimeSource coordinates a frozen ScanSet while allowing independent
+// row-group scanners to perform I/O/decode concurrently. The mutex protects
+// only cursor/task ownership; scanner.Next always runs outside it.
+type RuntimeSource struct {
+	mu          sync.Mutex             // mu protects file/row-group cursors, ready tasks, terminal state and Close.
+	files       []fileset.FileSnapshot // files come from the runtime-verified immutable ScanSet.
+	prepareFile runtimePrepareFileFunc // prepareFile remains lazy to avoid Experimental full-file validation.
+	fileIndex   int                    // fileIndex is the next file whose row groups may be claimed.
+	rowGroup    int                    // rowGroup is the next unclaimed row group in prepared.
+	prepared    *runtimePreparedFile   // prepared is metadata for fileIndex.
+	ready       []*runtimeScanTask     // ready contains scanners between batches; ownership is exclusively under mu.
+	inflight    int                    // inflight counts scanners currently executing Next outside mu.
+	active      sync.WaitGroup         // active lets Close wait until all claimed scanners leave Next.
+	notify      chan struct{}          // notify wakes claimers when inflight tasks requeue/finish or terminal state changes.
+	terminalErr error                  // terminalErr is sticky after the first unrecoverable reader/schema error.
+	closed      bool                   // closed prevents new task claims.
+	limitMu     sync.Mutex             // accepted scan LIMIT remains serial so early-stop order cannot race across row groups.
+
+	outputTypes       []types.LogicalType // outputTypes preserves the Binder relation's full column layout.
+	projectionIndexes []int               // projectionIndexes maps narrow scanner output back to relation indexes; nil means full width.
+	scope             *memory.Scope       // scope/buffers create managed NULL placeholders for unread columns.
 	buffers           *memory.BufferManager
-	limit             uint64 // limit 是安全 scan LIMIT candidate；0 表示未接受。
-	emitted           uint64 // emitted 统计 source 已交付给 residual pipeline 的行数。
+	limit             uint64 // limit is a safe scan LIMIT candidate; 0 means not accepted.
+	emitted           uint64 // emitted counts rows handed to residual pipeline and is protected by mu.
 }
 
 // runtimePrepareFileFunc 在文件真正被访问时加载 footer、做严格 schema gate，并返回 row-group scanner factory。
@@ -206,10 +217,13 @@ func newRuntimeSource(files []fileset.FileSnapshot, prepare runtimePrepareFileFu
 	}
 	copyFiles := make([]fileset.FileSnapshot, len(files))
 	copy(copyFiles, files)
-	return &RuntimeSource{files: copyFiles, prepareFile: prepare}, nil
+	return &RuntimeSource{files: copyFiles, prepareFile: prepare, notify: make(chan struct{})}, nil
 }
 
-// Next 输出一个 RowGroupScanner batch；row-group EOF 时自动关闭旧 scanner 并推进到下一 row group/file。
+// Next claims one row-group scanner under the ownership mutex, performs its
+// I/O/decode outside the mutex, then requeues the scanner if more batches remain.
+// A safe LIMIT candidate uses limitMu so early-stop remains deterministic and
+// never allows concurrent row groups to race past the candidate boundary.
 func (s *RuntimeSource) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
 	if s == nil {
 		return nil, false, fmt.Errorf("parquet: nil runtime source")
@@ -217,72 +231,176 @@ func (s *RuntimeSource) Next(ctx context.Context) (*vector.DataChunk, bool, erro
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
+	if s.limit > 0 {
+		s.limitMu.Lock()
+		defer s.limitMu.Unlock()
+	}
+	for {
+		task, ok, err := s.claimTask(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			return nil, false, nil
+		}
+		chunk, more, err := s.runClaimedTask(ctx, task)
+		if err != nil {
+			return nil, false, err
+		}
+		if more {
+			return chunk, true, nil
+		}
+	}
+}
+
+func (s *RuntimeSource) claimTask(ctx context.Context) (*runtimeScanTask, bool, error) {
+	for {
+		s.mu.Lock()
+		if s.closed {
+			s.mu.Unlock()
+			return nil, false, fmt.Errorf("parquet: runtime source is closed")
+		}
+		if s.terminalErr != nil {
+			err := s.terminalErr
+			s.mu.Unlock()
+			return nil, false, err
+		}
+		if s.limit > 0 && s.emitted >= s.limit {
+			s.mu.Unlock()
+			return nil, false, nil
+		}
+		if n := len(s.ready); n != 0 {
+			task := s.ready[n-1]
+			s.ready = s.ready[:n-1]
+			s.inflight++
+			s.active.Add(1)
+			s.mu.Unlock()
+			return task, true, nil
+		}
+
+		for s.fileIndex < len(s.files) {
+			if err := ctx.Err(); err != nil {
+				s.mu.Unlock()
+				return nil, false, err
+			}
+			if s.prepared == nil {
+				prepared, err := s.prepareFile(ctx, s.files[s.fileIndex])
+				if err != nil {
+					err = s.failAndCloseReadyLocked(err)
+					s.signalLocked()
+					s.mu.Unlock()
+					return nil, false, err
+				}
+				if prepared.newScanner == nil {
+					err := s.failAndCloseReadyLocked(fmt.Errorf("parquet: prepared file %s has no scanner factory", s.files[s.fileIndex].URI.String()))
+					s.signalLocked()
+					s.mu.Unlock()
+					return nil, false, err
+				}
+				s.prepared = &prepared
+			}
+			if s.rowGroup >= len(s.prepared.rowGroups) {
+				s.fileIndex++
+				s.rowGroup = 0
+				s.prepared = nil
+				continue
+			}
+			rg := s.prepared.rowGroups[s.rowGroup]
+			s.rowGroup++ // claim ownership before scanner I/O can run concurrently.
+			scanner, err := s.prepared.newScanner(rg)
+			if err != nil {
+				err = s.failAndCloseReadyLocked(err)
+				s.signalLocked()
+				s.mu.Unlock()
+				return nil, false, err
+			}
+			if scanner == nil {
+				err := s.failAndCloseReadyLocked(fmt.Errorf("parquet: row-group scanner factory returned nil"))
+				s.signalLocked()
+				s.mu.Unlock()
+				return nil, false, err
+			}
+			task := &runtimeScanTask{scanner: scanner}
+			s.inflight++
+			s.active.Add(1)
+			s.mu.Unlock()
+			return task, true, nil
+		}
+
+		if s.inflight == 0 {
+			s.mu.Unlock()
+			return nil, false, nil
+		}
+		wait := s.notify
+		s.mu.Unlock()
+		select {
+		case <-wait:
+			continue
+		case <-ctx.Done():
+			return nil, false, ctx.Err()
+		}
+	}
+}
+
+func (s *RuntimeSource) runClaimedTask(ctx context.Context, task *runtimeScanTask) (*vector.DataChunk, bool, error) {
+	defer s.active.Done()
+	if task == nil || task.scanner == nil {
+		s.mu.Lock()
+		if s.inflight > 0 {
+			s.inflight--
+		}
+		s.signalLocked()
+		err := s.failAndCloseReadyLocked(fmt.Errorf("parquet: claimed nil row-group scanner"))
+		s.mu.Unlock()
+		return nil, false, err
+	}
+
+	chunk, scanErr := task.scanner.Next(ctx)
+	if scanErr == nil && chunk == nil {
+		scanErr = fmt.Errorf("parquet: row-group scanner returned nil chunk without EOF")
+	}
+	if scanErr == nil && len(s.projectionIndexes) != 0 {
+		var err error
+		chunk, err = s.expandProjectedChunk(chunk)
+		if err != nil {
+			scanErr = err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.inflight > 0 {
+		s.inflight--
+	}
+	s.signalLocked()
 	if s.closed {
+		if chunk != nil {
+			chunk.Release()
+		}
+		task.scanner.Close()
 		return nil, false, fmt.Errorf("parquet: runtime source is closed")
 	}
 	if s.terminalErr != nil {
+		if chunk != nil {
+			chunk.Release()
+		}
+		task.scanner.Close()
 		return nil, false, s.terminalErr
 	}
-	if s.limit > 0 && s.emitted >= s.limit {
-		s.closeScannerLocked()
+	switch {
+	case scanErr == nil && chunk != nil:
+		s.ready = append(s.ready, task)
+		s.emitted += uint64(chunk.Cardinality)
+		return chunk, true, nil
+	case scanErr == io.EOF:
+		task.scanner.Close()
 		return nil, false, nil
-	}
-	for {
-		if s.scanner != nil {
-			chunk, err := s.scanner.Next(ctx)
-			switch {
-			case err == nil && chunk != nil:
-				if len(s.projectionIndexes) != 0 {
-					chunk, err = s.expandProjectedChunk(chunk)
-					if err != nil {
-						s.closeScannerLocked()
-						return nil, false, s.failLocked(err)
-					}
-				}
-				s.emitted += uint64(chunk.Cardinality)
-				return chunk, true, nil
-			case err == nil:
-				s.closeScannerLocked()
-				return nil, false, s.failLocked(fmt.Errorf("parquet: row-group scanner returned nil chunk without EOF"))
-			case err == io.EOF:
-				s.closeScannerLocked()
-				s.rowGroup++
-				continue
-			default:
-				s.closeScannerLocked()
-				return nil, false, s.failLocked(err)
-			}
+	default:
+		if chunk != nil {
+			chunk.Release()
 		}
-
-		if s.fileIndex >= len(s.files) {
-			return nil, false, nil
-		}
-		if s.prepared == nil {
-			prepared, err := s.prepareFile(ctx, s.files[s.fileIndex])
-			if err != nil {
-				return nil, false, s.failLocked(err)
-			}
-			if prepared.newScanner == nil {
-				return nil, false, s.failLocked(fmt.Errorf("parquet: prepared file %s has no scanner factory", s.files[s.fileIndex].URI.String()))
-			}
-			s.prepared = &prepared
-		}
-		if s.rowGroup >= len(s.prepared.rowGroups) {
-			s.fileIndex++
-			s.rowGroup = 0
-			s.prepared = nil
-			continue
-		}
-		scanner, err := s.prepared.newScanner(s.prepared.rowGroups[s.rowGroup])
-		if err != nil {
-			return nil, false, s.failLocked(err)
-		}
-		if scanner == nil {
-			return nil, false, s.failLocked(fmt.Errorf("parquet: row-group scanner factory returned nil"))
-		}
-		s.scanner = scanner
+		task.scanner.Close()
+		return nil, false, s.failAndCloseReadyLocked(scanErr)
 	}
 }
 
@@ -339,23 +457,24 @@ func releaseRuntimeColumns(columns []*vector.Vector) {
 	}
 }
 
-// Close 终止当前 reader ownership；可重复调用。
+// Close stops new claims, closes every idle scanner, and waits for scanners
+// already inside Next to leave their I/O/decode call before returning.
 func (s *RuntimeSource) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return nil
+	if !s.closed {
+		s.closed = true
+		s.closeReadyLocked()
+		s.prepared = nil
+		s.signalLocked()
 	}
-	s.closeScannerLocked()
-	s.prepared = nil
-	s.closed = true
+	s.mu.Unlock()
+	s.active.Wait()
 	return nil
 }
 
-// failLocked 固化不可恢复错误；调用方必须持有 mu。
 func (s *RuntimeSource) failLocked(err error) error {
 	if err == nil {
 		err = fmt.Errorf("parquet: runtime source failed")
@@ -366,10 +485,26 @@ func (s *RuntimeSource) failLocked(err error) error {
 	return s.terminalErr
 }
 
-// closeScannerLocked 释放当前 RowGroupScanner；调用方必须持有 mu。
-func (s *RuntimeSource) closeScannerLocked() {
-	if s.scanner != nil {
-		s.scanner.Close()
-		s.scanner = nil
+func (s *RuntimeSource) failAndCloseReadyLocked(err error) error {
+	err = s.failLocked(err)
+	s.closeReadyLocked()
+	return err
+}
+
+func (s *RuntimeSource) closeReadyLocked() {
+	for _, task := range s.ready {
+		if task != nil && task.scanner != nil {
+			task.scanner.Close()
+		}
 	}
+	s.ready = nil
+}
+
+func (s *RuntimeSource) signalLocked() {
+	if s.notify == nil {
+		s.notify = make(chan struct{})
+		return
+	}
+	close(s.notify)
+	s.notify = make(chan struct{})
 }
