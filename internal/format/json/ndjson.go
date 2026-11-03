@@ -17,6 +17,7 @@ import (
 
 const defaultNDJSONSampleBytes int64 = 1 << 20
 const defaultNDJSONRangeBytes int64 = 4 << 20
+const defaultNDJSONSerialRangeBytes int64 = 1 << 20
 
 func FrameNDJSON(input []byte, final bool, maxRecords int) (records [][]byte, consumed int, err error) {
 	if maxRecords <= 0 {
@@ -192,15 +193,16 @@ type ndjsonJob struct {
 	serial         bool
 }
 type NDJSONSource struct {
-	registry   *vfs.Registry
-	binding    NDJSONBinding
-	scope      *memory.Scope
-	bm         *memory.BufferManager
-	projection ProjectedPathSet
-	mu         sync.Mutex
-	jobs       []ndjsonJob
-	failed     error
-	serialMu   sync.Mutex
+	registry         *vfs.Registry
+	binding          NDJSONBinding
+	scope            *memory.Scope
+	bm               *memory.BufferManager
+	projection       ProjectedPathSet
+	serialRangeBytes int64
+	mu               sync.Mutex
+	jobs             []ndjsonJob
+	failed           error
+	serialMu         sync.Mutex
 }
 
 func NewNDJSONSource(ctx context.Context, r *vfs.Registry, b NDJSONBinding, opts NDJSONScanOptions, scope *memory.Scope, bm *memory.BufferManager) (*NDJSONSource, error) {
@@ -211,7 +213,11 @@ func NewNDJSONSource(ctx context.Context, r *vfs.Registry, b NDJSONBinding, opts
 	if target <= 0 {
 		target = defaultNDJSONRangeBytes
 	}
-	s := &NDJSONSource{registry: r, binding: b, scope: scope, bm: bm, projection: opts.Projection}
+	serialTarget := target
+	if serialTarget > defaultNDJSONSerialRangeBytes {
+		serialTarget = defaultNDJSONSerialRangeBytes
+	}
+	s := &NDJSONSource{registry: r, binding: b, scope: scope, bm: bm, projection: opts.Projection, serialRangeBytes: serialTarget}
 	for _, f := range b.scanSet.Files() {
 		jobs, err := s.planFile(ctx, f, opts.EnableParallel, target)
 		if err != nil {
@@ -341,26 +347,68 @@ func (s *NDJSONSource) Next(ctx context.Context) (*vector.DataChunk, bool, error
 		}
 	}
 }
+
+// runJob bounds serial reads even when a logical job spans an entire object.
+// FrameNDJSON leaves an incomplete trailing line unconsumed, so the next job
+// resumes from the last complete newline without retaining source-owned buffers.
 func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChunk, *ndjsonJob, error) {
-	res, err := s.read(ctx, j.file, j.offset, j.length)
-	if err != nil {
-		return nil, nil, err
+	readLength := j.length
+	if j.serial && readLength > s.serialRangeBytes {
+		readLength = s.serialRangeBytes
 	}
-	defer res.Buffer.Release()
-	records, consumed, _ := FrameNDJSON(res.Buffer.Bytes(), true, vector.DefaultVectorSize)
-	var rem *ndjsonJob
-	if consumed < len(res.Buffer.Bytes()) {
-		r := j
-		r.offset += int64(consumed)
-		r.length -= int64(consumed)
-		rem = &r
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		res, err := s.read(ctx, j.file, j.offset, readLength)
+		if err != nil {
+			return nil, nil, err
+		}
+		final := readLength == j.length
+		data := res.Buffer.Bytes()
+		records, consumed, frameErr := FrameNDJSON(data, final, vector.DefaultVectorSize)
+		if frameErr != nil {
+			res.Buffer.Release()
+			return nil, nil, frameErr
+		}
+		if consumed < 0 || consumed > len(data) {
+			res.Buffer.Release()
+			return nil, nil, fmt.Errorf("json: NDJSON framer consumed invalid byte count %d of %d", consumed, len(data))
+		}
+		if consumed == 0 && !final {
+			res.Buffer.Release()
+			readLength = growNDJSONSerialWindow(readLength, j.length)
+			continue
+		}
+		nextOffset := j.offset + int64(consumed)
+		endOffset := j.offset + j.length
+		var rem *ndjsonJob
+		if nextOffset < endOffset {
+			r := j
+			r.offset = nextOffset
+			r.length = endOffset - nextOffset
+			rem = &r
+		}
+		if len(records) == 0 {
+			res.Buffer.Release()
+			return nil, rem, nil
+		}
+		chunk, err := DecodeRecords(records, s.binding.Schema().Fields, s.projection, s.scope, s.bm)
+		res.Buffer.Release()
+		if err != nil {
+			return nil, nil, err
+		}
+		return chunk, rem, nil
 	}
-	if len(records) == 0 {
-		return nil, rem, nil
+}
+
+func growNDJSONSerialWindow(current, remaining int64) int64 {
+	if current >= remaining {
+		return remaining
 	}
-	chunk, err := DecodeRecords(records, s.binding.Schema().Fields, s.projection, s.scope, s.bm)
-	if err != nil {
-		return nil, nil, err
+	next := current * 2
+	if next <= current || next > remaining {
+		return remaining
 	}
-	return chunk, rem, nil
+	return next
 }

@@ -13,6 +13,7 @@ import (
 )
 
 const defaultTargetRangeBytes int64 = 4 << 20
+const defaultSerialRangeBytes int64 = 1 << 20
 
 type ScanOptions struct {
 	EnableParallel   bool
@@ -31,12 +32,13 @@ type rangeJob struct {
 // under a small mutex but performs VFS I/O and CSV decoding outside it, allowing
 // pipeline workers to scan independent safe ranges concurrently.
 type Source struct {
-	registry *vfs.Registry
-	binding  SourceBinding
-	scope    *memory.Scope
-	bm       *memory.BufferManager
-	lex      LexConfig
-	null     []byte
+	registry         *vfs.Registry
+	binding          SourceBinding
+	scope            *memory.Scope
+	bm               *memory.BufferManager
+	lex              LexConfig
+	null             []byte
+	serialRangeBytes int64
 
 	mu       sync.Mutex
 	jobs     []rangeJob
@@ -49,22 +51,44 @@ func NewSource(ctx context.Context, registry *vfs.Registry, binding SourceBindin
 		return nil, errors.New("csv: source requires registry, binding, memory scope, and buffer manager")
 	}
 	lex := binding.inference.Lex
-	if lex == (LexConfig{}) { lex = DefaultLexConfig() }
+	if lex == (LexConfig{}) {
+		lex = DefaultLexConfig()
+	}
 	target := opts.TargetRangeBytes
-	if target <= 0 { target = defaultTargetRangeBytes }
-	s := &Source{registry: registry, binding: binding, scope: scope, bm: bm, lex: lex, null: append([]byte(nil), binding.inference.NullLiteral...)}
+	if target <= 0 {
+		target = defaultTargetRangeBytes
+	}
+	serialTarget := target
+	if serialTarget > defaultSerialRangeBytes {
+		serialTarget = defaultSerialRangeBytes
+	}
+	s := &Source{
+		registry:         registry,
+		binding:          binding,
+		scope:            scope,
+		bm:               bm,
+		lex:              lex,
+		null:             append([]byte(nil), binding.inference.NullLiteral...),
+		serialRangeBytes: serialTarget,
+	}
 	for _, file := range binding.scanSet.Files() {
 		jobs, err := s.planFile(ctx, file, opts.EnableParallel, target)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		s.jobs = append(s.jobs, jobs...)
 	}
 	return s, nil
 }
 
 func (s *Source) planFile(ctx context.Context, file fileset.FileSnapshot, parallel bool, target int64) ([]rangeJob, error) {
-	if file.Size <= 0 { return nil, nil }
+	if file.Size <= 0 {
+		return nil, nil
+	}
 	caps, err := s.registry.EffectiveCapabilities(ctx, file.URI)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if !caps.Has(vfs.RandomRead) {
 		return nil, fmt.Errorf("csv: scan requires RandomRead for %s", file.URI.String())
 	}
@@ -73,14 +97,18 @@ func (s *Source) planFile(ctx context.Context, file fileset.FileSnapshot, parall
 		return []rangeJob{{file: file, length: file.Size, skipHeader: s.binding.inference.Header, serial: serial}}, nil
 	}
 	offsets, err := s.planSafeOffsets(ctx, file, target)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if len(offsets) == 0 {
 		return []rangeJob{{file: file, length: file.Size, skipHeader: s.binding.inference.Header, serial: true}}, nil
 	}
 	jobs := make([]rangeJob, 0, len(offsets)+1)
 	start := int64(0)
 	for _, end := range offsets {
-		if end <= start || end >= file.Size { continue }
+		if end <= start || end >= file.Size {
+			continue
+		}
 		jobs = append(jobs, rangeJob{file: file, offset: start, length: end - start, skipHeader: start == 0 && s.binding.inference.Header})
 		start = end
 	}
@@ -92,59 +120,91 @@ func (s *Source) planFile(ctx context.Context, file fileset.FileSnapshot, parall
 
 func (s *Source) planSafeOffsets(ctx context.Context, file fileset.FileSnapshot, target int64) ([]int64, error) {
 	count := int((file.Size + target - 1) / target)
-	if count < 2 { return nil, nil }
+	if count < 2 {
+		return nil, nil
+	}
 	summaries := make([]ChunkSummary, count)
 	for i := 0; i < count; i++ {
 		off := int64(i) * target
 		length := target
-		if off+length > file.Size { length = file.Size - off }
+		if off+length > file.Size {
+			length = file.Size - off
+		}
 		result, err := s.read(ctx, file, off, length)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		summary, sumErr := SummarizeChunk(result.Buffer.Bytes(), s.lex)
 		result.Buffer.Release()
-		if sumErr != nil { return nil, fmt.Errorf("csv: summarize range %d: %w", i, sumErr) }
+		if sumErr != nil {
+			return nil, fmt.Errorf("csv: summarize range %d: %w", i, sumErr)
+		}
 		summaries[i] = summary
 	}
 	starts, finalState, err := ResolveChunkStarts(summaries)
-	if err != nil { return nil, err }
-	if err := ValidateFinalBoundaryState(s.lex, finalState); err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidateFinalBoundaryState(s.lex, finalState); err != nil {
+		return nil, err
+	}
 
 	offsets := make([]int64, 0, count-1)
 	for i := 1; i < count; i++ {
 		base := int64(i) * target
 		length := target
-		if base+length > file.Size { length = file.Size - base }
+		if base+length > file.Size {
+			length = file.Size - base
+		}
 		result, err := s.read(ctx, file, base, length)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		rel, ok, _, boundaryErr := FirstSafeRecordBoundary(result.Buffer.Bytes(), s.lex, starts[i])
 		result.Buffer.Release()
-		if boundaryErr != nil { return nil, boundaryErr }
-		if !ok { continue }
+		if boundaryErr != nil {
+			return nil, boundaryErr
+		}
+		if !ok {
+			continue
+		}
 		absolute := base + int64(rel)
-		if absolute <= 0 || absolute >= file.Size { continue }
-		if len(offsets) == 0 || absolute > offsets[len(offsets)-1] { offsets = append(offsets, absolute) }
+		if absolute <= 0 || absolute >= file.Size {
+			continue
+		}
+		if len(offsets) == 0 || absolute > offsets[len(offsets)-1] {
+			offsets = append(offsets, absolute)
+		}
 	}
 	return offsets, nil
 }
 
 func (s *Source) read(ctx context.Context, file fileset.FileSnapshot, offset, length int64) (vfs.RangeResult, error) {
 	driver, err := s.registry.DriverFor(file.URI)
-	if err != nil { return vfs.RangeResult{}, err }
+	if err != nil {
+		return vfs.RangeResult{}, err
+	}
 	return driver.ReadRange(ctx, vfs.RangeRequest{URI: file.URI, Offset: offset, Length: length, Expected: &file.Identity, Tag: memory.TagReadAhead}, s.scope, s.bm)
 }
 
 func (s *Source) takeJob() (rangeJob, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.failed != nil { return rangeJob{}, false, s.failed }
-	if len(s.jobs) == 0 { return rangeJob{}, false, nil }
+	if s.failed != nil {
+		return rangeJob{}, false, s.failed
+	}
+	if len(s.jobs) == 0 {
+		return rangeJob{}, false, nil
+	}
 	job := s.jobs[0]
 	s.jobs = s.jobs[1:]
 	return job, true, nil
 }
 
 func (s *Source) pushFront(job rangeJob) {
-	if job.length <= 0 { return }
+	if job.length <= 0 {
+		return
+	}
 	s.mu.Lock()
 	s.jobs = append([]rangeJob{job}, s.jobs...)
 	s.mu.Unlock()
@@ -152,17 +212,25 @@ func (s *Source) pushFront(job rangeJob) {
 
 func (s *Source) fail(err error) {
 	s.mu.Lock()
-	if s.failed == nil { s.failed = err }
+	if s.failed == nil {
+		s.failed = err
+	}
 	s.jobs = nil
 	s.mu.Unlock()
 }
 
 func (s *Source) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
 	for {
-		if err := ctx.Err(); err != nil { return nil, false, err }
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		job, ok, err := s.takeJob()
-		if err != nil { return nil, false, err }
-		if !ok { return nil, false, nil }
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			return nil, false, nil
+		}
 		var chunk *vector.DataChunk
 		var remainder *rangeJob
 		if job.serial {
@@ -176,39 +244,93 @@ func (s *Source) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
 			s.fail(err)
 			return nil, false, err
 		}
-		if remainder != nil { s.pushFront(*remainder) }
-		if chunk == nil { continue }
+		if remainder != nil {
+			s.pushFront(*remainder)
+		}
+		if chunk == nil {
+			continue
+		}
 		return chunk, true, nil
 	}
 }
 
+// runJob keeps serial scans bounded even when the logical job represents an
+// entire file. DecodeChunk leaves a trailing partial record unconsumed, so the
+// next job starts at the last complete record boundary and re-reads at most one
+// bounded window instead of reserving the whole file.
 func (s *Source) runJob(ctx context.Context, job rangeJob) (*vector.DataChunk, *rangeJob, error) {
-	result, err := s.read(ctx, job.file, job.offset, job.length)
-	if err != nil { return nil, nil, err }
-	defer result.Buffer.Release()
-	data := result.Buffer.Bytes()
-	base := job.offset
-	if job.skipHeader {
-		headerBytes, ok, _, boundaryErr := FirstSafeRecordBoundary(data, s.lex, BoundaryState{Lex: StateFieldStart})
-		if boundaryErr != nil { return nil, nil, boundaryErr }
-		if !ok { return nil, nil, fmt.Errorf("csv: header row does not end inside planned range for %s", job.file.URI.String()) }
-		data = data[headerBytes:]
-		base += int64(headerBytes)
+	readLength := job.length
+	if job.serial && readLength > s.serialRangeBytes {
+		readLength = s.serialRangeBytes
 	}
-	if len(data) == 0 { return nil, nil, nil }
-	chunk, consumed, err := DecodeChunk(data, s.binding.Types(), DecodeOptions{Lex: s.lex, Final: true, NullLiteral: s.null}, s.scope, s.bm)
-	if err != nil { return nil, nil, err }
-	if consumed < 0 || consumed > len(data) {
-		if chunk != nil { chunk.Release() }
-		return nil, nil, fmt.Errorf("csv: decoder consumed invalid byte count %d of %d", consumed, len(data))
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		result, err := s.read(ctx, job.file, job.offset, readLength)
+		if err != nil {
+			return nil, nil, err
+		}
+		data := result.Buffer.Bytes()
+		prefixConsumed := 0
+		if job.skipHeader {
+			headerBytes, ok, _, boundaryErr := FirstSafeRecordBoundary(data, s.lex, BoundaryState{Lex: StateFieldStart})
+			if boundaryErr != nil {
+				result.Buffer.Release()
+				return nil, nil, boundaryErr
+			}
+			if !ok {
+				result.Buffer.Release()
+				if readLength == job.length {
+					return nil, nil, fmt.Errorf("csv: header row does not end inside file for %s", job.file.URI.String())
+				}
+				readLength = growSerialWindow(readLength, job.length)
+				continue
+			}
+			prefixConsumed = headerBytes
+			data = data[headerBytes:]
+		}
+		final := readLength == job.length
+		chunk, consumed, decodeErr := DecodeChunk(data, s.binding.Types(), DecodeOptions{Lex: s.lex, Final: final, NullLiteral: s.null}, s.scope, s.bm)
+		result.Buffer.Release()
+		if decodeErr != nil {
+			return nil, nil, decodeErr
+		}
+		if consumed < 0 || consumed > len(data) {
+			if chunk != nil {
+				chunk.Release()
+			}
+			return nil, nil, fmt.Errorf("csv: decoder consumed invalid byte count %d of %d", consumed, len(data))
+		}
+		totalConsumed := prefixConsumed + consumed
+		if totalConsumed == 0 && !final {
+			if chunk != nil {
+				chunk.Release()
+			}
+			readLength = growSerialWindow(readLength, job.length)
+			continue
+		}
+		nextOffset := job.offset + int64(totalConsumed)
+		endOffset := job.offset + job.length
+		var remainder *rangeJob
+		if nextOffset < endOffset {
+			r := job
+			r.offset = nextOffset
+			r.length = endOffset - nextOffset
+			r.skipHeader = false
+			remainder = &r
+		}
+		return chunk, remainder, nil
 	}
-	var remainder *rangeJob
-	if consumed < len(data) {
-		r := job
-		r.offset = base + int64(consumed)
-		r.length = int64(len(data) - consumed)
-		r.skipHeader = false
-		remainder = &r
+}
+
+func growSerialWindow(current, remaining int64) int64 {
+	if current >= remaining {
+		return remaining
 	}
-	return chunk, remainder, nil
+	next := current * 2
+	if next <= current || next > remaining {
+		return remaining
+	}
+	return next
 }
