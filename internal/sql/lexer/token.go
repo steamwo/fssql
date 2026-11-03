@@ -2,7 +2,6 @@ package lexer
 
 import "github.com/steamwo/fssql/internal/sql/ast"
 
-// Kind 是 SQL 词法 token 类型。
 type Kind uint16
 
 const (
@@ -62,12 +61,12 @@ const (
 	KeywordNull
 	KeywordTrue
 	KeywordFalse
+	Concat // appended to preserve existing token numeric identities
 )
 
-// Token 保存 token 原文、规范化文本和源位置。
 type Token struct {
-	Kind Kind     // Kind 是 token 分类。
-	Raw  string   // Raw 是源 SQL 中的原始文本。
-	Text string   // Text 是去引号或规范化后的文本。
-	Span ast.Span // Span 是 token 源位置。
+	Kind Kind
+	Raw string
+	Text string
+	Span ast.Span
 }

@@ -127,7 +127,8 @@ func (c *Chunk) Uint64(row, column int) (uint64, bool, error) {
 		x, ok := v.Uint32(row)
 		return uint64(x), ok, nil
 	case types.BigInt:
-		return v.Uint64(row)
+		x, ok := v.Uint64(row)
+		return x, ok, nil
 	default:
 		return 0, false, fmt.Errorf("gosql: column %d type %s is not unsigned", column, logicalTypeNameOf(v.Type))
 	}
