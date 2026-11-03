@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -23,9 +25,10 @@ type ExternalSortRuntimeConfig struct {
 
 // ExternalSortFactory 把 generic PhysicalSort 映射到现有 ExternalSort。
 type ExternalSortFactory struct {
-	query   *query.Context            // query 提供 query-scoped MemoryScope/TemporaryStorage ownership。
-	buffers *memory.BufferManager     // buffers 创建 managed row/run/spill buffers。
-	config  ExternalSortRuntimeConfig // config 是 query 已冻结的 runtime resource policy。
+	query    *query.Context            // query 提供 query-scoped MemoryScope/TemporaryStorage ownership。
+	buffers  *memory.BufferManager     // buffers 创建 managed row/run/spill buffers。
+	config   ExternalSortRuntimeConfig // config 是 query 已冻结的 runtime resource policy。
+	topNRows uint64                    // topNRows 仅由当前 physical root 的 Sort+Limit specialization 设置；0 表示普通 ExternalSort。
 }
 
 // NewExternalSortFactory 创建 production sort factory；资源策略必须显式提供，禁止静默套用 benchmark 参数。
@@ -48,6 +51,15 @@ func NewExternalSortFactory(q *query.Context, buffers *memory.BufferManager, con
 	return &ExternalSortFactory{query: q, buffers: buffers, config: config}, nil
 }
 
+// setTopNRows enables the bounded Top-N implementation for the single sort in
+// a physical Sort->Limit root. It is intentionally unexported: this is derived
+// from the frozen physical plan, not a user setting.
+func (f *ExternalSortFactory) setTopNRows(rows uint64) {
+	if f != nil {
+		f.topNRows = rows
+	}
+}
+
 // OpenSort 实现 lowering.SortFactory 的结构契约。
 // Planner 已把任意 ORDER BY expression materialize 成 child output 列；runtime 只接受 BoundColumn key，避免重新解释 SQL expression。
 func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Column, keys []planner.SortKey, estimate planner.CardinalityEstimate) (blocking.Operator, error) {
@@ -65,28 +77,28 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 	}
 	_ = estimate // ExternalSort 当前不使用 cardinality 预分配；MemoryBudget 是唯一 run builder spill 边界。
 
-	inputTypes := make([]types.LogicalType, len(columns))
-	for i, column := range columns {
-		if column.Type.ID == types.Invalid {
-			return nil, fmt.Errorf("session: SORT input column %d has invalid logical type", i)
-		}
-		inputTypes[i] = cloneSortLogicalType(column.Type)
+	inputTypes, executionKeys, err := prepareSortRuntime(columns, keys)
+	if err != nil {
+		return nil, err
 	}
-	executionKeys := make([]execsort.Key, len(keys))
-	for i, key := range keys {
-		if key.Expr == nil || key.Expr.Kind != binder.BoundColumn {
-			return nil, fmt.Errorf("session: SORT key %d is not a materialized BoundColumn", i)
+	if f.topNRows > 0 && f.topNRows <= uint64(math.MaxInt) && fixedWidthSortInput(inputTypes) {
+		topN, err := execsort.NewTopN(execsort.TopNConfig{
+			InputTypes:       inputTypes,
+			Keys:             executionKeys,
+			N:                int(f.topNRows),
+			MemoryBudget:     f.config.MemoryBudget,
+			Scope:            f.query.Memory,
+			Buffers:          f.buffers,
+			PreallocateFixed: true,
+		})
+		if err == nil {
+			return topN, nil
 		}
-		index := key.Expr.ColumnIndex
-		if index < 0 || index >= len(columns) {
-			return nil, fmt.Errorf("session: SORT key %d column index %d out of range", i, index)
+		if !errors.Is(err, memory.ErrLimitExceeded) {
+			return nil, err
 		}
-		// DuckDB Stable 默认 NULLS LAST；Binder 的 nil 表示未显式指定。
-		nullsFirst := false
-		if key.NullsFirst != nil {
-			nullsFirst = *key.NullsFirst
-		}
-		executionKeys[i] = execsort.Key{Column: index, Desc: key.Descending, NullsFirst: nullsFirst}
+		// Preallocation failed before any input row was consumed, so falling
+		// back to spillable ExternalSort preserves the original executable path.
 	}
 	operator, err := execsort.New(execsort.Config{
 		InputTypes:      inputTypes,
@@ -102,6 +114,45 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 		return nil, err
 	}
 	return operator, nil
+}
+
+func prepareSortRuntime(columns []planner.Column, keys []planner.SortKey) ([]types.LogicalType, []execsort.Key, error) {
+	inputTypes := make([]types.LogicalType, len(columns))
+	for i, column := range columns {
+		if column.Type.ID == types.Invalid {
+			return nil, nil, fmt.Errorf("session: SORT input column %d has invalid logical type", i)
+		}
+		inputTypes[i] = cloneSortLogicalType(column.Type)
+	}
+	executionKeys := make([]execsort.Key, len(keys))
+	for i, key := range keys {
+		if key.Expr == nil || key.Expr.Kind != binder.BoundColumn {
+			return nil, nil, fmt.Errorf("session: SORT key %d is not a materialized BoundColumn", i)
+		}
+		index := key.Expr.ColumnIndex
+		if index < 0 || index >= len(columns) {
+			return nil, nil, fmt.Errorf("session: SORT key %d column index %d out of range", i, index)
+		}
+		// DuckDB Stable 默认 NULLS LAST；Binder 的 nil 表示未显式指定。
+		nullsFirst := false
+		if key.NullsFirst != nil {
+			nullsFirst = *key.NullsFirst
+		}
+		executionKeys[i] = execsort.Key{Column: index, Desc: key.Descending, NullsFirst: nullsFirst}
+	}
+	return inputTypes, executionKeys, nil
+}
+
+func fixedWidthSortInput(inputTypes []types.LogicalType) bool {
+	if len(inputTypes) == 0 {
+		return false
+	}
+	for _, inputType := range inputTypes {
+		if _, ok := inputType.FixedSize(); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // cloneSortLogicalType 深拷贝 LIST/STRUCT metadata，避免 Planner schema 与 runtime sort 共享可变 metadata。

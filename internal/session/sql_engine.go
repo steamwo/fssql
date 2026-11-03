@@ -44,17 +44,17 @@ func (f QuerySourceFactoryFunc) NewQuerySources(q *query.Context) ([]TableBindAd
 // StableSQLEngineConfig 是 transport-neutral Stable SELECT composition root。
 // Query-scoped source objects 通过 Sources 创建；本类型不依赖具体 VFS/format/server transport。
 type StableSQLEngineConfig struct {
-	Catalog       catalog.Catalog                 // Catalog 提供 statement-scoped metadata transaction。
-	Functions     *function.Catalog               // Functions 是全链路唯一 FunctionCatalog；nil 使用 builtin Stable catalog。
-	Sources       QuerySourceFactory              // Sources 为每个 QueryContext 装配真实 Bind/scan adapters。
-	Buffers       *memory.BufferManager           // Buffers 是 expression/blocking operator 的 managed buffer factory。
-	Statistics    stats.Provider                  // Statistics 可为空；optimizer 会保持 Unknown confidence。
-	Distinct      ExternalDistinctRuntimeConfig   // Distinct 是 query-scoped DISTINCT spill policy。
-	Sort          ExternalSortRuntimeConfig       // Sort 是 query-scoped ORDER BY spill policy。
-	Aggregate     ExternalAggregateRuntimeConfig  // Aggregate 是 query-scoped GROUP/aggregate spill policy。
-	Join          ExternalJoinRuntimeConfig       // Join 是 query-scoped Stable join spill policy。
-	Workers       int                             // Workers 是单 Pipeline stage 的 CPU worker 上限；<=0 归一为 1。
-	BlockingQueue int                             // BlockingQueue 是 blocking stage bounded handoff 容量；<=0 归一为 1。
+	Catalog       catalog.Catalog                // Catalog 提供 statement-scoped metadata transaction。
+	Functions     *function.Catalog              // Functions 是全链路唯一 FunctionCatalog；nil 使用 builtin Stable catalog。
+	Sources       QuerySourceFactory             // Sources 为每个 QueryContext 装配真实 Bind/scan adapters。
+	Buffers       *memory.BufferManager          // Buffers 是 expression/blocking operator 的 managed buffer factory。
+	Statistics    stats.Provider                 // Statistics 可为空；optimizer 会保持 Unknown confidence。
+	Distinct      ExternalDistinctRuntimeConfig  // Distinct 是 query-scoped DISTINCT spill policy。
+	Sort          ExternalSortRuntimeConfig      // Sort 是 query-scoped ORDER BY spill policy。
+	Aggregate     ExternalAggregateRuntimeConfig // Aggregate 是 query-scoped GROUP/aggregate spill policy。
+	Join          ExternalJoinRuntimeConfig      // Join 是 query-scoped Stable join spill policy。
+	Workers       int                            // Workers 是单 Pipeline stage 的 CPU worker 上限；<=0 归一为 1。
+	BlockingQueue int                            // BlockingQueue 是 blocking stage bounded handoff 容量；<=0 归一为 1。
 }
 
 // StableSQLEngine 把 Parser→Binder→Planner→Optimizer→Push Pipeline 组合成唯一 production SELECT path。
@@ -222,6 +222,7 @@ func (p *PreparedSQLQuery) runPhysical(q *query.Context, plan *planner.PhysicalP
 		if err != nil {
 			return err
 		}
+		configureTopNSort(factory, plan)
 		builder.Sorts = factory
 	}
 	if physicalContains(plan, planner.PhysicalHashAggregate) {
