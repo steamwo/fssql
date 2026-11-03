@@ -13,7 +13,7 @@ def main():
     """对本仓库执行正常、race 或 benchmark 模式，始终保留真实退出状态。"""
     repo = Path(__file__).resolve().parents[2]
     cache = repo / ".cache/agent-verification"
-    evidence = repo / "artifacts/local-validation/2026-11-02/large"
+    evidence = repo / ".cache/agent-verification/large"
     evidence.mkdir(parents=True, exist_ok=True)
     mode = "bench" if "--bench" in sys.argv else "race" if "--race" in sys.argv else "normal"
     if "--workers" in sys.argv:

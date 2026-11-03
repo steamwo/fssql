@@ -10,7 +10,7 @@ def main():
     """执行单次带 profile 的查询，并导出 CPU 与 heap 分配热点。"""
     repo = Path(__file__).resolve().parents[2]
     cache = repo / ".cache/agent-verification"
-    evidence = repo / "artifacts/local-validation/2026-11-02/large"
+    evidence = repo / ".cache/agent-verification/large"
     env = dict(os.environ, GOCACHE=str(cache / "go-build"))
     env.update(json.loads((cache / "minio-test-env.json").read_text(encoding="utf-8")))
     env["FSSQL_LARGE_MANIFEST"] = str(cache / "large-manifest.json")

@@ -10,7 +10,7 @@ def main():
     """运行完整 Go 检查，并对其他平台实现进行交叉编译验证。"""
     repo = Path(__file__).resolve().parents[2]
     cache = repo / ".cache/agent-verification"
-    evidence = repo / "artifacts/local-validation/2026-11-02/windows-copy-fix"
+    evidence = repo / ".cache/agent-verification/windows-copy-fix"
     evidence.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, GOCACHE=str(cache / "go-build"))
     reference = dict(env, FSSQL_REQUIRE_DUCKDB="1")

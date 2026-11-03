@@ -25,7 +25,7 @@ def main():
     args.extend(["-run", "^TestMinIO", "./pkg/gosql"])
     result = subprocess.run(args, cwd=repo, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, timeout=180)
-    evidence = repo / "artifacts/local-validation/2026-11-02/services"
+    evidence = repo / ".cache/agent-verification/services"
     evidence.mkdir(parents=True, exist_ok=True)
     name = "minio-race.log" if race else "minio.log"
     (evidence / name).write_bytes(result.stdout)

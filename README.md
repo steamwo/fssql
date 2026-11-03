@@ -74,12 +74,10 @@ database/sql: 42
 ## 文档与开发
 
 - [公共 API、资源默认值与使用边界](docs/public-api.md)
-- [Stable / Experimental / Deferred 功能契约](docs/architecture/feature-contract.md)
+- [架构约束](ARCHITECTURE.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
-- [架构文档与开发流程](docs/README.md)
-- [项目阶段状态](docs/machine/project-state.yaml)
 
-仓库按 `pkg/gosql`（公共入口）、`internal`（引擎实现）、`cmd`（阶段工具）、`test`（跨模块测试）和 `docs`（契约与文档）组织。外部项目应通过公共包访问引擎。
+仓库按 `pkg/gosql`（公共入口）、`internal`（引擎实现）、`cmd`（命令行工具）、`test`（跨模块测试）和 `examples`（示例）组织。外部项目应通过公共包访问引擎。
 
 验证快速开始示例与公共包：
 

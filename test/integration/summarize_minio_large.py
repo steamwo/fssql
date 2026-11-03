@@ -41,7 +41,7 @@ def memory_bytes(text):
 def main():
     """用最新复核覆盖同名场景，并链接保留的原始运行证据。"""
     repo = Path(__file__).resolve().parents[2]
-    root = repo / 'artifacts/local-validation/2026-11-02/large'
+    root = repo / '.cache/agent-verification/large'
     manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
     cases = {}
     for source in ['normal', 'recheck', 'workers', 'defaults', 'join-extra', 'copy-full']:

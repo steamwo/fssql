@@ -11,7 +11,7 @@ def main():
     """每组运行三次，未匹配到 benchmark 也视为失败。"""
     repo = Path(__file__).resolve().parents[2]
     cache = repo / ".cache/agent-verification"
-    evidence = repo / 'artifacts/local-validation/2026-11-02/large'
+    evidence = repo / '.cache/agent-verification/large'
     env = dict(os.environ, GOCACHE=str(cache / 'go-build'))
     groups = [
         ('native', './pkg/gosql', '^BenchmarkNativeQueryChunks$'),

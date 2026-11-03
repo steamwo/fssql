@@ -273,7 +273,7 @@ def main():
     conn.close()
     manifest = {"rows": rows, "files": files, "duckdb_version": duckdb.__version__, "cases": cases}
     target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
-    evidence = repo / "artifacts/local-validation/2026-11-02/large"
+    evidence = repo / ".cache/agent-verification/large"
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
     print("fixture ready: %d rows, %d bytes, %d cases" % (rows, sum(files.values()), len(cases)), flush=True)

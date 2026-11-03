@@ -28,7 +28,7 @@ def main():
     """验证服务并在专用测试 bucket 中上传固定的小规模查询样本。"""
     root = Path(__file__).resolve().parents[2] / ".cache/agent-verification"
     root.mkdir(parents=True, exist_ok=True)
-    evidence = root.parents[1] / "artifacts/local-validation/2026-11-02/services"
+    evidence = root.parents[1] / ".cache/agent-verification/services"
     evidence.mkdir(parents=True, exist_ok=True)
     minio = container_environment("docker-minio-1")
     postgres = container_environment("docker-postgres-1")

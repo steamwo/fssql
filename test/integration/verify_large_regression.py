@@ -10,7 +10,7 @@ def main():
     """把常规回归与已知失败的 opt-in 大文件场景分开保留退出状态。"""
     repo = Path(__file__).resolve().parents[2]
     cache = repo / ".cache/agent-verification"
-    evidence = repo / 'artifacts/local-validation/2026-11-02/large'
+    evidence = repo / '.cache/agent-verification/large'
     env = dict(os.environ, GOCACHE=str(cache / 'go-build'), PYTHONDONTWRITEBYTECODE='1')
     env.pop('FSSQL_LARGE_MANIFEST', None)
     env.pop('FSSQL_MINIO_ENDPOINT', None)
