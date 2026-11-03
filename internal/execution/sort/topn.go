@@ -278,9 +278,44 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 	if t.cfg.N == 0 {
 		return ctx.Err()
 	}
+	firstKey := t.cfg.Keys[0]
+	firstView, fixedFirst := c.Columns[firstKey.Column].BorrowFixedWidth()
+	var threshold, firstData []byte
+	var firstValid bool
 	for r := 0; r < c.Cardinality; r++ {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		// Most rows cannot enter the bounded heap. Compare only their keys
+		// before sizing or serializing any payload columns.
+		if len(t.entries) == t.cfg.N {
+			if threshold == nil {
+				threshold = t.entries[0].Bytes()
+				if fixedFirst {
+					var err error
+					firstData, firstValid, err = t.layout.ColumnData(threshold, firstKey.Column)
+					if err != nil {
+						return err
+					}
+				}
+			}
+			var cmp int
+			var err error
+			if fixedFirst {
+				data, valid := firstView.Value(r)
+				cmp, err = compareFixedInputKey(t.cfg.InputTypes[firstKey.Column], firstKey, data, valid, firstData, firstValid)
+				if err == nil && cmp == 0 {
+					cmp, err = compareInputRow(t.layout, t.cfg.Keys[1:], c, r, threshold)
+				}
+			} else {
+				cmp, err = compareInputRow(t.layout, t.cfg.Keys, c, r, threshold)
+			}
+			if err != nil {
+				return err
+			}
+			if cmp >= 0 {
+				continue
+			}
 		}
 		size, err := t.layout.RowSize(c, r)
 		if err != nil {
@@ -304,13 +339,6 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 			}
 			continue
 		}
-		cmp, err := compareRowsWith(t.layout, t.cfg.Keys, row, t.entries[0].Bytes())
-		if err != nil {
-			return err
-		}
-		if cmp >= 0 {
-			continue
-		}
 		old := t.entries[0]
 		delta := int64(len(row) - old.Len())
 		if t.preallocated == nil {
@@ -328,6 +356,7 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 		if err := t.down(0); err != nil {
 			return err
 		}
+		threshold = nil // Heap replacement changes both the root and its payload.
 	}
 	return nil
 }
@@ -448,6 +477,7 @@ func (t *TopN) Release() {
 				buf.Release()
 			}
 		}
+	}
 	t.entries = nil
 	t.rowBytes = 0
 	if t.indices != nil {

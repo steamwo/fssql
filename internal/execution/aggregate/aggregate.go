@@ -95,12 +95,93 @@ func(a *HashAggregate)ensureScratch(n int)error{if a.scratch.Len()>=n{return nil
 func(a *HashAggregate)ensureArena(n int)error{if n<=0{return nil};need:=a.arenaUsed+n;if a.arena==nil{cap:=max(256,need);b,err:=a.bm.Allocate(a.scope,memory.TagAggregate,cap);if err!=nil{return err};a.arena=b;return nil};if need<=a.arena.Len(){return nil};cap:=a.arena.Len()*2;if cap<need{cap=need};return a.arena.Resize(cap,nil)}
 func(a *HashAggregate)projected(chunk *vector.DataChunk)*vector.DataChunk{cols:=make([]*vector.Vector,len(a.groupColumns));for i,c:=range a.groupColumns{cols[i]=chunk.Columns[c]};return &vector.DataChunk{Columns:cols,Cardinality:chunk.Cardinality}}
 func(a *HashAggregate)findOrInsert(projected *vector.DataChunk,row int,hash uint64)(int,error){size,err:=a.groupLayout.RowSize(projected,row);if err!=nil{return 0,err};if err:=a.ensureScratch(max(size,1));err!=nil{return 0,err};enc:=a.scratch.Bytes()[:size];if _,err:=a.groupLayout.WriteRow(projected,row,enc);err!=nil{return 0,err};found,ok,err:=a.table.lookup(hash,func(existing int)(bool,error){return a.groupLayout.EqualRows(a.groups.Row(existing),enc,exechash.NullsEqual)});if err!=nil{return 0,err};if ok{return found,nil};if err:=a.table.ensureInsert();err!=nil{return 0,err};idx:=a.groups.Count();if err:=a.ensureStates(idx+1);err!=nil{return 0,err};if err:=a.groups.AppendChunkRow(projected,row);err!=nil{return 0,err};if err:=a.table.putNoGrow(hash,idx);err!=nil{return 0,err};return idx,nil}
-func(a *HashAggregate)Consume(ctx context.Context,chunk *vector.DataChunk)error{if a.finalized{return errors.New("aggregate already finalized")};if chunk==nil{return errors.New("nil chunk")};if len(chunk.Columns)!=len(a.inputTypes){return errors.New("aggregate input column count mismatch")};if err:=ctx.Err();err!=nil{return err};projected:=a.projected(chunk);var hashes [vector.DefaultVectorSize]uint64;if err:=exechash.HashChunk(projected,seq(len(a.groupColumns)),hashes[:chunk.Cardinality]);err!=nil{return err};for row:=0;row<chunk.Cardinality;row++{if err:=ctx.Err();err!=nil{return err};g,err:=a.findOrInsert(projected,row,hashes[row]);if err!=nil{return err};for i:=range a.specs{if err:=a.update(g,i,chunk,row);err!=nil{return err}}};return nil}
+func (a *HashAggregate) Consume(ctx context.Context, chunk *vector.DataChunk) error {
+	if a.finalized {
+		return errors.New("aggregate already finalized")
+	}
+	if chunk == nil {
+		return errors.New("nil chunk")
+	}
+	if len(chunk.Columns) != len(a.inputTypes) {
+		return errors.New("aggregate input column count mismatch")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(a.groupColumns) == 0 {
+		return a.consumeGlobal(ctx, chunk)
+	}
+	projected := a.projected(chunk)
+	var hashes [vector.DefaultVectorSize]uint64
+	if err := exechash.HashChunk(projected, seq(len(a.groupColumns)), hashes[:chunk.Cardinality]); err != nil {
+		return err
+	}
+	for row := 0; row < chunk.Cardinality; row++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		g, err := a.findOrInsert(projected, row, hashes[row])
+		if err != nil {
+			return err
+		}
+		for i := range a.specs {
+			if err := a.update(g, i, chunk, row); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func seq(n int)[]int{r:=make([]int,n);for i:=range r{r[i]=i};return r}
 func(a *HashAggregate)add128(st []byte,v types.Int128)error{cur:=types.Int128{Lo:binary.LittleEndian.Uint64(st[16:24]),Hi:int64(binary.LittleEndian.Uint64(st[24:32]))};next,err:=types.AddInt128(cur,v);if err!=nil{return semantics.ErrOverflow};binary.LittleEndian.PutUint64(st[16:24],next.Lo);binary.LittleEndian.PutUint64(st[24:32],uint64(next.Hi));st[0]=1;return nil}
 func int128Input(v *vector.Vector,row int)(types.Int128,bool){if !v.IsValid(row){return types.Int128{},false};switch v.Type.ID{case types.TinyInt:x,_:=v.Int8(row);return types.Int128FromInt64(int64(x)),true;case types.SmallInt:x,_:=v.Int16(row);return types.Int128FromInt64(int64(x)),true;case types.Integer:x,_:=v.Int32(row);return types.Int128FromInt64(int64(x)),true;case types.BigInt:x,_:=v.Int64(row);return types.Int128FromInt64(x),true;case types.HugeInt:x,_:=v.Int128(row);return x,true;case types.Decimal:if v.Type.Decimal.Width<=18{x,_:=v.Int64(row);return types.Int128FromInt64(x),true};x,_:=v.Int128(row);return x,true};return types.Int128{},false}
 func floatInput(v *vector.Vector,row int)(float64,bool){if !v.IsValid(row){return 0,false};switch v.Type.ID{case types.Float:x,_:=v.Float32(row);return float64(x),true;case types.Double:x,_:=v.Float64(row);return x,true};return 0,false}
-func(a *HashAggregate)update(g,ai int,chunk *vector.DataChunk,row int)error{b:=a.specs[ai];st:=a.state(g,ai);switch b.Spec.Kind{case CountStar:binary.LittleEndian.PutUint64(st[8:16],binary.LittleEndian.Uint64(st[8:16])+1);st[0]=1;return nil;case Count:if chunk.Columns[b.Spec.Input].IsValid(row){binary.LittleEndian.PutUint64(st[8:16],binary.LittleEndian.Uint64(st[8:16])+1);st[0]=1};return nil;case Sum,Avg:v:=chunk.Columns[b.Spec.Input];if !v.IsValid(row){return nil};if b.Spec.Kind==Avg{c:=binary.LittleEndian.Uint64(st[8:16]);if c==math.MaxUint64{return semantics.ErrOverflow};binary.LittleEndian.PutUint64(st[8:16],c+1)};if b.InputType.ID==types.Float||b.InputType.ID==types.Double{x,_:=floatInput(v,row);cur:=math.Float64frombits(binary.LittleEndian.Uint64(st[16:24]));binary.LittleEndian.PutUint64(st[16:24],math.Float64bits(cur+x));st[0]=1;return nil};x,ok:=int128Input(v,row);if !ok{return errors.New("aggregate numeric input unsupported")};return a.add128(st,x);case Min,Max:return a.updateMinMax(st,b,chunk.Columns[b.Spec.Input],row)};return errors.New("unknown aggregate kind")}
+func (a *HashAggregate) update(g, ai int, chunk *vector.DataChunk, row int) error {
+	return a.updateState(a.state(g, ai), a.specs[ai], chunk, row)
+}
+func (a *HashAggregate) updateState(st []byte, b BoundSpec, chunk *vector.DataChunk, row int) error {
+	switch b.Spec.Kind {
+	case CountStar:
+		binary.LittleEndian.PutUint64(st[8:16], binary.LittleEndian.Uint64(st[8:16])+1)
+		st[0] = 1
+		return nil
+	case Count:
+		if chunk.Columns[b.Spec.Input].IsValid(row) {
+			binary.LittleEndian.PutUint64(st[8:16], binary.LittleEndian.Uint64(st[8:16])+1)
+			st[0] = 1
+		}
+		return nil
+	case Sum, Avg:
+		v := chunk.Columns[b.Spec.Input]
+		if !v.IsValid(row) {
+			return nil
+		}
+		if b.Spec.Kind == Avg {
+			c := binary.LittleEndian.Uint64(st[8:16])
+			if c == math.MaxUint64 {
+				return semantics.ErrOverflow
+			}
+			binary.LittleEndian.PutUint64(st[8:16], c+1)
+		}
+		if b.InputType.ID == types.Float || b.InputType.ID == types.Double {
+			x, _ := floatInput(v, row)
+			cur := math.Float64frombits(binary.LittleEndian.Uint64(st[16:24]))
+			binary.LittleEndian.PutUint64(st[16:24], math.Float64bits(cur+x))
+			st[0] = 1
+			return nil
+		}
+		x, ok := int128Input(v, row)
+		if !ok {
+			return errors.New("aggregate numeric input unsupported")
+		}
+		return a.add128(st, x)
+	case Min, Max:
+		return a.updateMinMax(st, b, chunk.Columns[b.Spec.Input], row)
+	}
+	return errors.New("unknown aggregate kind")
+}
+
 func(a *HashAggregate)updateMinMax(st []byte,b BoundSpec,v *vector.Vector,row int)error{if !v.IsValid(row){return nil};take:=st[0]==0;if !take{cmp,err:=a.compareStateValue(st,b.InputType,v,row);if err!=nil{return err};if b.Spec.Kind==Min{take=cmp>0}else{take=cmp<0}};if !take{return nil};st[0]=1;return a.storeStateValue(st,b.InputType,v,row)}
 func(a *HashAggregate)storeStateValue(st []byte,t types.LogicalType,v *vector.Vector,row int)error{for i:=8;i<len(st);i++{st[i]=0};switch t.ID{case types.Boolean:x,_:=v.Bool(row);if x{st[16]=1};case types.TinyInt:x,_:=v.Int8(row);st[16]=byte(x);case types.SmallInt:x,_:=v.Int16(row);binary.LittleEndian.PutUint16(st[16:18],uint16(x));case types.Integer,types.DateType:x,_:=v.Int32(row);binary.LittleEndian.PutUint32(st[16:20],uint32(x));case types.BigInt,types.TimestampType:x,_:=v.Int64(row);binary.LittleEndian.PutUint64(st[16:24],uint64(x));case types.HugeInt:x,_:=v.Int128(row);binary.LittleEndian.PutUint64(st[16:24],x.Lo);binary.LittleEndian.PutUint64(st[24:32],uint64(x.Hi));case types.Float:x,_:=v.Float32(row);binary.LittleEndian.PutUint32(st[16:20],math.Float32bits(x));case types.Double:x,_:=v.Float64(row);binary.LittleEndian.PutUint64(st[16:24],math.Float64bits(x));case types.Decimal:if t.Decimal.Width<=18{x,_:=v.Int64(row);binary.LittleEndian.PutUint64(st[16:24],uint64(x))}else{x,_:=v.Int128(row);binary.LittleEndian.PutUint64(st[16:24],x.Lo);binary.LittleEndian.PutUint64(st[24:32],uint64(x.Hi))};case types.Varchar:r,h,_:=v.StringRefAt(row);var src []byte;if r.External{src=h.ExternalBytes(r)}else{src=r.Inline[:r.Length]};if err:=a.ensureArena(len(src));err!=nil{return err};off:=a.arenaUsed;copy(a.arena.Bytes()[off:off+len(src)],src);a.arenaUsed+=len(src);binary.LittleEndian.PutUint32(st[16:20],uint32(off));binary.LittleEndian.PutUint32(st[20:24],uint32(len(src)));default:return errors.New("min/max store unsupported type")};return nil}
 func(a *HashAggregate)compareStateValue(st []byte,t types.LogicalType,v *vector.Vector,row int)(int,error){switch t.ID{case types.Boolean:x,_:=v.Bool(row);sv:=st[16]!=0;if sv==x{return 0,nil};if !sv&&x{return -1,nil};return 1,nil;case types.TinyInt:x,_:=v.Int8(row);return semantics.CompareInt64(int64(int8(st[16])),int64(x)),nil;case types.SmallInt:x,_:=v.Int16(row);return semantics.CompareInt64(int64(int16(binary.LittleEndian.Uint16(st[16:18]))),int64(x)),nil;case types.Integer,types.DateType:x,_:=v.Int32(row);return semantics.CompareInt64(int64(int32(binary.LittleEndian.Uint32(st[16:20]))),int64(x)),nil;case types.BigInt,types.TimestampType:x,_:=v.Int64(row);return semantics.CompareInt64(int64(binary.LittleEndian.Uint64(st[16:24])),x),nil;case types.HugeInt:x,_:=v.Int128(row);return types.CompareInt128(types.Int128{Lo:binary.LittleEndian.Uint64(st[16:24]),Hi:int64(binary.LittleEndian.Uint64(st[24:32]))},x),nil;case types.Float:x,_:=v.Float32(row);return semantics.CompareFloat32(math.Float32frombits(binary.LittleEndian.Uint32(st[16:20])),x),nil;case types.Double:x,_:=v.Float64(row);return semantics.CompareFloat64(math.Float64frombits(binary.LittleEndian.Uint64(st[16:24])),x),nil;case types.Decimal:sv:=types.Int128FromInt64(int64(binary.LittleEndian.Uint64(st[16:24])));if t.Decimal.Width>18{sv=types.Int128{Lo:binary.LittleEndian.Uint64(st[16:24]),Hi:int64(binary.LittleEndian.Uint64(st[24:32]))}};x,_:=int128Input(v,row);return types.CompareInt128(sv,x),nil;case types.Varchar:off:=int(binary.LittleEndian.Uint32(st[16:20]));n:=int(binary.LittleEndian.Uint32(st[20:24]));r,h,_:=v.StringRefAt(row);var x []byte;if r.External{x=h.ExternalBytes(r)}else{x=r.Inline[:r.Length]};return bytes.Compare(a.arena.Bytes()[off:off+n],x),nil};return 0,errors.New("min/max compare unsupported type")}

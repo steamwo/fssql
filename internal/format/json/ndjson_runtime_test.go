@@ -47,7 +47,7 @@ func TestNewNDJSONRuntimeSourceReusesRealBindFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// runtime constructor 必须主动清空 projection candidate；完整 relation 留给 residual Project。
+	// 未绑定的路径候选仍被清空；runtime 只接受独立 Projection 字段中的绑定列索引。
 	if !source.projection.Empty() {
 		t.Fatal("runtime source accepted projection candidate without ColumnIndex remap contract")
 	}

@@ -92,6 +92,7 @@ type ExternalSort struct {
 	runMeta *memory.Reservation
 	finalized bool
 	stats Stats
+	preparedKeys []preparedSortKey
 }
 
 func New(cfg Config) (*ExternalSort, error) {
@@ -104,6 +105,7 @@ func New(cfg Config) (*ExternalSort, error) {
 	store, err := storagetemp.NewSpillablePageStore(cfg.Temp, cfg.Scope, cfg.Buffers, storagetemp.PageStoreConfig{Compression: cfg.Compression, MinCompressBytes: 1024, SegmentMaxBytes: 64 << 20}); if err != nil { return nil, err }
 	meta, err := cfg.Scope.Reserve(memory.TagMetadata, 0); if err != nil { store.Close(); return nil, err }
 	s := &ExternalSort{cfg: cfg, layout: layout, store: store, runMeta: meta}
+	for _, key := range cfg.Keys { s.preparedKeys = append(s.preparedKeys, preparedSortKey{key:key, column:layout.Columns[key.Column], fixedWidth:layout.FixedWidth}) }
 	if err := s.resetBuilder(); err != nil { meta.Release(); store.Close(); return nil, err }
 	return s, nil
 }
@@ -114,14 +116,61 @@ func (s *ExternalSort) appendRun(r *run) error { if r==nil||r.rows==0{if r!=nil&
 func (s *ExternalSort) Consume(ctx context.Context,c *vector.DataChunk) error { if s.finalized{return errors.New("sort finalized")};if c==nil{return errors.New("nil chunk")};if len(c.Columns)!=len(s.cfg.InputTypes){return errors.New("sort input column count mismatch")};for i:=0;i<c.Cardinality;i++{if err:=ctx.Err();err!=nil{return err};if err:=s.builder.AppendChunkRow(c,i);err!=nil{return err}};s.updatePeak();if s.builderBytes()>s.cfg.MemoryBudget{return s.spillBuilder(ctx)};return nil }
 
 func compareRowsWith(layout exechash.RowLayout,keys []Key,a,b []byte)(int,error){for _,k:=range keys{ad,av,err:=layout.ColumnData(a,k.Column);if err!=nil{return 0,err};bd,bv,err:=layout.ColumnData(b,k.Column);if err!=nil{return 0,err};if !av||!bv{if !av&&!bv{continue};if !av{if k.NullsFirst{return -1,nil};return 1,nil};if k.NullsFirst{return 1,nil};return -1,nil};cmp,err:=compareEncoded(layout.Columns[k.Column].Type,ad,bd);if err!=nil{return 0,err};if cmp!=0{if k.Desc{cmp=-cmp};return cmp,nil}};return 0,nil}
-func (s *ExternalSort) compareRows(a,b []byte)(int,error){return compareRowsWith(s.layout,s.cfg.Keys,a,b)}
+func (s *ExternalSort) compareRows(a,b []byte)(int,error){return comparePreparedRows(s.preparedKeys,a,b)}
 func compareEncoded(t types.LogicalType,a,b []byte)(int,error){switch t.ID{case types.Boolean:av,bv:=a[0]!=0,b[0]!=0;if av==bv{return 0,nil};if !av{return -1,nil};return 1,nil;case types.TinyInt:return semantics.CompareInt64(int64(int8(a[0])),int64(int8(b[0]))),nil;case types.SmallInt:return semantics.CompareInt64(int64(int16(binary.LittleEndian.Uint16(a))),int64(int16(binary.LittleEndian.Uint16(b)))),nil;case types.Integer,types.DateType:return semantics.CompareInt64(int64(int32(binary.LittleEndian.Uint32(a))),int64(int32(binary.LittleEndian.Uint32(b)))),nil;case types.BigInt,types.TimestampType:return semantics.CompareInt64(int64(binary.LittleEndian.Uint64(a)),int64(binary.LittleEndian.Uint64(b))),nil;case types.HugeInt:return types.CompareInt128(types.Int128{Lo:binary.LittleEndian.Uint64(a[:8]),Hi:int64(binary.LittleEndian.Uint64(a[8:16]))},types.Int128{Lo:binary.LittleEndian.Uint64(b[:8]),Hi:int64(binary.LittleEndian.Uint64(b[8:16]))}),nil;case types.Float:return semantics.CompareFloat32(math.Float32frombits(binary.LittleEndian.Uint32(a)),math.Float32frombits(binary.LittleEndian.Uint32(b))),nil;case types.Double:return semantics.CompareFloat64(math.Float64frombits(binary.LittleEndian.Uint64(a)),math.Float64frombits(binary.LittleEndian.Uint64(b))),nil;case types.Decimal:if t.Decimal.Width<=18{return semantics.CompareInt64(int64(binary.LittleEndian.Uint64(a)),int64(binary.LittleEndian.Uint64(b))),nil};return types.CompareInt128(types.Int128{Lo:binary.LittleEndian.Uint64(a[:8]),Hi:int64(binary.LittleEndian.Uint64(a[8:16]))},types.Int128{Lo:binary.LittleEndian.Uint64(b[:8]),Hi:int64(binary.LittleEndian.Uint64(b[8:16]))}),nil;case types.Varchar:return bytes.Compare(a,b),nil;default:return 0,fmt.Errorf("sort compare unsupported type %v",t.ID)}}
 
-type managedIndices struct{buf *memory.Buffer;n int}
-func newManagedIndices(scope *memory.Scope,bm *memory.BufferManager,n int)(*managedIndices,error){b,err:=bm.Allocate(scope,memory.TagSort,n*4);if err!=nil{return nil,err};m:=&managedIndices{buf:b,n:n};for i:=0;i<n;i++{m.set(i,i)};return m,nil}
-func(m *managedIndices)get(i int)int{return int(binary.LittleEndian.Uint32(m.buf.Bytes()[i*4:i*4+4]))}
-func(m *managedIndices)set(i,v int){binary.LittleEndian.PutUint32(m.buf.Bytes()[i*4:i*4+4],uint32(v))}
-func(m *managedIndices)swap(i,j int){a,b:=m.get(i),m.get(j);m.set(i,b);m.set(j,a)}
-func(m *managedIndices)release(){if m.buf!=nil{m.buf.Release();m.buf=nil}}
-func(s *ExternalSort)sortedIndices()(*managedIndices,error){n:=s.builder.Count();idx,err:=newManagedIndices(s.cfg.Scope,s.cfg.Buffers,n);if err!=nil{return nil,err};less:=func(i,j int)(bool,error){cmp,err:=s.compareRows(s.builder.Row(idx.get(i)),s.builder.Row(idx.get(j)));return cmp<0,err};sift:=func(root,end int)error{for{child:=root*2+1;if child>=end{return nil};best:=child;if child+1<end{l,err:=less(best,child+1);if err!=nil{return err};if l{best=child+1}};l,err:=less(root,best);if err!=nil{return err};if !l{return nil};idx.swap(root,best);root=best}};for i:=n/2-1;i>=0;i--{if err:=sift(i,n);err!=nil{idx.release();return nil,err}};for end:=n-1;end>0;end--{idx.swap(0,end);if err:=sift(0,end);err!=nil{idx.release();return nil,err}};return idx,nil}
+type managedIndices struct {
+	buf  *memory.Buffer
+	data []byte
+	n    int
+}
+
+func newManagedIndices(scope *memory.Scope, bm *memory.BufferManager, n int) (*managedIndices, error) {
+	b, err := bm.Allocate(scope, memory.TagSort, n*4)
+	if err != nil {
+		return nil, err
+	}
+	m := &managedIndices{buf: b, data: b.Bytes(), n: n}
+	for i := 0; i < n; i++ {
+		m.set(i, i)
+	}
+	return m, nil
+}
+func (m *managedIndices) get(i int) int { return int(binary.LittleEndian.Uint32(m.data[i*4 : i*4+4])) }
+func (m *managedIndices) set(i, v int)  { binary.LittleEndian.PutUint32(m.data[i*4:i*4+4], uint32(v)) }
+func (m *managedIndices) swap(i, j int) { a, b := m.get(i), m.get(j); m.set(i, b); m.set(j, a) }
+func (m *managedIndices) release() {
+	if m.buf != nil {
+		m.buf.Release()
+		m.buf = nil
+		m.data = nil
+	}
+}
+func (s *ExternalSort) sortedIndices() (*managedIndices, error) {
+	n := s.builder.Count()
+	idx, err := newManagedIndices(s.cfg.Scope, s.cfg.Buffers, n)
+	if err != nil {
+		return nil, err
+	}
+	if n < 2 {
+		return idx, nil
+	}
+	row := s.builder.BorrowRowReader()
+	compare := func(a, b int) (int, error) { return s.compareRows(row(a), row(b)) }
+	prefixes, err := s.newStringPrefixes(row, n)
+	if err != nil {
+		idx.release()
+		return nil, err
+	}
+	if prefixes != nil {
+		defer prefixes.Release()
+		compare = s.prefixComparator(prefixes.Bytes(), row)
+	}
+	err = sortManagedIndices(idx, compare)
+	if err != nil {
+		idx.release()
+		return nil, err
+	}
+	return idx, nil
+}
 func(s *ExternalSort)spillBuilder(ctx context.Context)error{if s.builder==nil||s.builder.Count()==0{return nil};idx,err:=s.sortedIndices();if err!=nil{return err};w,err:=newRunWriter(s.store,s.cfg.Scope,s.cfg.Buffers,s.cfg.SpillBlockBytes);if err!=nil{idx.release();return err};for i:=0;i<idx.n;i++{if err:=ctx.Err();err!=nil{w.release();idx.release();return err};if err:=w.append(ctx,s.builder.Row(idx.get(i)));err!=nil{w.release();idx.release();return err}};idx.release();r,err:=w.close(ctx);if err!=nil{w.release();return err};if err:=s.appendRun(r);err!=nil{if r.pages!=nil{r.pages.Release()};return err};s.builder.Release();s.builder=nil;return s.resetBuilder()}

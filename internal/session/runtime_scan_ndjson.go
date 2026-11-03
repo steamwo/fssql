@@ -17,16 +17,22 @@ func NewNDJSONScanOpenAdapter(binder *jsonformat.NDJSONBinder, scanOptions jsonf
 	}
 	return ScanOpenAdapter{
 		FunctionID: function.ReadNDJSONID,
+		OpenCount: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
+			return jsonformat.NewNDJSONCountSource(ctx, jsonformat.NDJSONRuntimeSourceConfig{
+				Binder: binder, Pattern: spec.Source, ExpectedFingerprint: string(spec.Fingerprint), Scan: scanOptions,
+			})
+		},
 		Open: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
 			if spec.Function != "read_ndjson" {
 				return nil, fmt.Errorf("session: read_ndjson runtime adapter received function %q", spec.Function)
 			}
-			// Filter/Projection/Limit 是 optimizer candidate；当前 source 输出完整绑定 relation，交由 residual operators 保证语义。
+			// Projection 减少类型解码，输出仍保留原 schema 索引及 residual operators。
 			return jsonformat.NewNDJSONRuntimeSource(ctx, jsonformat.NDJSONRuntimeSourceConfig{
 				Binder:              binder,
 				Pattern:             spec.Source,
 				ExpectedFingerprint: string(spec.Fingerprint),
-				Scan:                 scanOptions,
+				Scan:                scanOptions,
+				Projection:          append([]int(nil), spec.Pushdown.Projection...),
 			})
 		},
 	}, nil

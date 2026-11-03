@@ -266,6 +266,7 @@ func (s *RuntimeSource) claimTask(ctx context.Context) (*runtimeScanTask, bool, 
 			return nil, false, err
 		}
 		if s.limit > 0 && s.emitted >= s.limit {
+			s.closeReadyLocked()
 			s.mu.Unlock()
 			return nil, false, nil
 		}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
@@ -20,8 +21,9 @@ type ScanOpenFunc func(context.Context, planner.ScanSpec) (pipeline.Source, erro
 
 // ScanOpenAdapter 将稳定 FunctionID 与 runtime scan callback 关联。
 type ScanOpenAdapter struct {
-	FunctionID function.ID // FunctionID 必须对应 FunctionCatalog 中的 Table function。
+	FunctionID function.ID  // FunctionID 必须对应 FunctionCatalog 中的 Table function。
 	Open       ScanOpenFunc // Open 打开真实 runtime source；返回 nil source 视为错误。
+	OpenCount  ScanOpenFunc // OpenCount optionally returns one exact BIGINT COUNT(*) row.
 }
 
 // InternalScanOpenAdapter 只用于 Planner 生成的保留 virtual scan 名称。
@@ -37,6 +39,7 @@ type RuntimeScanSourceFactory struct {
 	functions *function.Catalog            // functions 是唯一 FunctionCatalog。
 	adapters  map[function.ID]ScanOpenFunc // adapters 构造后不可变。
 	internal  map[string]ScanOpenFunc      // internal 保存 statement-scoped virtual source callback，不构成 SQL FunctionCatalog surface。
+	counts    map[function.ID]ScanOpenFunc
 }
 
 // NewRuntimeScanSourceFactory 冻结 runtime table-function scan registry。
@@ -48,6 +51,7 @@ func NewRuntimeScanSourceFactory(functions *function.Catalog, adapters []ScanOpe
 		return nil, fmt.Errorf("session: too many scan open adapters: %d > %d", len(adapters), maxScanOpenAdapters)
 	}
 	bound := make(map[function.ID]ScanOpenFunc, len(adapters))
+	counts := make(map[function.ID]ScanOpenFunc)
 	for _, adapter := range adapters {
 		if adapter.FunctionID == function.InvalidID || adapter.Open == nil {
 			return nil, fmt.Errorf("session: invalid scan open adapter")
@@ -60,8 +64,11 @@ func NewRuntimeScanSourceFactory(functions *function.Catalog, adapters []ScanOpe
 			return nil, fmt.Errorf("session: scan open adapter references unknown/non-table function id %d", adapter.FunctionID)
 		}
 		bound[adapter.FunctionID] = adapter.Open
+		if adapter.OpenCount != nil {
+			counts[adapter.FunctionID] = adapter.OpenCount
+		}
 	}
-	return &RuntimeScanSourceFactory{functions: functions, adapters: bound, internal: make(map[string]ScanOpenFunc)}, nil
+	return &RuntimeScanSourceFactory{functions: functions, adapters: bound, counts: counts, internal: make(map[string]ScanOpenFunc)}, nil
 }
 
 // WithInternalAdapters 返回带 statement-scoped virtual scan callback 的新 immutable registry。
@@ -77,6 +84,7 @@ func (f *RuntimeScanSourceFactory) WithInternalAdapters(adapters []InternalScanO
 		functions: f.functions,
 		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)),
 		internal:  make(map[string]ScanOpenFunc, len(f.internal)+len(adapters)),
+		counts:    f.counts,
 	}
 	for id, open := range f.adapters {
 		out.adapters[id] = open
@@ -95,6 +103,30 @@ func (f *RuntimeScanSourceFactory) WithInternalAdapters(adapters []InternalScanO
 		out.internal[name] = adapter.Open
 	}
 	return out, nil
+}
+
+func (f *RuntimeScanSourceFactory) OpenAggregateScan(ctx context.Context, spec planner.ScanSpec, aggregates []planner.AggregateSpec) (pipeline.Source, bool, error) {
+	if f == nil || f.functions == nil {
+		return nil, false, fmt.Errorf("session: uninitialized scan factory")
+	}
+	if len(aggregates) != 1 || len(spec.Pushdown.Filters) != 0 || spec.Pushdown.Limit != 0 {
+		return nil, false, nil
+	}
+	a := aggregates[0]
+	if function.ID(a.FunctionID) != function.CountID || a.Distinct || len(a.Arguments) != 0 || a.Output.Type.ID != types.BigInt {
+		return nil, false, nil
+	}
+	def, ok := f.functions.Lookup(strings.TrimSpace(spec.Function))
+	if !ok || def.Kind != function.Table || f.counts[def.ID] == nil {
+		return nil, false, nil
+	}
+	if spec.RelationID == "" || spec.Source == "" || spec.Fingerprint == "" {
+		return nil, false, fmt.Errorf("session: metadata aggregate requires frozen scan identity")
+	}
+	prepared := cloneRuntimeScanSpec(spec)
+	prepared.Function = def.Name
+	source, err := f.counts[def.ID](ctx, prepared)
+	return source, true, err
 }
 
 // Open 根据 ScanSpec.Function 分派真实 Stable table function 或 Planner-only virtual source。

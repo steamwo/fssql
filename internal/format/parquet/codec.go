@@ -137,11 +137,28 @@ func readSnappyUvarint(src []byte) (int, int) {
 }
 
 func snappyCopy(out []byte, off, l, limit int) ([]byte, error) {
-	if off <= 0 || off > len(out) || len(out)+l > limit {
+	if off <= 0 || off > len(out) || l < 0 || l > limit-len(out) {
 		return nil, errors.New("parquet: invalid snappy copy offset")
 	}
-	for j := 0; j < l; j++ {
-		out = append(out, out[len(out)-off])
+	start := len(out)
+	if l > cap(out)-start {
+		out = append(out, make([]byte, l)...)
+	} else {
+		out = out[:start+l]
 	}
+	copySnappyMatch(out, start, off, l)
 	return out, nil
+}
+
+// A Snappy match may overlap its own output (offset 1 is a repeated byte).
+// Seed from initialized bytes, then double the available pattern on each copy.
+// Each copy reads only bytes already produced by this or an earlier match.
+func copySnappyMatch(dst []byte, start, offset, length int) {
+	if length == 0 {
+		return
+	}
+	filled := copy(dst[start:start+min(offset, length)], dst[start-offset:start])
+	for filled < length {
+		filled += copy(dst[start+filled:start+length], dst[start:start+filled])
+	}
 }

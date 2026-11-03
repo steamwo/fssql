@@ -82,10 +82,18 @@ func NewProject(executor *expression.Executor, expressions []*binder.BoundExpres
 	return &Project{Executor: executor, Expressions: out}, nil
 }
 
-// Transform 逐列执行 SQL expression，并复制到独立 flat vectors，避免 Dictionary Vector 借用 input backing storage。
+// Transform materializes borrowed column references and transfers owned
+// expression results. Every output is independent from input backing storage.
 func (p *Project) Transform(ctx context.Context, in *vector.DataChunk) (*vector.DataChunk, error) {
 	if p == nil || p.Executor == nil || in == nil || len(p.Expressions) == 0 {
 		return nil, fmt.Errorf("sql project requires initialized transform and input chunk")
+	}
+	if in.Cardinality < 0 || in.Cardinality > vector.DefaultVectorSize {
+		return nil, fmt.Errorf("sql project invalid chunk cardinality")
+	}
+	var identity [vector.DefaultVectorSize]int
+	for i := 0; i < in.Cardinality; i++ {
+		identity[i] = i
 	}
 	columns := make([]*vector.Vector, 0, len(p.Expressions))
 	for index, expr := range p.Expressions {
@@ -93,32 +101,36 @@ func (p *Project) Transform(ctx context.Context, in *vector.DataChunk) (*vector.
 			releaseVectors(columns)
 			return nil, err
 		}
+		if expr.Kind == binder.BoundColumn {
+			if expr.ColumnIndex < 0 || expr.ColumnIndex >= len(in.Columns) {
+				releaseVectors(columns)
+				return nil, fmt.Errorf("sql project column out of range")
+			}
+			materialized, err := vector.CopySelection(p.Executor.Scope, p.Executor.Buffers, in.Columns[expr.ColumnIndex], identity[:in.Cardinality])
+			if err != nil {
+				releaseVectors(columns)
+				return nil, err
+			}
+			columns = append(columns, materialized)
+			continue
+		}
 		value, err := p.Executor.ExecuteSQL(expr, in)
 		if err != nil {
 			releaseVectors(columns)
 			return nil, fmt.Errorf("sql project expression %d: %w", index, err)
 		}
-		materialized, err := vector.NewFlat(p.Executor.Scope, p.Executor.Buffers, value.Type, in.Cardinality)
-		if err != nil {
-			value.Release()
-			releaseVectors(columns)
-			return nil, err
+		// Flat and constant expression results already own their storage.
+		// Dictionary expressions borrow the input and must still materialize.
+		if value.Kind != vector.Dictionary {
+			columns = append(columns, value)
+			continue
 		}
-		for row := 0; row < in.Cardinality; row++ {
-			if err := ctx.Err(); err != nil {
-				materialized.Release()
-				value.Release()
-				releaseVectors(columns)
-				return nil, err
-			}
-			if err := vector.CopyValue(value, row, materialized, row); err != nil {
-				materialized.Release()
-				value.Release()
-				releaseVectors(columns)
-				return nil, fmt.Errorf("sql project expression %d row %d: %w", index, row, err)
-			}
-		}
+		materialized, err := vector.CopySelection(p.Executor.Scope, p.Executor.Buffers, value, identity[:in.Cardinality])
 		value.Release()
+		if err != nil {
+			releaseVectors(columns)
+			return nil, fmt.Errorf("sql project expression %d: %w", index, err)
+		}
 		columns = append(columns, materialized)
 	}
 	chunk, err := vector.NewDataChunk(columns...)
@@ -129,7 +141,7 @@ func (p *Project) Transform(ctx context.Context, in *vector.DataChunk) (*vector.
 	return chunk, nil
 }
 
-// materializeSelection 根据 selection 将输入所有列复制为独立 flat vectors；复杂类型缺少 CopyValue kernel 时显式失败。
+// materializeSelection owns selected data and preserves constant placeholders.
 func materializeSelection(ctx context.Context, executor *expression.Executor, in *vector.DataChunk, rows []int) (*vector.DataChunk, error) {
 	columns := make([]*vector.Vector, 0, len(in.Columns))
 	for columnIndex, source := range in.Columns {
@@ -137,22 +149,14 @@ func materializeSelection(ctx context.Context, executor *expression.Executor, in
 			releaseVectors(columns)
 			return nil, fmt.Errorf("sql filter input column %d is nil", columnIndex)
 		}
-		out, err := vector.NewFlat(executor.Scope, executor.Buffers, source.Type, len(rows))
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			releaseVectors(columns)
 			return nil, err
 		}
-		for outputRow, inputRow := range rows {
-			if err := ctx.Err(); err != nil {
-				out.Release()
-				releaseVectors(columns)
-				return nil, err
-			}
-			if err := vector.CopyValue(source, inputRow, out, outputRow); err != nil {
-				out.Release()
-				releaseVectors(columns)
-				return nil, fmt.Errorf("sql filter column %d row %d: %w", columnIndex, inputRow, err)
-			}
+		out, err := vector.CopySelection(executor.Scope, executor.Buffers, source, rows)
+		if err != nil {
+			releaseVectors(columns)
+			return nil, fmt.Errorf("sql filter column %d: %w", columnIndex, err)
 		}
 		columns = append(columns, out)
 	}

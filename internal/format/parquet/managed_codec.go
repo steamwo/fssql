@@ -70,13 +70,11 @@ func decodeSnappyInto(dst, src []byte) error {
 	}
 	i, out := n, 0
 	copyBack := func(off, l int) error {
-		if off <= 0 || off > out || out+l > len(dst) {
+		if off <= 0 || off > out || l < 0 || l > len(dst)-out {
 			return errors.New("parquet: invalid snappy copy offset")
 		}
-		for j := 0; j < l; j++ {
-			dst[out] = dst[out-off]
-			out++
-		}
+		copySnappyMatch(dst, out, off, l)
+		out += l
 		return nil
 	}
 	for i < len(src) && out < len(dst) {

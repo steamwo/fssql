@@ -34,7 +34,7 @@ func NewLimit(executor *expression.Executor, offset, limit uint64, unlimited boo
 }
 
 // Transform 对当前 chunk 应用全局 OFFSET/LIMIT，并物化独立 owned DataChunk。
-// 即使 LIMIT 已满足，当前实现仍返回空 chunk；source early-stop 是独立性能优化，不影响语义正确性。
+// Pipeline checks Finished before claiming more source work.
 func (l *Limit) Transform(ctx context.Context, in *vector.DataChunk) (*vector.DataChunk, error) {
 	if l == nil || l.Executor == nil || in == nil {
 		return nil, fmt.Errorf("sql limit requires initialized transform and input chunk")
@@ -61,4 +61,10 @@ func (l *Limit) Transform(ctx context.Context, in *vector.DataChunk) (*vector.Da
 		l.emitted++
 	}
 	return materializeSelection(ctx, l.Executor, in, rows)
+}
+
+func (l *Limit) Finished() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return !l.Unlimited && l.emitted >= l.Limit
 }

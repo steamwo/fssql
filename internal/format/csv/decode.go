@@ -18,6 +18,8 @@ type DecodeOptions struct {
 	Lex         LexConfig
 	Final       bool
 	NullLiteral []byte
+	Projection  []int // Unread columns are constant NULL placeholders.
+	MaxRows     int   // Zero uses the normal vector-size batch.
 }
 
 // DecodeChunk decodes at most one engine vector-size batch directly into the
@@ -31,11 +33,20 @@ func DecodeChunk(input []byte, schema []types.LogicalType, opts DecodeOptions, s
 	if len(schema) == 0 {
 		return nil, 0, fmt.Errorf("csv: schema must contain at least one column")
 	}
+	for _, index := range opts.Projection {
+		if index < 0 || index >= len(schema) {
+			return nil, 0, fmt.Errorf("csv: projection index %d out of range", index)
+		}
+	}
 	if opts.Lex == (LexConfig{}) {
 		opts.Lex = DefaultLexConfig()
 	}
 
-	rows, consumed, err := countChunkRows(input, opts.Lex, opts.Final, vector.DefaultVectorSize)
+	maxRows := opts.MaxRows
+	if maxRows <= 0 || maxRows > vector.DefaultVectorSize {
+		maxRows = vector.DefaultVectorSize
+	}
+	rows, consumed, err := countChunkRows(input, opts.Lex, opts.Final, maxRows)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -49,8 +60,17 @@ func DecodeChunk(input []byte, schema []types.LogicalType, opts DecodeOptions, s
 			col.Release()
 		}
 	}
-	for _, typ := range schema {
-		col, err := vector.NewFlat(scope, bm, typ, rows)
+	for index, typ := range schema {
+		var col *vector.Vector
+		var err error
+		if decodeColumnSelected(opts.Projection, index) {
+			col, err = vector.NewFlat(scope, bm, typ, rows)
+		} else {
+			col, err = vector.NewConstant(scope, bm, typ, rows)
+			if err == nil {
+				col.SetNull(0)
+			}
+		}
 		if err != nil {
 			cleanup()
 			return nil, 0, err
@@ -79,6 +99,10 @@ func countChunkRows(input []byte, cfg LexConfig, final bool, maxRows int) (rows,
 	}
 	lastRecordStart := 0
 	for i := 0; i < len(input); i++ {
+		if n := m.advanceData(input[i:]); n > 0 {
+			i += n - 1
+			continue
+		}
 		event, stepErr := m.Step(input[i])
 		if stepErr != nil {
 			return 0, 0, stepErr
@@ -120,19 +144,37 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 	if initial < 1 {
 		initial = 1
 	}
-	scratch, err := bm.Allocate(scope, memory.TagCSVDecode, initial)
-	if err != nil {
-		return err
-	}
-	defer scratch.Release()
-	scratchBytes := scratch.Bytes()
+	var scratch *memory.Buffer
+	defer func() {
+		if scratch != nil {
+			scratch.Release()
+		}
+	}()
+	var scratchBytes []byte
 	used := 0
 	row := 0
 	col := 0
+	fieldStart, fieldEnd := 0, 0
+	quotedField := false
+	selected := make([]bool, len(schema))
+	for i := range selected {
+		selected[i] = decodeColumnSelected(opts.Projection, i)
+	}
 
-	appendByte := func(b byte) error {
-		if used == len(scratchBytes) {
+	appendData := func(data []byte) error {
+		if scratch == nil {
+			var err error
+			scratch, err = bm.Allocate(scope, memory.TagCSVDecode, initial)
+			if err != nil {
+				return err
+			}
+			scratchBytes = scratch.Bytes()
+		}
+		if len(data) > len(scratchBytes)-used {
 			newCap := len(scratchBytes) * 2
+			if newCap < used+len(data) {
+				newCap = used + len(data)
+			}
 			if newCap < 64 {
 				newCap = 64
 			}
@@ -141,8 +183,8 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 			}
 			scratchBytes = scratch.Bytes()
 		}
-		scratchBytes[used] = b
-		used++
+		copy(scratchBytes[used:], data)
+		used += len(data)
 		return nil
 	}
 	finishField := func() error {
@@ -152,11 +194,18 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 		if col >= len(schema) {
 			return fmt.Errorf("csv: row %d has more than %d columns", row+1, len(schema))
 		}
-		if err := decodeField(chunk.Columns[col], schema[col], row, scratchBytes[:used], opts.NullLiteral); err != nil {
-			return fmt.Errorf("csv: row %d column %d: %w", row+1, col+1, err)
+		if selected[col] {
+			raw := scratchBytes[:used]
+			if !quotedField {
+				raw = input[fieldStart:fieldEnd]
+			}
+			if err := decodeField(chunk.Columns[col], schema[col], row, raw, opts.NullLiteral); err != nil {
+				return fmt.Errorf("csv: row %d column %d: %w", row+1, col+1, err)
+			}
 		}
 		used = 0
 		col++
+		quotedField = false
 		return nil
 	}
 	finishRecord := func() error {
@@ -169,12 +218,29 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 	}
 
 	for i := 0; i < len(input); i++ {
+		fieldEnd = i
+		if i == fieldStart {
+			quotedField = input[i] == opts.Lex.Quote
+		}
+		if n := m.advanceData(input[i:]); n > 0 {
+			if quotedField && col < len(selected) && selected[col] {
+				if err := appendData(input[i : i+n]); err != nil {
+					return err
+				}
+			}
+			i += n - 1
+			continue
+		}
+		skipLF := m.skipLF && input[i] == '\n'
 		event, stepErr := m.Step(input[i])
 		if stepErr != nil {
 			return stepErr
 		}
-		if event.Has(EventData) {
-			if err := appendByte(input[i]); err != nil {
+		if skipLF {
+			fieldStart = i + 1
+		}
+		if event.Has(EventData) && quotedField && col < len(selected) && selected[col] {
+			if err := appendData(input[i : i+1]); err != nil {
 				return err
 			}
 		}
@@ -182,6 +248,7 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 			if err := finishField(); err != nil {
 				return err
 			}
+			fieldStart = i + 1
 		}
 		if event.Has(EventRecordEnd) {
 			if err := finishRecord(); err != nil {
@@ -193,6 +260,7 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 		return err
 	}
 	if row < chunk.Cardinality {
+		fieldEnd = len(input)
 		if err := finishField(); err != nil {
 			return err
 		}
@@ -204,6 +272,18 @@ func decodeRows(input []byte, schema []types.LogicalType, opts DecodeOptions, ch
 		return fmt.Errorf("csv: decoded %d rows, planned %d", row, chunk.Cardinality)
 	}
 	return nil
+}
+
+func decodeColumnSelected(projection []int, column int) bool {
+	if len(projection) == 0 {
+		return true
+	}
+	for _, index := range projection {
+		if index == column {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeField(dst *vector.Vector, typ types.LogicalType, row int, raw, nullLiteral []byte) error {

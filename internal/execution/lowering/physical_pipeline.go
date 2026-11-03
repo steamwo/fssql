@@ -19,6 +19,12 @@ type ScanSourceFactory interface {
 	Open(context.Context, planner.ScanSpec) (pipeline.Source, error)
 }
 
+// AggregateScanSourceFactory optionally executes an exact global aggregate
+// inside the source. Unsupported shapes retain the ordinary blocking path.
+type AggregateScanSourceFactory interface {
+	OpenAggregateScan(context.Context, planner.ScanSpec, []planner.AggregateSpec) (pipeline.Source, bool, error)
+}
+
 // DistinctFactory 把 generic PhysicalDistinct 映射为真实 blocking DISTINCT operator。
 type DistinctFactory interface {
 	OpenDistinct(context.Context, []planner.Column, planner.CardinalityEstimate) (blocking.Operator, error)
@@ -389,6 +395,21 @@ func combineAbort(first, second func() error) func() error {
 
 // lowerAggregate 创建 aggregate operator 后复用统一 blocking-stage 生命周期。
 func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	child := plan.Children[0]
+	if len(plan.GroupBy) == 0 && child.Kind == planner.PhysicalScan && child.Scan != nil {
+		if sources, ok := b.Sources.(AggregateScanSourceFactory); ok {
+			source, accepted, err := sources.OpenAggregateScan(ctx, *child.Scan, plan.Aggregates)
+			if err != nil {
+				return loweredStage{}, err
+			}
+			if accepted {
+				if source == nil {
+					return loweredStage{}, fmt.Errorf("source aggregate returned nil source")
+				}
+				return loweredStage{source: source, relationID: child.Scan.RelationID + ":source-aggregate"}, nil
+			}
+		}
+	}
 	operator, _, err := b.openBlockingOperator(ctx, plan)
 	if err != nil {
 		return loweredStage{}, err

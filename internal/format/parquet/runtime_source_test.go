@@ -52,7 +52,7 @@ func (s *runtimeFakeScanner) Close() {
 	}
 }
 
-func runtimeTestFile(t *testing.T, name string) fileset.FileSnapshot {
+func runtimeTestFile(t testing.TB, name string) fileset.FileSnapshot {
 	t.Helper()
 	u, err := vfs.ParseURI("mem://bucket/" + name)
 	if err != nil {

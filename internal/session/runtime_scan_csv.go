@@ -17,16 +17,21 @@ func NewCSVScanOpenAdapter(sourceBinder *csv.SourceBinder, scanOptions csv.ScanO
 	}
 	return ScanOpenAdapter{
 		FunctionID: function.ReadCSVID,
+		OpenCount: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
+			return csv.NewCountSource(ctx, csv.RuntimeSourceConfig{Binder: sourceBinder, Pattern: spec.Source, ExpectedFingerprint: string(spec.Fingerprint), Scan: scanOptions})
+		},
 		Open: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
 			if spec.Function != "read_csv" {
 				return nil, fmt.Errorf("session: read_csv runtime adapter received function %q", spec.Function)
 			}
-			// Filter/Projection/Limit 目前只是 optimizer candidate；CSV source 输出完整绑定 relation，交给 residual operators 保证语义。
+			opts := scanOptions
+			opts.Limit = spec.Pushdown.Limit
+			opts.Projection = append([]int(nil), spec.Pushdown.Projection...)
 			return csv.NewRuntimeSource(ctx, csv.RuntimeSourceConfig{
 				Binder:              sourceBinder,
 				Pattern:             spec.Source,
 				ExpectedFingerprint: string(spec.Fingerprint),
-				Scan:                 scanOptions,
+				Scan:                opts,
 			})
 		},
 	}, nil

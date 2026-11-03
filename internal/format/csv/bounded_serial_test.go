@@ -16,6 +16,7 @@ type trackingCSVDriver struct {
 	mu       sync.Mutex
 	reads    int
 	maxRange int64
+	total    int64
 	failAt   int
 }
 
@@ -23,6 +24,7 @@ func (d *trackingCSVDriver) ReadRange(ctx context.Context, r vfs.RangeRequest, s
 	d.mu.Lock()
 	d.reads++
 	read := d.reads
+	d.total += r.Length
 	if r.Length > d.maxRange {
 		d.maxRange = r.Length
 	}
@@ -38,6 +40,7 @@ func (d *trackingCSVDriver) reset(failAt int) {
 	d.mu.Lock()
 	d.reads = 0
 	d.maxRange = 0
+	d.total = 0
 	d.failAt = failAt
 	d.mu.Unlock()
 }
@@ -46,6 +49,12 @@ func (d *trackingCSVDriver) stats() (reads int, maxRange int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.reads, d.maxRange
+}
+
+func (d *trackingCSVDriver) totalBytes() int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.total
 }
 
 func TestSequentialCSVUsesBoundedRangeReads(t *testing.T) {
@@ -100,6 +109,10 @@ func TestSequentialCSVUsesBoundedRangeReads(t *testing.T) {
 	if maxRange >= int64(len(data)) {
 		t.Fatalf("serial scan requested whole file: range=%d file=%d", maxRange, len(data))
 	}
+	// 串行窗口只应重复读取首个窗口未消费的尾部，不能按窗口大小逐批重复读取。
+	if total := driver.totalBytes(); total > int64(len(data))+defaultSerialRangeBytes {
+		t.Fatalf("serial scan read %d bytes for %d-byte file", total, len(data))
+	}
 	if runScope.Used() != 0 {
 		t.Fatalf("runtime managed leak=%d", runScope.Used())
 	}
@@ -108,6 +121,50 @@ func TestSequentialCSVUsesBoundedRangeReads(t *testing.T) {
 	}
 	if err := bindScope.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSequentialCSVStripsUTF8BOM(t *testing.T) {
+	for _, header := range []bool{false, true} {
+		t.Run(fmt.Sprintf("header=%v", header), func(t *testing.T) {
+			body := "1,a\n2,b\n"
+			if header {
+				body = "id,note\n" + body
+			}
+			data := append([]byte{0xEF, 0xBB, 0xBF}, []byte(body)...)
+			driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+			registry, err := vfs.NewRegistry(driver)
+			if err != nil {
+				t.Fatal(err)
+			}
+			buffers := memory.NewBufferManager(nil)
+			bindManager := memory.NewManager(8 << 20)
+			bindScope := bindManager.NewScope()
+			binder, err := NewSourceBinder(registry, bindScope, buffers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err := binder.Bind(context.Background(), driver.uri.String(), SourceBindOptions{Inference: InferenceOptions{Header: header}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if header && binding.Schema().Fields[0].Name != "id" {
+				t.Fatalf("header column name=%q", binding.Schema().Fields[0].Name)
+			}
+			runManager := memory.NewManager(8 << 20)
+			runScope := runManager.NewScope()
+			source, err := NewSource(context.Background(), registry, binding, ScanOptions{EnableParallel: false}, runScope, buffers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := collectIDs(t, source, 1)
+			if len(ids) != 2 || ids[0] != 1 || ids[1] != 2 {
+				t.Fatalf("ids=%v", ids)
+			}
+			if runScope.Used() != 0 {
+				t.Fatalf("runtime managed leak=%d", runScope.Used())
+			}
+		})
 	}
 }
 

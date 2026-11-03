@@ -33,6 +33,10 @@ type TransformOperator interface {
 	Transform(context.Context, *vector.DataChunk) (*vector.DataChunk, error)
 }
 
+// FinishingTransform reports normal early completion, rather than cancellation.
+// Workers already inside Next finish their owned work before Source.Close.
+type FinishingTransform interface{ Finished() bool }
+
 type Sink interface {
 	Consume(context.Context, *vector.DataChunk) error
 	Finalize(context.Context) error
@@ -82,6 +86,14 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 	for i := 0; i < workers; i++ {
 		tasks[i] = scheduler.NewTask(func(ctx context.Context) (scheduler.TaskState, error) {
 			for {
+				if err := ctx.Err(); err != nil {
+					return scheduler.FAILED, err
+				}
+				for _, transform := range p.Transforms {
+					if finishing, ok := transform.(FinishingTransform); ok && finishing.Finished() {
+						return scheduler.DONE, nil
+					}
+				}
 				chunk, ok, err := p.Source.Next(ctx)
 				if err != nil {
 					return scheduler.FAILED, err

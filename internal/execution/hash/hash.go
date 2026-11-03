@@ -313,6 +313,31 @@ type TupleDataCollection struct {
 	rowWidth, count, capacity, used int
 }
 
+// BorrowRowReader snapshots the managed backing slices for an exclusive read
+// phase. The caller must not append, resize or release the collection until
+// the reader is discarded. It acquires buffer locks once, outside comparisons.
+func (c *TupleDataCollection) BorrowRowReader() func(int) []byte {
+	data := c.buf.Bytes()
+	count := c.count
+	if c.layout == nil {
+		return func(row int) []byte {
+			if row < 0 || row >= count {
+				return nil
+			}
+			return data[row*c.rowWidth : (row+1)*c.rowWidth]
+		}
+	}
+	offsets := c.offsets.Bytes()
+	return func(row int) []byte {
+		if row < 0 || row >= count {
+			return nil
+		}
+		start := binary.LittleEndian.Uint32(offsets[row*4 : row*4+4])
+		end := binary.LittleEndian.Uint32(offsets[(row+1)*4 : (row+1)*4+4])
+		return data[start:end]
+	}
+}
+
 func NewTupleDataCollection(scope *memory.Scope, bm *memory.BufferManager, rowWidth, capacity int) (*TupleDataCollection, error) {
 	if rowWidth <= 0 {
 		return nil, errors.New("invalid row width")

@@ -51,25 +51,22 @@ func (o *Optimizer) markPushdownCandidates(p *planner.LogicalPlan) {
 			child.Scan.Pushdown.Filters = append(child.Scan.Pushdown.Filters, p.Predicate)
 		}
 	case planner.LogicalProject:
-		cols, ok := projectionColumns(p.Projection)
-		if !ok {
-			return
+		needed := make(map[int]struct{})
+		for _, expr := range p.Projection {
+			collectBoundColumnIndexes(expr, needed)
 		}
-		scan, filters := scanBelowResidualFilters(child)
-		if scan == nil || scan.Scan == nil {
-			return
+		o.markRequiredScanColumns(child, needed)
+	case planner.LogicalAggregate:
+		needed := make(map[int]struct{})
+		for _, expr := range p.GroupBy {
+			collectBoundColumnIndexes(expr, needed)
 		}
-		needed := make(map[int]struct{}, len(cols))
-		for _, col := range cols {
-			needed[col] = struct{}{}
+		for _, aggregate := range p.Aggregates {
+			for _, expr := range aggregate.Arguments {
+				collectBoundColumnIndexes(expr, needed)
+			}
 		}
-		// Residual filters still execute against the Binder's original column
-		// indexes. Keep every referenced input column physically available even
-		// when the concrete format cannot translate that predicate for pruning.
-		for _, filter := range filters {
-			collectBoundColumnIndexes(filter, needed)
-		}
-		scan.Scan.Pushdown.Projection = sortedColumnIndexes(needed)
+		o.markRequiredScanColumns(child, needed)
 	case planner.LogicalLimit:
 		// LIMIT may cross a pure-column Project because it neither changes row
 		// count nor evaluates expressions that could introduce observable errors.
@@ -83,6 +80,33 @@ func (o *Optimizer) markPushdownCandidates(p *planner.LogicalPlan) {
 		if p.Offset == 0 && p.Limit != planner.UnlimitedRows && p.Limit > 0 && (scan.Scan.Pushdown.Limit == 0 || p.Limit < scan.Scan.Pushdown.Limit) {
 			scan.Scan.Pushdown.Limit = p.Limit
 		}
+	}
+}
+
+// Only cross operators that preserve relation indexes. Every residual
+// expression remains executable, including predicates unsupported by metadata.
+func (o *Optimizer) markRequiredScanColumns(node *planner.LogicalPlan, needed map[int]struct{}) {
+	for node != nil {
+		switch node.Kind {
+		case planner.LogicalScan:
+			if node.Scan != nil && len(needed) > 0 {
+				node.Scan.Pushdown.Projection = sortedColumnIndexes(needed)
+			}
+			return
+		case planner.LogicalFilter:
+			collectBoundColumnIndexes(node.Predicate, needed)
+		case planner.LogicalSort:
+			for _, key := range node.Sort {
+				collectBoundColumnIndexes(key.Expr, needed)
+			}
+		case planner.LogicalLimit:
+		default:
+			return
+		}
+		if len(node.Children) != 1 {
+			return
+		}
+		node = node.Children[0]
 	}
 }
 

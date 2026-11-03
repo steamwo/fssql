@@ -92,6 +92,7 @@ type typedDecoder struct {
 	projection ProjectedPathSet
 	scratch    *memory.Buffer
 	path       [maxJSONDepth]string
+	recordSeen []bool // Reused by sequential record passes; nested objects keep local state.
 }
 
 func newTypedDecoder(proj ProjectedPathSet, scope *memory.Scope, bm *memory.BufferManager) (*typedDecoder, error) {
@@ -157,6 +158,7 @@ func DecodeRecords(records [][]byte, schema []types.StructField, projection Proj
 		return nil, fmt.Errorf("json: batch exceeds vector size")
 	}
 	plans := make([]*vectorPlan, len(schema))
+	needsCount := false
 	for i, f := range schema {
 		p, err := newPlan(f.Type)
 		if err != nil {
@@ -164,20 +166,37 @@ func DecodeRecords(records [][]byte, schema []types.StructField, projection Proj
 		}
 		setInstances(p, len(records))
 		plans[i] = p
+		if projectedList(f.Type, projection, []string{f.Name}) {
+			needsCount = true
+		}
 	}
 	d, err := newTypedDecoder(projection, scope, bm)
 	if err != nil {
 		return nil, err
 	}
 	defer d.close()
-	for _, rec := range records {
-		if err := d.countRecord(rec, schema, plans); err != nil {
-			return nil, err
+	d.recordSeen = make([]bool, len(schema))
+	// Scalar/STRUCT vectors already have an exact row count. Only a selected
+	// LIST needs an element-count pass before managed child-vector allocation.
+	if needsCount {
+		for _, rec := range records {
+			if err := d.countRecord(rec, schema, plans); err != nil {
+				return nil, err
+			}
 		}
 	}
 	cols := make([]*vector.Vector, 0, len(plans))
-	for _, p := range plans {
-		v, err := allocatePlan(p, scope, bm)
+	for i, p := range plans {
+		var v *vector.Vector
+		var err error
+		if projection.Relevant([]string{schema[i].Name}) {
+			v, err = allocatePlan(p, scope, bm)
+		} else {
+			v, err = vector.NewConstant(scope, bm, p.typ, len(records))
+			if err == nil {
+				v.SetNull(0)
+			}
+		}
 		if err != nil {
 			for _, c := range cols {
 				c.Release()
@@ -214,7 +233,8 @@ func (d *typedDecoder) countRecord(rec []byte, schema []types.StructField, plans
 	if first.Kind != TokenLBrace {
 		return fmt.Errorf("json: record must be object")
 	}
-	seen := make([]bool, len(schema))
+	seen := d.recordSeen
+	clear(seen)
 	key, err := t.Next()
 	if err != nil {
 		return err
@@ -392,7 +412,8 @@ func (d *typedDecoder) decodeRecord(rec []byte, row int, schema []types.StructFi
 	if first.Kind != TokenLBrace {
 		return fmt.Errorf("json: record must be object")
 	}
-	seen := make([]bool, len(schema))
+	seen := d.recordSeen
+	clear(seen)
 	key, err := t.Next()
 	if err != nil {
 		return err

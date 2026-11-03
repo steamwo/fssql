@@ -22,6 +22,11 @@ func NewParquetScanOpenAdapter(sourceBinder *parquet.SourceBinder) (ScanOpenAdap
 	}
 	return ScanOpenAdapter{
 		FunctionID: function.ReadParquetID,
+		OpenCount: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
+			return parquet.NewMetadataCountSource(ctx, parquet.RuntimeSourceConfig{
+				Binder: sourceBinder, Pattern: spec.Source, ExpectedFingerprint: string(spec.Fingerprint),
+			})
+		},
 		Open: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
 			if spec.Function != "read_parquet" {
 				return nil, fmt.Errorf("session: read_parquet runtime adapter received function %q", spec.Function)

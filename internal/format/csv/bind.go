@@ -100,8 +100,10 @@ func (b *SourceBinder) Bind(ctx context.Context, pattern string, opts SourceBind
 	for {
 		result, readErr := driver.ReadRange(ctx, vfs.RangeRequest{URI: file.URI, Offset: 0, Length: sample, Expected: &file.Identity, Tag: memory.TagReadAhead}, b.scope, b.bm)
 		if readErr != nil { return SourceBinding{}, readErr }
+		// 与 DuckDB 一致：文件起始的 UTF-8 BOM 不属于首列名/首列值。
+		data, _ := trimCSVUTF8BOM(result.Buffer.Bytes())
 		inferOpts.Final = sample == file.Size
-		inferred, inferErr := InferSchema(result.Buffer.Bytes(), inferOpts, b.scope, b.bm)
+		inferred, inferErr := InferSchema(data, inferOpts, b.scope, b.bm)
 		result.Buffer.Release()
 		if inferErr == nil {
 			return SourceBinding{scanSet: scanSet, schema: inferred, inference: opts.Inference, schemaFile: 1}, nil

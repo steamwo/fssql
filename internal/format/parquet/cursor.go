@@ -7,13 +7,12 @@ import (
 	"io"
 
 	"github.com/steamwo/fssql/internal/core/memory"
-	coretypes "github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
 const (
-	initialPageHeaderProbe = int64(16)
+	initialPageHeaderProbe = int64(128)
 	maxPageHeaderProbe     = int64(64 << 10)
 )
 
@@ -71,8 +70,12 @@ type ColumnCursor struct {
 	end        int64
 	consumed   int64
 	page       *columnPageState
-	pending    *ColumnEntry
+	pending    ColumnEntry
+	hasPending bool
 	dictionary *vector.Vector
+	headerTail *memory.Buffer
+	headerAt   int64
+	headerSize int
 	metrics    ColumnCursorMetrics
 	closed     bool
 }
@@ -115,6 +118,7 @@ func (c *ColumnCursor) Close() {
 	}
 	c.closed = true
 	c.releasePage()
+	c.releaseHeaderTail()
 	if c.dictionary != nil {
 		c.dictionary.Release()
 		c.dictionary = nil
@@ -122,7 +126,7 @@ func (c *ColumnCursor) Close() {
 }
 
 func (c *ColumnCursor) releasePage() {
-	c.pending = nil
+	c.hasPending = false
 	if c.page != nil {
 		c.page.release()
 		c.page = nil
@@ -163,9 +167,18 @@ func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, err
 	if remaining <= 0 {
 		return PageHeader{}, 0, io.EOF
 	}
+	if c.headerSize > 0 && c.headerAt == c.offset {
+		h, used, err := DecodePageHeader(c.headerTail.Bytes()[:c.headerSize])
+		c.headerSize = 0
+		if err == nil && used > 0 && used <= int(remaining) {
+			return h, used, nil
+		}
+	}
 	probe := initialPageHeaderProbe
 	if probe > remaining {
-		probe = remaining
+		// Keep small tail pages on the original narrow discovery path;
+		// never turn a larger probe into an eager whole-chunk request.
+		probe = min(16, remaining)
 	}
 	var lastErr error
 	for {
@@ -214,7 +227,7 @@ func (c *ColumnCursor) loadPage(ctx context.Context) error {
 		if bodyOffset < c.offset || bodyLen < 0 || bodyOffset > c.end || bodyLen > c.end-bodyOffset {
 			return errors.New("parquet: page body exceeds column chunk bounds")
 		}
-		body, err := c.readRange(ctx, bodyOffset, bodyLen, memory.TagParquetCompressed)
+		body, err := c.readPageBody(ctx, bodyOffset, bodyLen)
 		if err != nil {
 			return err
 		}
@@ -263,7 +276,7 @@ func (c *ColumnCursor) loadDictionary(header PageHeader, body *memory.Buffer) er
 	if header.Dictionary.Encoding != EncodingPlain {
 		return fmt.Errorf("parquet: unsupported dictionary encoding %d", header.Dictionary.Encoding)
 	}
-	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes(), int(header.UncompressedPageSize))
+	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes()[:int(header.CompressedPageSize)], int(header.UncompressedPageSize))
 	if err != nil {
 		return err
 	}
@@ -273,7 +286,12 @@ func (c *ColumnCursor) loadDictionary(header PageHeader, body *memory.Buffer) er
 		return err
 	}
 	values := newValueStream(decoded.Bytes(), c.meta.Type, c.leaf)
-	for i := 0; i < dict.Count(); i++ {
+	bulk, err := values.writeFixedBatch(dict, 0, dict.Count())
+	if err != nil {
+		dict.Release()
+		return err
+	}
+	for i := 0; !bulk && i < dict.Count(); i++ {
 		if err := values.NextInto(dict, i); err != nil {
 			dict.Release()
 			return err
@@ -291,7 +309,7 @@ func (c *ColumnCursor) loadDataV1(header PageHeader, body *memory.Buffer) (*colu
 	if h == nil || h.NumValues < 0 {
 		return nil, errors.New("parquet: invalid data page v1")
 	}
-	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes(), int(header.UncompressedPageSize))
+	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes()[:int(header.CompressedPageSize)], int(header.UncompressedPageSize))
 	if err != nil {
 		return nil, err
 	}
@@ -327,13 +345,13 @@ func (c *ColumnCursor) loadDataV2(header PageHeader, body *memory.Buffer) (*colu
 		return nil, errors.New("parquet: invalid data page v2")
 	}
 	levelLen64 := int64(h.RepetitionLevelsByteLength) + int64(h.DefinitionLevelsByteLength)
-	if levelLen64 < 0 || levelLen64 > int64(body.Len()) || levelLen64 > int64(header.UncompressedPageSize) {
+	if levelLen64 < 0 || levelLen64 > int64(header.CompressedPageSize) || levelLen64 > int64(header.UncompressedPageSize) {
 		return nil, errors.New("parquet: invalid data page v2 level lengths")
 	}
 	levelLen := int(levelLen64)
 	repEnd := int(h.RepetitionLevelsByteLength)
 	defEnd := levelLen
-	raw := body.Bytes()
+	raw := body.Bytes()[:int(header.CompressedPageSize)]
 	rep, err := newLevelsV2(raw[:repEnd], c.leaf.MaxRep)
 	if err != nil {
 		return nil, err
@@ -386,8 +404,8 @@ func (c *ColumnCursor) PeekEntry(ctx context.Context) (ColumnEntry, error) {
 	if c.consumed >= c.meta.NumValues {
 		return ColumnEntry{}, io.EOF
 	}
-	if c.pending != nil {
-		return *c.pending, nil
+	if c.hasPending {
+		return c.pending, nil
 	}
 	if c.page == nil || c.page.remaining == 0 {
 		if err := c.loadPage(ctx); err != nil {
@@ -403,7 +421,8 @@ func (c *ColumnCursor) PeekEntry(ctx context.Context) (ColumnEntry, error) {
 		return ColumnEntry{}, err
 	}
 	entry := ColumnEntry{Definition: def, Repetition: rep, HasValue: def == c.leaf.MaxDef}
-	c.pending = &entry
+	c.pending = entry
+	c.hasPending = true
 	return entry, nil
 }
 
@@ -441,7 +460,7 @@ func (c *ColumnCursor) NextInto(ctx context.Context, dst *vector.Vector, row int
 		}
 		c.metrics.DataValues++
 	}
-	c.pending = nil
+	c.hasPending = false
 	p.remaining--
 	c.consumed++
 	if p.remaining == 0 {
@@ -451,35 +470,7 @@ func (c *ColumnCursor) NextInto(ctx context.Context, dst *vector.Vector, row int
 }
 
 func copyDictionaryValue(dst *vector.Vector, row int, dict *vector.Vector, idx int) error {
-	if !dict.IsValid(idx) {
-		dst.SetNull(row)
-		return nil
-	}
-	switch dst.Type.ID {
-	case coretypes.Integer, coretypes.DateType:
-		v, _ := dict.Int32(idx)
-		dst.SetInt32(row, v)
-	case coretypes.BigInt, coretypes.Decimal, coretypes.TimestampType:
-		v, _ := dict.Int64(idx)
-		dst.SetInt64(row, v)
-	case coretypes.Float:
-		v, _ := dict.Float32(idx)
-		dst.SetFloat32(row, v)
-	case coretypes.Double:
-		v, _ := dict.Float64(idx)
-		dst.SetFloat64(row, v)
-	case coretypes.Varchar:
-		v, _ := dict.String(idx)
-		if err := dst.SetStringBytes(row, []byte(v)); err != nil {
-			return err
-		}
-	case coretypes.Boolean:
-		v, _ := dict.Bool(idx)
-		dst.SetBool(row, v)
-	default:
-		return fmt.Errorf("parquet: dictionary core type %d not implemented", dst.Type.ID)
-	}
-	return nil
+	return vector.CopyValue(dict, idx, dst, row)
 }
 
 func (c *ColumnCursor) ReadScalar(ctx context.Context, rows int) (*vector.Vector, error) {
@@ -509,7 +500,18 @@ func (c *ColumnCursor) ReadScalar(ctx context.Context, rows int) (*vector.Vector
 			out.Release()
 		}
 	}()
-	for i := 0; i < rows; i++ {
+	for i := 0; i < rows; {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		n, err := c.readScalarBatch(ctx, out, i, rows-i)
+		if err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			i += n
+			continue
+		}
 		entry, err := c.NextInto(ctx, out, i)
 		if err != nil {
 			return nil, err
@@ -520,6 +522,7 @@ func (c *ColumnCursor) ReadScalar(ctx context.Context, rows int) (*vector.Vector
 		if !entry.HasValue {
 			out.SetNull(i)
 		}
+		i++
 	}
 	keep = true
 	return out, nil

@@ -35,15 +35,8 @@ func (s *hybridStream) Next() (uint32, error) {
 		return s.runValue, nil
 	}
 	if s.packedLeft > 0 {
-		var v uint32
-		for b := 0; b < s.bitWidth; b++ {
-			byteIdx := s.packedBit >> 3
-			bitIdx := s.packedBit & 7
-			if s.packed[byteIdx]&(1<<bitIdx) != 0 {
-				v |= 1 << b
-			}
-			s.packedBit++
-		}
+		v := packedWord(s.packed, s.packedBit, s.bitWidth)
+		s.packedBit += s.bitWidth
 		s.packedLeft--
 		return v, nil
 	}
@@ -76,6 +69,9 @@ func (s *hybridStream) Next() (uint32, error) {
 	groups := int(header >> 1)
 	if groups <= 0 {
 		return 0, errors.New("parquet: zero bit-packed run")
+	}
+	if groups > int(^uint(0)>>1)/8 || (s.bitWidth > 0 && groups > (len(s.data)-s.off)/s.bitWidth) {
+		return 0, errors.New("parquet: invalid bit-packed run length")
 	}
 	bytesNeeded := groups * s.bitWidth
 	if s.off+bytesNeeded > len(s.data) {
@@ -155,15 +151,8 @@ func (s *levelStream) Next() (int, error) {
 	if s.bitPos+s.bitWidth > len(s.packed)*8 {
 		return 0, errors.New("parquet: bit-packed level stream exhausted")
 	}
-	var v int
-	for b := 0; b < s.bitWidth; b++ {
-		byteIdx := s.bitPos >> 3
-		bitIdx := s.bitPos & 7
-		if s.packed[byteIdx]&(1<<bitIdx) != 0 {
-			v |= 1 << b
-		}
-		s.bitPos++
-	}
+	v := int(packedWord(s.packed, s.bitPos, s.bitWidth))
+	s.bitPos += s.bitWidth
 	if v > s.max {
 		return 0, fmt.Errorf("parquet: level %d exceeds max %d", v, s.max)
 	}
@@ -438,4 +427,64 @@ func (s *dictionaryIndexStream) Next() (uint32, error) {
 		return 0, errors.New("parquet: dictionary index stream is not initialized")
 	}
 	return s.h.Next()
+}
+
+// Read fills an output batch a run at a time, retaining the same stream state
+// as repeated Next calls, including packed padding across batch boundaries.
+func (s *dictionaryIndexStream) Read(dst []uint32) error {
+	if s == nil {
+		return errors.New("parquet: nil dictionary index stream")
+	}
+	if s.err != nil {
+		return s.err
+	}
+	if s.h == nil {
+		return errors.New("parquet: dictionary index stream is not initialized")
+	}
+	h := s.h
+	for len(dst) > 0 {
+		if h.runRemain > 0 {
+			n := min(len(dst), h.runRemain)
+			for i := 0; i < n; i++ {
+				dst[i] = h.runValue
+			}
+			h.runRemain -= n
+			dst = dst[n:]
+		} else if h.packedLeft > 0 {
+			n := min(len(dst), h.packedLeft)
+			for i := 0; i < n; i++ {
+				dst[i] = packedWord(h.packed, h.packedBit+i*h.bitWidth, h.bitWidth)
+			}
+			h.packedBit += n * h.bitWidth
+			h.packedLeft -= n
+			dst = dst[n:]
+		} else {
+			value, err := h.Next()
+			if err != nil {
+				return err
+			}
+			dst[0] = value
+			dst = dst[1:]
+		}
+	}
+	return nil
+}
+
+// Read up to 32 packed bits using byte/word loads instead of a per-bit loop.
+// Callers validate the packed-run length before entering this hot path.
+func packedWord(data []byte, bitPosition, width int) uint32 {
+	if width == 0 {
+		return 0
+	}
+	start, shift := bitPosition>>3, uint(bitPosition&7)
+	n := (width + int(shift) + 7) / 8
+	var word uint64
+	if len(data)-start >= 8 {
+		word = binary.LittleEndian.Uint64(data[start : start+8])
+	} else {
+		for i := 0; i < n; i++ {
+			word |= uint64(data[start+i]) << uint(i*8)
+		}
+	}
+	return uint32((word >> shift) & ((uint64(1) << uint(width)) - 1))
 }

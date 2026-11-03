@@ -24,10 +24,12 @@ func FrameNDJSON(input []byte, final bool, maxRecords int) (records [][]byte, co
 		maxRecords = vector.DefaultVectorSize
 	}
 	start := 0
-	for i, b := range input {
-		if b != '\n' {
-			continue
+	for start < len(input) {
+		relative := bytes.IndexByte(input[start:], '\n')
+		if relative < 0 {
+			break
 		}
+		i := start + relative
 		line := bytes.TrimSpace(input[start:i])
 		consumed = i + 1
 		start = i + 1
@@ -145,7 +147,8 @@ func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBind
 			return NDJSONBinding{}, err
 		}
 		// records 只是 managed range buffer 的 slice views；InferRecords 完成前不能 Release buffer。
-		records, _, _ := FrameNDJSON(res.Buffer.Bytes(), sample == file.Size, maxRows)
+		sampleData, _ := trimNDJSONUTF8BOM(res.Buffer.Bytes())
+		records, _, _ := FrameNDJSON(sampleData, sample == file.Size, maxRows)
 		if len(records) > 0 {
 			schema, inferErr := InferRecords(records, maxRows)
 			res.Buffer.Release()
@@ -186,11 +189,13 @@ type NDJSONScanOptions struct {
 	EnableParallel   bool
 	TargetRangeBytes int64
 	Projection       ProjectedPathSet
+	CountOnly        bool // Internal COUNT(*) source: validate records without payload vectors.
 }
 type ndjsonJob struct {
 	file           fileset.FileSnapshot
 	offset, length int64
 	serial         bool
+	readHint       int64 // readHint 记录一个 batch 实际消费的字节数，避免串行窗口重复读取未消费尾部。
 }
 type NDJSONSource struct {
 	registry         *vfs.Registry
@@ -198,6 +203,7 @@ type NDJSONSource struct {
 	scope            *memory.Scope
 	bm               *memory.BufferManager
 	projection       ProjectedPathSet
+	countOnly        bool
 	serialRangeBytes int64
 	mu               sync.Mutex
 	jobs             []ndjsonJob
@@ -217,7 +223,7 @@ func NewNDJSONSource(ctx context.Context, r *vfs.Registry, b NDJSONBinding, opts
 	if serialTarget > defaultNDJSONSerialRangeBytes {
 		serialTarget = defaultNDJSONSerialRangeBytes
 	}
-	s := &NDJSONSource{registry: r, binding: b, scope: scope, bm: bm, projection: opts.Projection, serialRangeBytes: serialTarget}
+	s := &NDJSONSource{registry: r, binding: b, scope: scope, bm: bm, projection: opts.Projection, countOnly: opts.CountOnly, serialRangeBytes: serialTarget}
 	for _, f := range b.scanSet.Files() {
 		jobs, err := s.planFile(ctx, f, opts.EnableParallel, target)
 		if err != nil {
@@ -353,8 +359,14 @@ func (s *NDJSONSource) Next(ctx context.Context) (*vector.DataChunk, bool, error
 // resumes from the last complete newline without retaining source-owned buffers.
 func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChunk, *ndjsonJob, error) {
 	readLength := j.length
-	if j.serial && readLength > s.serialRangeBytes {
-		readLength = s.serialRangeBytes
+	if j.serial {
+		hint := j.readHint
+		if hint <= 0 || hint > s.serialRangeBytes {
+			hint = s.serialRangeBytes
+		}
+		if readLength > hint {
+			readLength = hint
+		}
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -366,6 +378,10 @@ func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChu
 		}
 		final := readLength == j.length
 		data := res.Buffer.Bytes()
+		prefixConsumed := 0
+		if j.offset == 0 {
+			data, prefixConsumed = trimNDJSONUTF8BOM(data)
+		}
 		records, consumed, frameErr := FrameNDJSON(data, final, vector.DefaultVectorSize)
 		if frameErr != nil {
 			res.Buffer.Release()
@@ -380,18 +396,27 @@ func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChu
 			readLength = growNDJSONSerialWindow(readLength, j.length)
 			continue
 		}
-		nextOffset := j.offset + int64(consumed)
+		nextOffset := j.offset + int64(prefixConsumed+consumed)
 		endOffset := j.offset + j.length
 		var rem *ndjsonJob
 		if nextOffset < endOffset {
 			r := j
 			r.offset = nextOffset
 			r.length = endOffset - nextOffset
+			r.readHint = nextNDJSONSerialReadHint(consumed, len(records), s.serialRangeBytes)
 			rem = &r
 		}
 		if len(records) == 0 {
 			res.Buffer.Release()
 			return nil, rem, nil
+		}
+		if s.countOnly {
+			err := validateCountRecords(ctx, records, s.binding.Schema().Fields, s.scope, s.bm)
+			res.Buffer.Release()
+			if err != nil {
+				return nil, nil, err
+			}
+			return &vector.DataChunk{Cardinality: len(records)}, rem, nil
 		}
 		chunk, err := DecodeRecords(records, s.binding.Schema().Fields, s.projection, s.scope, s.bm)
 		res.Buffer.Release()
@@ -400,6 +425,30 @@ func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChu
 		}
 		return chunk, rem, nil
 	}
+}
+
+// trimNDJSONUTF8BOM 与 CSV 路径一致地忽略文件起始 BOM；FrameNDJSON 不把 BOM
+// 视为空白，若不剥离会污染首条记录的 JSON 解析。
+func trimNDJSONUTF8BOM(data []byte) ([]byte, int) {
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		return data[3:], 3
+	}
+	return data, 0
+}
+
+// nextNDJSONSerialReadHint 让下一个窗口接近一个 batch 的实际字节数，避免重复读取尾部。
+func nextNDJSONSerialReadHint(consumed, records int, limit int64) int64 {
+	if consumed <= 0 || records <= 0 {
+		return 0
+	}
+	target := int64(consumed) * int64(vector.DefaultVectorSize) / int64(records)
+	if target < 1 {
+		target = 1
+	}
+	if target > limit {
+		target = limit
+	}
+	return target
 }
 
 func growNDJSONSerialWindow(current, remaining int64) int64 {
