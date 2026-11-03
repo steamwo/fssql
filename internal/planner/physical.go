@@ -53,8 +53,43 @@ type PhysicalPlan struct {
 	Cost       PhysicalCost              // Cost 是 physical cost model 结果。
 }
 
-// Validate 验证 physical tree shape，不允许 silently lower 到错误执行模型。
+// Validate 验证 physical tree shape，并冻结同一 relation 的 scan 引用数。
+// lowering 在 Validate 后打开 source，因此运行时可以据此决定单引用直通或多引用物化。
 func (p *PhysicalPlan) Validate() error {
+	if p == nil {
+		return fmt.Errorf("physical plan is nil")
+	}
+	counts := make(map[string]int)
+	countPhysicalScanReferences(p, counts)
+	applyPhysicalScanReferences(p, counts)
+	return p.validateShape()
+}
+
+func countPhysicalScanReferences(p *PhysicalPlan, counts map[string]int) {
+	if p == nil {
+		return
+	}
+	if p.Kind == PhysicalScan && p.Scan != nil && p.Scan.RelationID != "" {
+		counts[p.Scan.RelationID]++
+	}
+	for _, child := range p.Children {
+		countPhysicalScanReferences(child, counts)
+	}
+}
+
+func applyPhysicalScanReferences(p *PhysicalPlan, counts map[string]int) {
+	if p == nil {
+		return
+	}
+	if p.Kind == PhysicalScan && p.Scan != nil {
+		p.Scan.References = counts[p.Scan.RelationID]
+	}
+	for _, child := range p.Children {
+		applyPhysicalScanReferences(child, counts)
+	}
+}
+
+func (p *PhysicalPlan) validateShape() error {
 	if p == nil {
 		return fmt.Errorf("physical plan is nil")
 	}
@@ -91,7 +126,7 @@ func (p *PhysicalPlan) Validate() error {
 		return fmt.Errorf("unknown physical kind %d", p.Kind)
 	}
 	for _, child := range p.Children {
-		if err := child.Validate(); err != nil {
+		if err := child.validateShape(); err != nil {
 			return err
 		}
 	}

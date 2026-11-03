@@ -165,8 +165,14 @@ func (p *QueryPlanner) planTableFunction(relation *binder.BoundRelation) (*Logic
 	if !ok || definition.Kind != function.Table {
 		return nil, fmt.Errorf("query planner: relation %s references unknown/non-table function id %d", relation.ID, relation.FunctionID)
 	}
-	if relation.ID == "" || relation.Source == "" || relation.Fingerprint == "" {
+	if relation.ID == "" || relation.Fingerprint == "" {
 		return nil, fmt.Errorf("query planner: table function %s has incomplete source identity", definition.Name)
+	}
+	source := relation.Source
+	if source == "" {
+		// Fixed-schema zero-argument registered table functions have no user
+		// source argument. Their stable relation identity is the runtime token.
+		source = relation.ID
 	}
 	return &LogicalPlan{
 		Kind:   LogicalScan,
@@ -174,7 +180,7 @@ func (p *QueryPlanner) planTableFunction(relation *binder.BoundRelation) (*Logic
 		Scan: &ScanSpec{
 			RelationID:  relation.ID,
 			Function:    definition.Name,
-			Source:      relation.Source,
+			Source:      source,
 			Fingerprint: relation.Fingerprint,
 		},
 	}, nil
@@ -282,26 +288,9 @@ func plannerColumnsEqual(left, right []Column) bool {
 	return true
 }
 
-// queryPlannerTypeEqual 递归比较 LogicalType identity，不借助 reflect 对可变 metadata 做隐式判断。
+// queryPlannerTypeEqual 比较完整 LogicalType identity，包括 Phase 2 的无符号、BLOB 和时间语义。
 func queryPlannerTypeEqual(left, right types.LogicalType) bool {
-	if left.ID != right.ID || left.Decimal != right.Decimal {
-		return false
-	}
-	if (left.Child == nil) != (right.Child == nil) {
-		return false
-	}
-	if left.Child != nil && !queryPlannerTypeEqual(*left.Child, *right.Child) {
-		return false
-	}
-	if len(left.Fields) != len(right.Fields) {
-		return false
-	}
-	for i := range left.Fields {
-		if left.Fields[i].Name != right.Fields[i].Name || !queryPlannerTypeEqual(left.Fields[i].Type, right.Fields[i].Type) {
-			return false
-		}
-	}
-	return true
+	return left.Same(right)
 }
 
 // queryHasAggregate 检查 projection/WHERE 中仍需要 aggregate physical lowering 的函数节点。

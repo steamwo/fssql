@@ -20,16 +20,16 @@ type TableBindFunc func(context.Context, string) (binder.ResolvedRelation, error
 
 // TableBindAdapter 将稳定 FunctionID 与真实格式 Bind callback 关联。
 type TableBindAdapter struct {
-	FunctionID function.ID   // FunctionID 必须对应 FunctionCatalog 中的 Table function。
-	Bind       TableBindFunc // Bind 是该函数唯一实际 schema-resolution callback。
+	FunctionID function.ID
+	Bind       TableBindFunc
 }
 
 // SourceResolver 同时实现 Binder 的 Catalog relation 与 TableFunction resolver contracts。
 // 它只位于 statement/control path，不创建 runtime reader/operator。
 type SourceResolver struct {
-	catalog   catalog.Transaction           // catalog 是当前 Statement 独占的 Catalog Transaction。
-	functions *function.Catalog             // functions 是统一 FunctionCatalog。
-	adapters  map[function.ID]TableBindFunc // adapters 在构造后不可变。
+	catalog   catalog.Transaction
+	functions *function.Catalog
+	adapters  map[function.ID]TableBindFunc
 }
 
 // NewSourceResolver 冻结一个 statement-scoped source resolver。
@@ -82,10 +82,7 @@ func (r *SourceResolver) ResolveRelation(ctx context.Context, name ast.Qualified
 		if entry.View == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid view metadata for %s.%s", object.Schema, object.Name)
 		}
-		return binder.ResolvedRelation{
-			ID:      "view:" + object.Schema + "." + object.Name,
-			Columns: binderColumns(entry.View.Columns),
-		}, nil
+		return binder.ResolvedRelation{ID: "view:" + object.Schema + "." + object.Name, Columns: binderColumns(entry.View.Columns)}, nil
 	case catalog.ObjectExternalTable:
 		if entry.ExternalTable == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid external-table metadata for %s.%s", object.Schema, object.Name)
@@ -109,7 +106,9 @@ func (r *SourceResolver) ResolveRelation(ctx context.Context, name ast.Qualified
 	}
 }
 
-// BindTableFunction 调用已注册真实 Bind adapter；arity/type 已由 FunctionCatalog/QueryBinder 预验证，这里仍做边界防御。
+// BindTableFunction calls the registered real Bind adapter. Built-in file table
+// functions keep the one-VARCHAR source contract; public registered functions
+// are fixed-schema zero-argument functions and bind without opening row streams.
 func (r *SourceResolver) BindTableFunction(ctx context.Context, def function.Definition, args []binder.TableFunctionArgument) (binder.ResolvedRelation, error) {
 	if r == nil {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: source resolver is nil")
@@ -117,14 +116,23 @@ func (r *SourceResolver) BindTableFunction(ctx context.Context, def function.Def
 	if def.Kind != function.Table {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: function %s is not a table function", def.Name)
 	}
-	if len(args) != 1 || args[0].Type.ID != types.Varchar || strings.TrimSpace(args[0].Value) == "" {
-		return binder.ResolvedRelation{}, fmt.Errorf("session: Stable table function %s requires one non-empty VARCHAR source", def.Name)
-	}
 	bind := r.adapters[def.ID]
 	if bind == nil {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: no real Bind adapter registered for table function %s", def.Name)
 	}
-	resolved, err := bind(ctx, args[0].Value)
+	var source string
+	switch {
+	case def.MinArgs == 0 && def.MaxArgs == 0 && len(args) == 0:
+		// The legacy adapter signature carries a source string. Registered
+		// zero-arg functions have none, so pass the immutable function name as
+		// an internal bind token; their adapter never treats it as user data.
+		source = def.Name
+	case len(args) == 1 && args[0].Type.ID == types.Varchar && strings.TrimSpace(args[0].Value) != "":
+		source = args[0].Value
+	default:
+		return binder.ResolvedRelation{}, fmt.Errorf("session: table function %s received invalid bound arguments", def.Name)
+	}
+	resolved, err := bind(ctx, source)
 	if err != nil {
 		return binder.ResolvedRelation{}, fmt.Errorf("session: bind table function %s: %w", def.Name, err)
 	}
@@ -137,7 +145,6 @@ func (r *SourceResolver) BindTableFunction(ctx context.Context, def function.Def
 	return cloneResolvedRelation(resolved), nil
 }
 
-// catalogObjectName 将 Stable [schema.]object 绑定到 v1 Catalog；ATTACH/catalog namespace 不在 Stable v1。
 func catalogObjectName(name ast.QualifiedName) (catalog.ObjectName, error) {
 	if len(name.Parts) == 0 || len(name.Parts) > 2 {
 		return catalog.ObjectName{}, fmt.Errorf("session: relation name must be [schema.]object")
@@ -148,7 +155,6 @@ func catalogObjectName(name ast.QualifiedName) (catalog.ObjectName, error) {
 	return catalog.ObjectName{Schema: name.Parts[0].Name, Name: name.Parts[1].Name}, nil
 }
 
-// binderColumns 将 Catalog schema 深拷贝为 Binder relation schema。
 func binderColumns(columns []catalog.ColumnDefinition) []binder.RelationColumn {
 	out := make([]binder.RelationColumn, len(columns))
 	for i, column := range columns {
@@ -157,7 +163,6 @@ func binderColumns(columns []catalog.ColumnDefinition) []binder.RelationColumn {
 	return out
 }
 
-// relationSchemaEqual 比较 ExternalTable 创建时 schema 与当前真实 Bind schema，禁止静默 schema drift。
 func relationSchemaEqual(a, b []binder.RelationColumn) bool {
 	if len(a) != len(b) {
 		return false
@@ -170,7 +175,6 @@ func relationSchemaEqual(a, b []binder.RelationColumn) bool {
 	return true
 }
 
-// cloneResolvedRelation 复制复杂 schema metadata，避免 adapter 返回可变 slice 被 Binder 持有。
 func cloneResolvedRelation(in binder.ResolvedRelation) binder.ResolvedRelation {
 	out := in
 	out.Columns = make([]binder.RelationColumn, len(in.Columns))
@@ -181,7 +185,6 @@ func cloneResolvedRelation(in binder.ResolvedRelation) binder.ResolvedRelation {
 	return out
 }
 
-// cloneSourceType 深拷贝 LIST/STRUCT LogicalType metadata。
 func cloneSourceType(t types.LogicalType) types.LogicalType {
 	out := t
 	if t.Child != nil {
@@ -197,24 +200,4 @@ func cloneSourceType(t types.LogicalType) types.LogicalType {
 	return out
 }
 
-// sourceTypeEqual 递归比较 LogicalType identity，避免 interface/deep-reflect 把可变 metadata 当 ABI。
-func sourceTypeEqual(a, b types.LogicalType) bool {
-	if a.ID != b.ID || a.Decimal != b.Decimal {
-		return false
-	}
-	if (a.Child == nil) != (b.Child == nil) {
-		return false
-	}
-	if a.Child != nil && !sourceTypeEqual(*a.Child, *b.Child) {
-		return false
-	}
-	if len(a.Fields) != len(b.Fields) {
-		return false
-	}
-	for i := range a.Fields {
-		if a.Fields[i].Name != b.Fields[i].Name || !sourceTypeEqual(a.Fields[i].Type, b.Fields[i].Type) {
-			return false
-		}
-	}
-	return true
-}
+func sourceTypeEqual(a, b types.LogicalType) bool { return a.Same(b) }

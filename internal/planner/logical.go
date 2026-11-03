@@ -57,6 +57,7 @@ type ScanSpec struct {
 	Source      string                   // Source 是 canonical source spec。
 	Fingerprint stats.DatasetFingerprint // Fingerprint 绑定 Statement SourceSnapshot。
 	Pushdown    ScanPushdown             // Pushdown 保存 optimizer 已批准的 generic 下推。
+	References  int                      // References 是最终 physical tree 中同一 RelationID 的 scan 数；运行时用于选择直通或共享物化。
 }
 
 // AggregateSpec 描述一个 bound aggregate 调用。
@@ -76,18 +77,18 @@ type SortKey struct {
 
 // LogicalPlan 是 planner/optimizer 之间的 immutable-by-convention tree IR。
 type LogicalPlan struct {
-	Kind       LogicalKind                // Kind 是逻辑算子类别。
-	Children   []*LogicalPlan             // Children 按算子语义顺序排列。
-	Output     []Column                   // Output 是该节点输出 schema。
-	Scan       *ScanSpec                  // Scan 仅对 LogicalScan 有效。
-	Predicate  *binder.BoundExpression    // Predicate 用于 Filter/Join condition。
-	Projection []*binder.BoundExpression  // Projection 用于 Project。
-	GroupBy    []*binder.BoundExpression  // GroupBy 用于 Aggregate。
-	Aggregates []AggregateSpec            // Aggregates 用于 Aggregate。
-	Join       JoinType                   // Join 仅对 LogicalJoin 有效。
-	Sort       []SortKey                  // Sort 仅对 LogicalSort 有效。
-	Limit      uint64                     // Limit 是逻辑 limit；UnlimitedRows 表示 OFFSET-only。
-	Offset     uint64                     // Offset 是逻辑 offset。
+	Kind       LogicalKind               // Kind 是逻辑算子类别。
+	Children   []*LogicalPlan            // Children 按算子语义顺序排列。
+	Output     []Column                  // Output 是该节点输出 schema。
+	Scan       *ScanSpec                 // Scan 仅对 LogicalScan 有效。
+	Predicate  *binder.BoundExpression   // Predicate 用于 Filter/Join condition。
+	Projection []*binder.BoundExpression // Projection 用于 Project。
+	GroupBy    []*binder.BoundExpression // GroupBy 用于 Aggregate。
+	Aggregates []AggregateSpec           // Aggregates 用于 Aggregate。
+	Join       JoinType                  // Join 仅对 LogicalJoin 有效。
+	Sort       []SortKey                 // Sort 仅对 LogicalSort 有效。
+	Limit      uint64                    // Limit 是逻辑 limit；UnlimitedRows 表示 OFFSET-only。
+	Offset     uint64                    // Offset 是逻辑 offset。
 }
 
 // Validate 验证 plan shape，防止后续 optimizer 在不完整节点上猜测语义。
@@ -113,7 +114,7 @@ func (p *LogicalPlan) Validate() error {
 		}
 	case LogicalProject:
 		if len(p.Children) != 1 || len(p.Projection) == 0 {
-			return fmt.Errorf("project requires one child and projection")
+			return fmt.Errorf("project requires child and projection")
 		}
 	case LogicalAggregate:
 		if len(p.Children) != 1 {

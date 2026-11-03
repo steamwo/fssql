@@ -72,6 +72,7 @@ type Config struct {
 	BlockingQueue          int
 	S3                     *S3Config
 	LocalFiles             *LocalFileConfig
+	TableFunctions         []TableFunction
 }
 
 // DB is the transport-neutral native Go composition root.
@@ -125,6 +126,10 @@ func Open(config Config) (*DB, error) {
 		return nil, err
 	}
 	functions := function.NewBuiltinCatalog()
+	functions, registeredTables, err := registerTableFunctions(functions, config.TableFunctions)
+	if err != nil {
+		return nil, err
+	}
 	drivers := make([]vfs.Driver, 0, 2)
 	if config.LocalFiles != nil {
 		driver, err := publicLocalDriver(*config.LocalFiles)
@@ -148,12 +153,30 @@ func Open(config Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	sources, err := session.NewStableQuerySourceFactory(registry, metadata, buffers, functions)
+	baseSources, err := session.NewStableQuerySourceFactory(registry, metadata, buffers, functions)
 	if err != nil {
 		return nil, err
 	}
 	spillBudget := config.SpillMemoryBudgetBytes
 	spillBlock := config.SpillBlockBytes
+	var sources session.QuerySourceFactory = baseSources
+	if extensions := typedSourceExtensions(registeredTables, buffers, spillBudget); extensions != nil {
+		sources = session.QuerySourceFactoryFunc(func(q *query.Context) ([]session.TableBindAdapter, *session.RuntimeScanSourceFactory, error) {
+			bindings, scans, err := baseSources.NewQuerySources(q)
+			if err != nil {
+				return nil, nil, err
+			}
+			extraBindings, extraScans, err := extensions(q)
+			if err != nil {
+				return nil, nil, err
+			}
+			scans, err = scans.WithAdapters(extraScans)
+			if err != nil {
+				return nil, nil, err
+			}
+			return append(bindings, extraBindings...), scans, nil
+		})
+	}
 	selects, err := session.NewStableSQLEngine(session.StableSQLEngineConfig{
 		Catalog:   cat,
 		Functions: functions,
