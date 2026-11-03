@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "purpose": "Phase-0 canonical typed samples for file and future database-rowstream acceptance.",
+  "canonical_encoding": {
+    "integers": "base-10 string when outside JSON safe integer range",
+    "decimal": "base-10 fixed-point string",
+    "blob": "hex string prefixed with 0x",
+    "timestamp": "RFC3339Nano string; logical type carried separately",
+    "null": "JSON null"
+  },
+  "columns": [
+    {"name": "i64", "type": "BIGINT"},
+    {"name": "u64", "type": "UBIGINT"},
+    {"name": "d38", "type": "DECIMAL(38,9)"},
+    {"name": "txt", "type": "VARCHAR"},
+    {"name": "bin", "type": "BLOB"},
+    {"name": "ts_ns", "type": "TIMESTAMP_NS"},
+    {"name": "ts_tz", "type": "TIMESTAMPTZ"}
+  ],
+  "rows": [
+    {
+      "id": "zero_and_empty",
+      "values": {
+        "i64": 0,
+        "u64": "0",
+        "d38": "0.000000000",
+        "txt": "",
+        "bin": "0x",
+        "ts_ns": "1970-01-01T00:00:00.000000001Z",
+        "ts_tz": "1970-01-01T00:00:00Z"
+      }
+    },
+    {
+      "id": "boundaries",
+      "values": {
+        "i64": -9223372036854775808,
+        "u64": "18446744073709551615",
+        "d38": "99999999999999999999999999999.999999999",
+        "txt": "unicode-中文",
+        "bin": "0x000102ff",
+        "ts_ns": "2026-11-03T08:10:35.123456789Z",
+        "ts_tz": "2026-11-03T16:10:35.123456+08:00"
+      }
+    },
+    {
+      "id": "negative_decimal_and_nulls",
+      "values": {
+        "i64": 9223372036854775807,
+        "u64": "9223372036854775808",
+        "d38": "-99999999999999999999999999999.999999999",
+        "txt": null,
+        "bin": null,
+        "ts_ns": null,
+        "ts_tz": null
+      }
+    }
+  ],
+  "required_path": ["input", "Vector", "spill", "reread", "export", "external_read"],
+  "status": "frozen_sample_pending_phase2_execution"
+}

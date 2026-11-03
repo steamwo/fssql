@@ -40,20 +40,20 @@
       "classification": "bug",
       "surface": "production remote scan pushdown performance",
       "stable_sql_semantics": false,
-      "summary": "Projection, selective filters, empty filters and LIMIT do not reduce physical Parquet reads in the tested production path.",
+      "summary": "Projection/filter/LIMIT pushdown now has an implementation and small-scale tests, but the million-row physical-I/O acceptance has not been re-run after the remediation.",
       "duckdb": "Projected and prunable scans can avoid reading unrelated columns and row groups.",
-      "fssql": "Million-row tests return correct results but still read approximately the entire 300 MB source for narrow projections, LIMIT 100 and empty predicates.",
-      "rationale": "This is a resource/performance defect, not a waived Stable row-result mismatch. Reproduction and measured evidence are in the opt-in large MinIO matrix."
+      "fssql": "The current branch maps projection/filter/limit into the Parquet runtime and has focused tests for projection mapping and early row-group stop. The last million-row report predates these changes and measured approximately the entire 300 MB source for narrow projection, LIMIT 100 and empty predicates.",
+      "rationale": "Keep the defect open until post-remediation large-file acceptance directly measures physical I/O for projection, row-group pruning and safe LIMIT. Unit tests and optimizer plans alone are insufficient evidence."
     },
     {
       "id": "MEM-001",
       "classification": "bug",
       "surface": "default CSV and NDJSON large-file resource envelope",
       "stable_sql_semantics": false,
-      "summary": "The default serial text scan requests a whole-file buffer and cannot scan the tested 283/344 MB objects within either 64 MiB or the default 256 MiB managed-memory limit.",
+      "summary": "Bounded serial-window scanning is implemented and covered by focused CSV/NDJSON tests, but the original large production fixtures have not been re-run under 64 MiB and default 256 MiB budgets.",
       "duckdb": "Text readers can stream large sources without requiring a whole-file input buffer.",
-      "fssql": "The CSV and NDJSON production default paths fail explicitly with memory limit exceeded before returning rows. At 1 GiB budgets the first-chunk diagnostic consumes approximately 271/329 MiB managed memory; reservations and temporary ownership drain after stopping.",
-      "rationale": "The memory cap is respected, but the intended bounded large-file scan is incomplete. This runtime resource defect remains open; successful tiny fixtures do not waive it."
+      "fssql": "The current branch uses bounded serial range reads and tests that normal scans do not request the whole file, including oversized-record expansion and cleanup paths. The prior 283/344 MB failure report predates this remediation.",
+      "rationale": "Keep the defect open until the original and replacement >budget fixtures complete under 64 MiB and 256 MiB managed-memory budgets with measured cleanup. Small fixtures prove the implementation shape, not the large-file acceptance gate."
     },
     {
       "id": "SQL-SAMPLE-001",
