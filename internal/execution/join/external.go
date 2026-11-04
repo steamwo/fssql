@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"sync"
+	"sync/atomic"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -24,6 +25,7 @@ const (
 
 type ExternalConfig struct {
 	Type                Type
+	RequiredOutput      []bool // nil keeps all output columns; otherwise full schema width.
 	LeftTypes           []types.LogicalType
 	RightTypes          []types.LogicalType
 	LeftKeys            []int
@@ -37,8 +39,8 @@ type ExternalConfig struct {
 	SpillBlockBytes     int
 	Scope               *memory.Scope
 	Buffers             *memory.BufferManager
-	Temp                 *storagetemp.QueryScope
-	Compression          storagetemp.Compression
+	Temp                *storagetemp.QueryScope
+	Compression         storagetemp.Compression
 }
 
 type ExternalStats struct {
@@ -353,6 +355,17 @@ type partitionSet struct {
 	bytes uint64
 }
 
+// Repartitioned page lists are local ownership, unlike the root spill writers.
+// Release their metadata on both success and failure. Page bytes remain owned
+// by the page store, which closes on a failed join. PageList.Release is idempotent.
+func releasePartitionSetMetadata(sets []partitionSet) {
+	for _, set := range sets {
+		if set.pages != nil {
+			set.pages.Release()
+		}
+	}
+}
+
 func (w *spillWriter) set() partitionSet {
 	if w == nil {
 		return partitionSet{}
@@ -369,7 +382,10 @@ type hybridPartition struct {
 }
 
 type ExternalHashJoin struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	spillMu sync.Mutex
+	// probeRows is updated by concurrent probe workers; Stats folds it in.
+	probeRows atomic.Uint64
 
 	config       ExternalConfig
 	buildSide    Side
@@ -391,6 +407,8 @@ type ExternalHashJoin struct {
 }
 
 func NewExternal(config ExternalConfig) (*ExternalHashJoin, error) {
+	if err := validateRequiredOutput(config); err != nil { return nil, err }
+	config.RequiredOutput = append([]bool(nil), config.RequiredOutput...)
 	if config.Type != Inner {
 		return nil, errors.New("external hash join baseline currently supports INNER only")
 	}
@@ -470,8 +488,10 @@ func NewExternal(config ExternalConfig) (*ExternalHashJoin, error) {
 func (j *ExternalHashJoin) BuildSide() Side { return j.buildSide }
 func (j *ExternalHashJoin) Stats() ExternalStats {
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	return j.stats
+	stats := j.stats
+	j.mu.Unlock()
+	stats.ProbeRows = j.probeRows.Load()
+	return stats
 }
 func (j *ExternalHashJoin) BuildSink() pipeline.Sink { return &externalBuildSink{join: j} }
 func (j *ExternalHashJoin) ProbeSink(downstream pipeline.Sink) pipeline.Sink {
@@ -545,8 +565,9 @@ func (j *ExternalHashJoin) spillPartition(ctx context.Context, partition int) er
 		return err
 	}
 	if p.resident != nil {
+		reader := p.resident.borrowReader()
 		for i := 0; i < p.resident.Count(); i++ {
-			h, row, ok := p.resident.record(i)
+			h, row, ok := reader.record(i)
 			if !ok {
 				w.Release()
 				return errors.New("invalid resident external join record")
@@ -734,8 +755,9 @@ func (s *externalBuildSink) Finalize(ctx context.Context) error {
 			}
 			return j.failLocked(err)
 		}
+		reader := p.resident.borrowReader()
 		for row := 0; row < p.resident.Count(); row++ {
-			h, _, ok := p.resident.record(row)
+			h, _, ok := reader.record(row)
 			if !ok {
 				index.Release()
 				return j.failLocked(errors.New("invalid resident build record"))
@@ -761,85 +783,79 @@ type externalProbeSink struct {
 func (s *externalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	j := s.join
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return j.failLocked(err)
+		j.mu.Unlock()
+		return err
 	}
 	if j.failed != nil {
-		return j.failed
+		err := j.failed
+		j.mu.Unlock()
+		return err
 	}
 	if j.closed || !j.built {
-		return j.failLocked(errors.New("external join build not finalized"))
+		j.mu.Unlock()
+		err := errors.New("external join build not finalized")
+		j.recordProbeFailure(err)
+		return err
 	}
 	if len(chunk.Columns) != len(j.probeTypes) {
-		return j.failLocked(errors.New("external join probe column count mismatch"))
+		j.mu.Unlock()
+		err := errors.New("external join probe column count mismatch")
+		j.recordProbeFailure(err)
+		return err
 	}
+	j.mu.Unlock()
+
 	var hashes [vector.DefaultVectorSize]uint64
 	if err := exechash.HashChunk(chunk, j.probeKeys, hashes[:chunk.Cardinality]); err != nil {
-		return j.failLocked(err)
+		j.recordProbeFailure(err)
+		return err
 	}
-	scratch, err := newRecordCollection(j.config.Scope, j.config.Buffers, j.probeLayout, chunk.Cardinality)
+	comparer, err := exechash.NewChunkKeyComparer(chunk, j.probeKeys)
 	if err != nil {
-		return j.failLocked(err)
+		j.recordProbeFailure(err)
+		return err
 	}
-	for row := 0; row < chunk.Cardinality; row++ {
-		if err := scratch.appendChunkRow(hashes[row], chunk, row); err != nil {
-			scratch.Release()
-			return j.failLocked(err)
-		}
+	em := newBatchEmitter(Inner, j.config.Scope, j.config.Buffers, j.config.LeftTypes, j.config.RightTypes, j.buildSide, j.buildLayout, s.downstream)
+	em.required = j.config.RequiredOutput
+	if err := j.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], comparer, em, nil); err != nil {
+		em.abort()
+		j.recordProbeFailure(err)
+		return err
 	}
-	em := newStoredEmitter(j, s.downstream)
-	for row := 0; row < scratch.Count(); row++ {
-		if err := ctx.Err(); err != nil {
-			scratch.Release()
-			em.abort()
-			return j.failLocked(err)
-		}
-		h, probeRow, ok := scratch.record(row)
-		if !ok {
-			scratch.Release()
-			em.abort()
-			return j.failLocked(errors.New("invalid probe record"))
-		}
-		part, err := j.partitionFor(h, 0)
-		if err != nil {
-			scratch.Release()
-			em.abort()
-			return j.failLocked(err)
-		}
-		p := &j.partitions[part]
-		if p.spilled {
-			if p.probeSpill == nil {
-				p.probeSpill, err = newSpillWriter(j.store, j.config.Scope, j.config.Buffers, j.spillTarget())
-				if err != nil {
-					scratch.Release()
-					em.abort()
-					return j.failLocked(err)
-				}
-			}
-			if err := p.probeSpill.appendEncoded(ctx, h, probeRow); err != nil {
-				scratch.Release()
-				em.abort()
-				return j.failLocked(err)
-			}
-		} else if p.index != nil {
-			if err := j.matchRecord(ctx, p.resident, p.index, probeRow, h, em); err != nil {
-				scratch.Release()
-				em.abort()
-				return j.failLocked(err)
-			}
-		}
-		j.stats.ProbeRows++
-	}
-	scratch.Release()
+	j.probeRows.Add(uint64(chunk.Cardinality))
 	if err := em.flush(ctx); err != nil {
 		em.abort()
-		return j.failLocked(err)
+		j.recordProbeFailure(err)
+		return err
 	}
 	return nil
 }
 
-func (j *ExternalHashJoin) matchRecord(ctx context.Context, build *recordCollection, index *rowHashTable, probeRow []byte, hash uint64, em *storedEmitter) error {
+func (j *ExternalHashJoin) recordProbeFailure(err error) {
+	j.mu.Lock()
+	if j.failed == nil {
+		j.failed = err
+	}
+	j.mu.Unlock()
+}
+
+// appendProbeSpill serializes spill writer creation and append without holding
+// the build/probe lifecycle mutex, so resident partitions stay lock-free.
+func (j *ExternalHashJoin) appendProbeSpill(ctx context.Context, p *hybridPartition, hash uint64, chunk *vector.DataChunk, row int) error {
+	j.spillMu.Lock()
+	defer j.spillMu.Unlock()
+	if p.probeSpill == nil {
+		w, err := newSpillWriter(j.store, j.config.Scope, j.config.Buffers, j.spillTarget())
+		if err != nil {
+			return err
+		}
+		p.probeSpill = w
+	}
+	return p.probeSpill.appendChunkRow(ctx, hash, j.probeLayout, chunk, row)
+}
+
+func (j *ExternalHashJoin) matchRecord(ctx context.Context, build recordReader, index *rowHashTable, probeRow []byte, hash uint64, em *storedEmitter) error {
 	buildIndex, ok := index.Head(hash)
 	for ok {
 		_, buildRow, valid := build.record(buildIndex)
@@ -917,8 +933,9 @@ func (j *ExternalHashJoin) loadBuild(ctx context.Context, set partitionSet) (*re
 		build.Release()
 		return nil, nil, err
 	}
+	reader := build.borrowReader()
 	for i := 0; i < build.Count(); i++ {
-		h, _, ok := build.record(i)
+		h, _, ok := reader.record(i)
 		if !ok {
 			index.Release()
 			build.Release()
@@ -940,13 +957,14 @@ func (j *ExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, probeS
 	}
 	defer build.Release()
 	defer index.Release()
+	reader := build.borrowReader()
 	for i := 0; i < probeSet.pages.Count(); i++ {
 		id, _ := probeSet.pages.At(i)
 		buf, err := j.store.ReadPage(ctx, id)
 		if err != nil {
 			return err
 		}
-		err = scanRecords(buf.Bytes(), func(hash uint64, row []byte) error { return j.matchRecord(ctx, build, index, row, hash, em) })
+		err = scanRecords(buf.Bytes(), func(hash uint64, row []byte) error { return j.matchRecord(ctx, reader, index, row, hash, em) })
 		buf.Release()
 		if err != nil {
 			return err
@@ -964,6 +982,7 @@ func (j *ExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, probeS
 func (j *ExternalHashJoin) repartitionSet(ctx context.Context, input partitionSet, depth int, withHistogram bool) ([]partitionSet, *exechash.PartitionHistogram, error) {
 	count := j.partitioner.Count()
 	writers := make([]*spillWriter, count)
+	sets := make([]partitionSet, count)
 	var histogram *exechash.PartitionHistogram
 	var err error
 	if withHistogram {
@@ -973,6 +992,7 @@ func (j *ExternalHashJoin) repartitionSet(ctx context.Context, input partitionSe
 		}
 	}
 	cleanup := func() {
+		releasePartitionSetMetadata(sets)
 		for _, w := range writers {
 			if w != nil {
 				w.Release()
@@ -1018,7 +1038,6 @@ func (j *ExternalHashJoin) repartitionSet(ctx context.Context, input partitionSe
 		}
 	}
 	input.pages.Release()
-	sets := make([]partitionSet, count)
 	for i, w := range writers {
 		if w == nil {
 			continue
@@ -1094,11 +1113,13 @@ func (j *ExternalHashJoin) processSpilled(ctx context.Context, buildSet, probeSe
 	if err != nil {
 		return err
 	}
+	defer releasePartitionSetMetadata(buildChildren)
 	probeChildren, _, err := j.repartitionSet(ctx, probeSet, nextDepth, false)
 	if err != nil {
 		histogram.Release()
 		return err
 	}
+	defer releasePartitionSetMetadata(probeChildren)
 	j.stats.Repartitions++
 	for part := 0; part < len(buildChildren); part++ {
 		bset := buildChildren[part]
@@ -1205,15 +1226,9 @@ func (e *storedEmitter) ensure() error {
 	typesOut := make([]types.LogicalType, 0, len(e.join.config.LeftTypes)+len(e.join.config.RightTypes))
 	typesOut = append(typesOut, e.join.config.LeftTypes...)
 	typesOut = append(typesOut, e.join.config.RightTypes...)
-	e.cols = make([]*vector.Vector, len(typesOut))
-	for i, t := range typesOut {
-		v, err := vector.NewFlat(e.join.config.Scope, e.join.config.Buffers, t, vector.DefaultVectorSize)
-		if err != nil {
-			e.abort()
-			return err
-		}
-		e.cols[i] = v
-	}
+	cols, err := newOutputColumns(e.join.config.Scope, e.join.config.Buffers, typesOut, e.join.config.RequiredOutput)
+	if err != nil { return err }
+	e.cols = cols
 	return nil
 }
 func (e *storedEmitter) append(ctx context.Context, buildRow, probeRow []byte) error {
@@ -1226,17 +1241,17 @@ func (e *storedEmitter) append(ctx context.Context, buildRow, probeRow []byte) e
 	leftCols := e.cols[:len(e.join.config.LeftTypes)]
 	rightCols := e.cols[len(e.join.config.LeftTypes):]
 	if e.join.buildSide == RightSide {
-		if err := e.join.probeLayout.MaterializeRow(probeRow, leftCols, e.count); err != nil {
+		if err := e.join.probeLayout.MaterializeSelectedRow(probeRow, leftCols, e.count, neededColumns(e.join.config.RequiredOutput, 0, len(leftCols))); err != nil {
 			return err
 		}
-		if err := e.join.buildLayout.MaterializeRow(buildRow, rightCols, e.count); err != nil {
+		if err := e.join.buildLayout.MaterializeSelectedRow(buildRow, rightCols, e.count, neededColumns(e.join.config.RequiredOutput, len(e.join.config.LeftTypes), len(rightCols))); err != nil {
 			return err
 		}
 	} else {
-		if err := e.join.buildLayout.MaterializeRow(buildRow, leftCols, e.count); err != nil {
+		if err := e.join.buildLayout.MaterializeSelectedRow(buildRow, leftCols, e.count, neededColumns(e.join.config.RequiredOutput, 0, len(leftCols))); err != nil {
 			return err
 		}
-		if err := e.join.probeLayout.MaterializeRow(probeRow, rightCols, e.count); err != nil {
+		if err := e.join.probeLayout.MaterializeSelectedRow(probeRow, rightCols, e.count, neededColumns(e.join.config.RequiredOutput, len(e.join.config.LeftTypes), len(rightCols))); err != nil {
 			return err
 		}
 	}

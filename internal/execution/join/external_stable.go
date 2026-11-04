@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -19,10 +20,13 @@ import (
 type StableExternalHashJoin struct {
 	core            *ExternalHashJoin
 	residentMatched []*memory.Buffer // residentMatched 仅 FULL 使用；每个 resident build row 一 bit。
+	matchedMu       sync.Mutex       // FULL 的并发 probe worker 共享 matched bitmap。
 }
 
 // NewStableExternal 创建 Stable equi hash join。CROSS 不使用 hash join，应走 managed cross runtime。
 func NewStableExternal(config ExternalConfig) (*StableExternalHashJoin, error) {
+	if err := validateRequiredOutput(config); err != nil { return nil, err }
+	config.RequiredOutput = append([]bool(nil), config.RequiredOutput...)
 	if config.Type == Cross || config.Type > Anti {
 		return nil, fmt.Errorf("stable external hash join requires non-CROSS Stable join type")
 	}
@@ -200,89 +204,49 @@ func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.Dat
 	j := s.join
 	core := j.core
 	core.mu.Lock()
-	defer core.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return j.failLocked(err)
+		core.mu.Unlock()
+		return err
 	}
 	if core.failed != nil {
-		return core.failed
+		err := core.failed
+		core.mu.Unlock()
+		return err
 	}
 	if core.closed || !core.built {
-		return j.failLocked(errors.New("external join build not finalized"))
+		core.mu.Unlock()
+		err := errors.New("external join build not finalized")
+		core.recordProbeFailure(err)
+		return err
 	}
 	if len(chunk.Columns) != len(core.probeTypes) {
-		return j.failLocked(errors.New("external join probe column count mismatch"))
+		core.mu.Unlock()
+		err := errors.New("external join probe column count mismatch")
+		core.recordProbeFailure(err)
+		return err
 	}
+	core.mu.Unlock()
+
 	var hashes [vector.DefaultVectorSize]uint64
 	if err := exechash.HashChunk(chunk, core.probeKeys, hashes[:chunk.Cardinality]); err != nil {
-		return j.failLocked(err)
+		core.recordProbeFailure(err)
+		return err
 	}
-	scratch, err := newRecordCollection(core.config.Scope, core.config.Buffers, core.probeLayout, chunk.Cardinality)
+	comparer, err := exechash.NewChunkKeyComparer(chunk, core.probeKeys)
 	if err != nil {
-		return j.failLocked(err)
+		core.recordProbeFailure(err)
+		return err
 	}
-	for row := 0; row < chunk.Cardinality; row++ {
-		if err := scratch.appendChunkRow(hashes[row], chunk, row); err != nil {
-			scratch.Release()
-			return j.failLocked(err)
-		}
+	emitter := newBatchEmitter(core.config.Type, core.config.Scope, core.config.Buffers, core.config.LeftTypes, core.config.RightTypes, core.buildSide, core.buildLayout, s.downstream)
+	emitter.required = core.config.RequiredOutput
+	if err := core.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], comparer, emitter, j); err != nil {
+		emitter.abort()
+		core.recordProbeFailure(err)
+		return err
 	}
-	emitter := newStableStoredEmitter(j, s.downstream)
-	for row := 0; row < scratch.Count(); row++ {
-		if err := ctx.Err(); err != nil {
-			scratch.Release(); emitter.abort(); return j.failLocked(err)
-		}
-		hash, probeRow, ok := scratch.record(row)
-		if !ok {
-			scratch.Release(); emitter.abort(); return j.failLocked(errors.New("invalid probe record"))
-		}
-		partitionIndex, err := core.partitionFor(hash, 0)
-		if err != nil {
-			scratch.Release(); emitter.abort(); return j.failLocked(err)
-		}
-		partition := &core.partitions[partitionIndex]
-		if partition.spilled {
-			if partition.probeSpill == nil {
-				partition.probeSpill, err = newSpillWriter(core.store, core.config.Scope, core.config.Buffers, core.spillTarget())
-				if err != nil { scratch.Release(); emitter.abort(); return j.failLocked(err) }
-			}
-			if err := partition.probeSpill.appendEncoded(ctx, hash, probeRow); err != nil {
-				scratch.Release(); emitter.abort(); return j.failLocked(err)
-			}
-		} else {
-			matched, err := j.matchResident(ctx, partitionIndex, partition, probeRow, hash, emitter)
-			if err != nil { scratch.Release(); emitter.abort(); return j.failLocked(err) }
-			if !matched {
-				if err := emitter.emitUnmatchedProbe(ctx, probeRow); err != nil { scratch.Release(); emitter.abort(); return j.failLocked(err) }
-			}
-		}
-		core.stats.ProbeRows++
-	}
-	scratch.Release()
-	if err := emitter.flush(ctx); err != nil { emitter.abort(); return j.failLocked(err) }
+	core.probeRows.Add(uint64(chunk.Cardinality))
+	if err := emitter.flush(ctx); err != nil { emitter.abort(); core.recordProbeFailure(err); return err }
 	return nil
-}
-
-func (j *StableExternalHashJoin) matchResident(ctx context.Context, partitionIndex int, partition *hybridPartition, probeRow []byte, hash uint64, emitter *stableStoredEmitter) (bool, error) {
-	if partition.index == nil || partition.resident == nil {
-		return false, nil
-	}
-	matched := false
-	buildIndex, ok := partition.index.Head(hash)
-	for ok {
-		_, buildRow, valid := partition.resident.record(buildIndex)
-		if !valid { return false, errors.New("invalid resident build record") }
-		equal, err := exechash.EqualProjectedRows(j.core.buildLayout, buildRow, j.core.buildKeys, j.core.probeLayout, probeRow, j.core.probeKeys, exechash.NullsUnequal)
-		if err != nil { return false, err }
-		if equal {
-			matched = true
-			if j.core.config.Type == Full { setMatched(j.residentMatched[partitionIndex], buildIndex) }
-			if err := emitter.emitMatch(ctx, buildRow, probeRow, matched); err != nil { return false, err }
-			if j.core.config.Type == Semi || j.core.config.Type == Anti { break }
-		}
-		buildIndex, ok = partition.index.Next(buildIndex)
-	}
-	return matched, nil
 }
 
 func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
@@ -314,9 +278,10 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 		for i := range core.partitions {
 			partition := &core.partitions[i]
 			if partition.spilled || partition.resident == nil { continue }
+			reader := partition.resident.borrowReader()
 			for row := 0; row < partition.resident.Count(); row++ {
 				if !isMatched(j.residentMatched[i], row) {
-					_, buildRow, ok := partition.resident.record(row)
+					_, buildRow, ok := reader.record(row)
 					if !ok { emitter.abort(); return j.failLocked(errors.New("invalid resident build record")) }
 					if err := emitter.emitUnmatchedBuild(ctx, buildRow); err != nil { emitter.abort(); return j.failLocked(err) }
 				}
@@ -352,8 +317,10 @@ func (j *StableExternalHashJoin) processSpilled(ctx context.Context, buildSet, p
 	nextDepth := depth + 1
 	buildChildren, histogram, err := j.core.repartitionSet(ctx, buildSet, nextDepth, true)
 	if err != nil { return err }
+	defer releasePartitionSetMetadata(buildChildren)
 	probeChildren, _, err := j.core.repartitionSet(ctx, probeSet, nextDepth, false)
 	if err != nil { histogram.Release(); return err }
+	defer releasePartitionSetMetadata(probeChildren)
 	j.core.stats.Repartitions++
 	for partition := range buildChildren {
 		bset, pset := buildChildren[partition], probeChildren[partition]
@@ -378,6 +345,7 @@ func (j *StableExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, 
 	build, index, err := j.core.loadBuild(ctx, buildSet)
 	if err != nil { return err }
 	defer build.Release(); defer index.Release()
+	reader := build.borrowReader()
 	var buildMatched *memory.Buffer
 	if j.core.config.Type == Full {
 		buildMatched, err = newMatchedBitmap(j.core.config.Scope, j.core.config.Buffers, build.Count())
@@ -389,7 +357,7 @@ func (j *StableExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, 
 		buf, err := j.core.store.ReadPage(ctx, id)
 		if err != nil { return err }
 		err = scanRecords(buf.Bytes(), func(hash uint64, probeRow []byte) error {
-			matched, err := j.matchLoaded(ctx, build, index, buildMatched, probeRow, hash, emitter)
+			matched, err := j.matchLoaded(ctx, reader, index, buildMatched, probeRow, hash, emitter)
 			if err != nil { return err }
 			if !matched { return emitter.emitUnmatchedProbe(ctx, probeRow) }
 			return nil
@@ -400,7 +368,7 @@ func (j *StableExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, 
 	if j.core.config.Type == Full {
 		for row := 0; row < build.Count(); row++ {
 			if !isMatched(buildMatched, row) {
-				_, buildRow, ok := build.record(row); if !ok { return errors.New("invalid loaded build record") }
+				_, buildRow, ok := reader.record(row); if !ok { return errors.New("invalid loaded build record") }
 				if err := emitter.emitUnmatchedBuild(ctx, buildRow); err != nil { return err }
 			}
 		}
@@ -409,7 +377,7 @@ func (j *StableExternalHashJoin) joinInMemorySet(ctx context.Context, buildSet, 
 	return j.core.deleteSet(probeSet)
 }
 
-func (j *StableExternalHashJoin) matchLoaded(ctx context.Context, build *recordCollection, index *rowHashTable, buildMatched *memory.Buffer, probeRow []byte, hash uint64, emitter *stableStoredEmitter) (bool, error) {
+func (j *StableExternalHashJoin) matchLoaded(ctx context.Context, build recordReader, index *rowHashTable, buildMatched *memory.Buffer, probeRow []byte, hash uint64, emitter *stableStoredEmitter) (bool, error) {
 	matched := false
 	buildIndex, ok := index.Head(hash)
 	for ok {
@@ -541,8 +509,9 @@ func (e *stableStoredEmitter) outputTypes() []types.LogicalType {
 }
 func (e *stableStoredEmitter) ensure() error {
 	if e.cols != nil { return nil }
-	e.cols = make([]*vector.Vector, len(e.outputTypes()))
-	for i, typ := range e.outputTypes() { v,err:=vector.NewFlat(e.join.core.config.Scope,e.join.core.config.Buffers,typ,vector.DefaultVectorSize);if err!=nil{e.abort();return err};e.cols[i]=v }
+	cols, err := newOutputColumns(e.join.core.config.Scope, e.join.core.config.Buffers, e.outputTypes(), e.join.core.config.RequiredOutput)
+	if err != nil { return err }
+	e.cols = cols
 	return nil
 }
 func (e *stableStoredEmitter) emitMatch(ctx context.Context, buildRow, probeRow []byte, _ bool) error {
@@ -558,22 +527,22 @@ func (e *stableStoredEmitter) emitUnmatchedBuild(ctx context.Context, buildRow [
 }
 func (e *stableStoredEmitter) appendPair(ctx context.Context, buildRow, probeRow []byte) error {
 	if err:=ctx.Err();err!=nil{return err};if err:=e.ensure();err!=nil{return err};left:=e.cols[:len(e.join.core.config.LeftTypes)];right:=e.cols[len(e.join.core.config.LeftTypes):]
-	if e.join.core.buildSide==RightSide{if err:=e.join.core.probeLayout.MaterializeRow(probeRow,left,e.count);err!=nil{return err};if err:=e.join.core.buildLayout.MaterializeRow(buildRow,right,e.count);err!=nil{return err}}else{if err:=e.join.core.buildLayout.MaterializeRow(buildRow,left,e.count);err!=nil{return err};if err:=e.join.core.probeLayout.MaterializeRow(probeRow,right,e.count);err!=nil{return err}}
+	if e.join.core.buildSide==RightSide{if err:=e.join.core.probeLayout.MaterializeSelectedRow(probeRow,left,e.count,neededColumns(e.join.core.config.RequiredOutput,0,len(left)));err!=nil{return err};if err:=e.join.core.buildLayout.MaterializeSelectedRow(buildRow,right,e.count,neededColumns(e.join.core.config.RequiredOutput,len(e.join.core.config.LeftTypes),len(right)));err!=nil{return err}}else{if err:=e.join.core.buildLayout.MaterializeSelectedRow(buildRow,left,e.count,neededColumns(e.join.core.config.RequiredOutput,0,len(left)));err!=nil{return err};if err:=e.join.core.probeLayout.MaterializeSelectedRow(probeRow,right,e.count,neededColumns(e.join.core.config.RequiredOutput,len(e.join.core.config.LeftTypes),len(right)));err!=nil{return err}}
 	return e.advance(ctx)
 }
 func (e *stableStoredEmitter) appendProbeOnly(ctx context.Context, probeRow []byte) error {
 	if err:=ctx.Err();err!=nil{return err};if err:=e.ensure();err!=nil{return err}
-	if e.join.core.config.Type==Semi||e.join.core.config.Type==Anti { if e.join.core.buildSide!=RightSide{return errors.New("semi/anti external join requires left probe")};if err:=e.join.core.probeLayout.MaterializeRow(probeRow,e.cols,e.count);err!=nil{return err};return e.advance(ctx) }
+	if e.join.core.config.Type==Semi||e.join.core.config.Type==Anti { if e.join.core.buildSide!=RightSide{return errors.New("semi/anti external join requires left probe")};if err:=e.join.core.probeLayout.MaterializeSelectedRow(probeRow,e.cols,e.count,neededColumns(e.join.core.config.RequiredOutput,0,len(e.cols)));err!=nil{return err};return e.advance(ctx) }
 	left:=e.cols[:len(e.join.core.config.LeftTypes)];right:=e.cols[len(e.join.core.config.LeftTypes):]
-	if e.join.core.buildSide==RightSide { if err:=e.join.core.probeLayout.MaterializeRow(probeRow,left,e.count);err!=nil{return err};setNullRow(right,e.count) } else { setNullRow(left,e.count);if err:=e.join.core.probeLayout.MaterializeRow(probeRow,right,e.count);err!=nil{return err} }
+	if e.join.core.buildSide==RightSide { if err:=e.join.core.probeLayout.MaterializeSelectedRow(probeRow,left,e.count,neededColumns(e.join.core.config.RequiredOutput,0,len(left)));err!=nil{return err};setNullRow(right,e.count) } else { setNullRow(left,e.count);if err:=e.join.core.probeLayout.MaterializeSelectedRow(probeRow,right,e.count,neededColumns(e.join.core.config.RequiredOutput,len(e.join.core.config.LeftTypes),len(right)));err!=nil{return err} }
 	return e.advance(ctx)
 }
 func (e *stableStoredEmitter) appendBuildOnly(ctx context.Context, buildRow []byte) error {
 	if err:=ctx.Err();err!=nil{return err};if err:=e.ensure();err!=nil{return err};left:=e.cols[:len(e.join.core.config.LeftTypes)];right:=e.cols[len(e.join.core.config.LeftTypes):]
-	if e.join.core.buildSide==RightSide { setNullRow(left,e.count);if err:=e.join.core.buildLayout.MaterializeRow(buildRow,right,e.count);err!=nil{return err} } else { if err:=e.join.core.buildLayout.MaterializeRow(buildRow,left,e.count);err!=nil{return err};setNullRow(right,e.count) }
+	if e.join.core.buildSide==RightSide { setNullRow(left,e.count);if err:=e.join.core.buildLayout.MaterializeSelectedRow(buildRow,right,e.count,neededColumns(e.join.core.config.RequiredOutput,len(e.join.core.config.LeftTypes),len(right)));err!=nil{return err} } else { if err:=e.join.core.buildLayout.MaterializeSelectedRow(buildRow,left,e.count,neededColumns(e.join.core.config.RequiredOutput,0,len(left)));err!=nil{return err};setNullRow(right,e.count) }
 	return e.advance(ctx)
 }
-func setNullRow(columns []*vector.Vector,row int){for _,column:=range columns{column.SetNull(row)}}
+func setNullRow(columns []*vector.Vector,row int){for _,column:=range columns{if column.Kind != vector.Constant {column.SetNull(row)}}}
 func (e *stableStoredEmitter) advance(ctx context.Context) error { e.count++;if e.count==vector.DefaultVectorSize{return e.flush(ctx)};return nil }
 func (e *stableStoredEmitter) flush(ctx context.Context) error { if e.count==0{return nil};chunk:=&vector.DataChunk{Columns:e.cols,Cardinality:e.count};err:=e.downstream.Consume(ctx,chunk);for _,v:=range e.cols{v.Release()};e.cols=nil;e.count=0;return err }
 func (e *stableStoredEmitter) abort(){for _,v:=range e.cols{if v!=nil{v.Release()}};e.cols=nil;e.count=0}

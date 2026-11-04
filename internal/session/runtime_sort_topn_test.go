@@ -42,7 +42,7 @@ func TestExternalSortFactoryUsesPreallocatedTopNForFixedWidthInput(t *testing.T)
 	}
 }
 
-func TestExternalSortFactoryTopNFallsBackForVariableWidthInput(t *testing.T) {
+func TestExternalSortFactoryUsesSpillableTopNForVariableWidthInput(t *testing.T) {
 	_, buffers, _, q := newDistinctFactoryQuery(t)
 	factory, err := NewExternalSortFactory(q, buffers, ExternalSortRuntimeConfig{MemoryBudget: 64 << 10, SpillBlockBytes: 1024})
 	if err != nil {
@@ -58,9 +58,9 @@ func TestExternalSortFactoryTopNFallsBackForVariableWidthInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := operator.(*execsort.ExternalSort); !ok {
+	if _, ok := operator.(*execsort.SpillableTopN); !ok {
 		operator.Release()
-		t.Fatalf("operator=%T want *sort.ExternalSort", operator)
+		t.Fatalf("operator=%T want *sort.SpillableTopN", operator)
 	}
 	operator.Release()
 	if err := q.Close(); err != nil {

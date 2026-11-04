@@ -104,6 +104,46 @@ func (o *Optimizer) markRequiredScanColumns(node *planner.LogicalPlan, needed ma
 				collectBoundColumnIndexes(key.Expr, needed)
 			}
 		case planner.LogicalLimit:
+		case planner.LogicalJoin:
+			if len(node.Children) != 2 {
+				return
+			}
+			leftWidth := len(node.Children[0].Output)
+			expectedWidth := leftWidth + len(node.Children[1].Output)
+			if node.Join == planner.JoinSemi || node.Join == planner.JoinAnti {
+				expectedWidth = leftWidth
+			}
+			if leftWidth == 0 || len(node.Output) != expectedWidth {
+				return
+			}
+			for index := range needed {
+				if index < 0 || index >= expectedWidth {
+					return
+				}
+			}
+			// Save parent requirements before adding join keys/predicate inputs.
+			node.RequiredOutput = make([]bool, expectedWidth)
+			for index := range needed {
+				node.RequiredOutput[index] = true
+			}
+			leftNeeded := make(map[int]struct{})
+			rightNeeded := make(map[int]struct{})
+			split := func(indexes map[int]struct{}) {
+				for index := range indexes {
+					if index < leftWidth {
+						leftNeeded[index] = struct{}{}
+					} else {
+						rightNeeded[index-leftWidth] = struct{}{}
+					}
+				}
+			}
+			split(needed)
+			joinColumns := make(map[int]struct{})
+			collectBoundColumnIndexes(node.Predicate, joinColumns)
+			split(joinColumns)
+			o.markRequiredScanColumns(node.Children[0], leftNeeded)
+			o.markRequiredScanColumns(node.Children[1], rightNeeded)
+			return
 		default:
 			return
 		}
@@ -213,6 +253,7 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 		Offset:     p.Offset,
 		Estimate:   est,
 	}
+	out.RequiredOutput = append([]bool(nil), p.RequiredOutput...)
 	switch p.Kind {
 	case planner.LogicalOneRow:
 		out.Kind = planner.PhysicalOneRow
@@ -430,6 +471,7 @@ func cloneLogical(p *planner.LogicalPlan) *planner.LogicalPlan {
 		out.Children[i] = cloneLogical(child)
 	}
 	out.Output = append([]planner.Column(nil), p.Output...)
+	out.RequiredOutput = append([]bool(nil), p.RequiredOutput...)
 	out.Scan = cloneScan(p.Scan)
 	out.Projection = append([]*binder.BoundExpression(nil), p.Projection...)
 	out.GroupBy = append([]*binder.BoundExpression(nil), p.GroupBy...)

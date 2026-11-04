@@ -38,21 +38,9 @@ func (f *Filter) Transform(ctx context.Context, in *vector.DataChunk) (*vector.D
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	predicate, err := f.Executor.ExecuteSQL(f.Predicate, in)
-	if err != nil {
-		return nil, err
-	}
-	defer predicate.Release()
-	rows := make([]int, 0, in.Cardinality)
-	for row := 0; row < in.Cardinality; row++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		value, valid := predicate.Bool(row)
-		if valid && value {
-			rows = append(rows, row)
-		}
-	}
+	rows, err := f.selectRows(ctx, in)
+	if err != nil { return nil, err }
+
 	return materializeSelection(ctx, f.Executor, in, rows)
 }
 

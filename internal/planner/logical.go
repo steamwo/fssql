@@ -89,6 +89,8 @@ type LogicalPlan struct {
 	Sort       []SortKey                 // Sort 仅对 LogicalSort 有效。
 	Limit      uint64                    // Limit 是逻辑 limit；UnlimitedRows 表示 OFFSET-only。
 	Offset     uint64                    // Offset 是逻辑 offset。
+
+	RequiredOutput []bool // JOIN output mask; nil means unknown/all, schema indexes stay unchanged.
 }
 
 // Validate 验证 plan shape，防止后续 optimizer 在不完整节点上猜测语义。

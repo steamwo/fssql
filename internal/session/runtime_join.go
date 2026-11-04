@@ -212,6 +212,10 @@ func estimateJoinBytes(estimate planner.CardinalityEstimate, columns []types.Log
 // externalJoinAdapter 把 join.Side 转成 generic Pipeline BinaryBuildSide。
 type externalJoinAdapter struct{ core *execjoin.StableExternalHashJoin }
 
+func (a *externalJoinAdapter) SetRequiredOutputColumns(needed []bool) error {
+	return a.core.SetRequiredOutputColumns(needed)
+}
+
 func (a *externalJoinAdapter) BuildSide() pipeline.BinaryBuildSide {
 	if a.core.BuildSide() == execjoin.LeftSide {
 		return pipeline.BinaryBuildLeft

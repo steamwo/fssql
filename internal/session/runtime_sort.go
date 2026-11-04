@@ -48,6 +48,7 @@ func(f *ExternalSortFactory)OpenSort(ctx context.Context,columns []planner.Colum
 	if len(columns)==0||len(keys)==0{return nil,fmt.Errorf("session: SORT requires input columns and sort keys")};_ = estimate
 	inputTypes,executionKeys,err:=prepareSortRuntime(columns,keys);if err!=nil{return nil,err}
 	if f.topNRows>0&&f.topNRows<=uint64(math.MaxInt)&&fixedWidthSortInput(inputTypes){topN,err:=execsort.NewTopN(execsort.TopNConfig{InputTypes:inputTypes,Keys:executionKeys,N:int(f.topNRows),MemoryBudget:f.config.MemoryBudget,Scope:f.query.Memory,Buffers:f.buffers,PreallocateFixed:true});if err==nil{return topN,nil};if !errors.Is(err,memory.ErrLimitExceeded){return nil,err}}
+	if f.topNRows>0&&f.topNRows<=uint64(math.MaxInt)&&!fixedWidthSortInput(inputTypes){op,err:=execsort.NewSpillableTopN(execsort.Config{InputTypes:inputTypes,Keys:executionKeys,MemoryBudget:f.config.MemoryBudget,SpillBlockBytes:f.config.SpillBlockBytes,Scope:f.query.Memory,Buffers:f.buffers,Temp:f.query.Temp,Compression:f.config.Compression},int(f.topNRows));if err!=nil{return nil,err};return op,nil}
 	op,err:=execsort.New(execsort.Config{InputTypes:inputTypes,Keys:executionKeys,MemoryBudget:f.config.MemoryBudget,SpillBlockBytes:f.config.SpillBlockBytes,Scope:f.query.Memory,Buffers:f.buffers,Temp:f.query.Temp,Compression:f.config.Compression});if err!=nil{return nil,err};return op,nil
 }
 

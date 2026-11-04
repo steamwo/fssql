@@ -93,6 +93,7 @@ type ExternalSort struct {
 	finalized bool
 	stats Stats
 	preparedKeys []preparedSortKey
+	emitLimit int // bounded TopN fallback; zero means all rows
 }
 
 func New(cfg Config) (*ExternalSort, error) {

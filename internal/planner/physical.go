@@ -51,6 +51,8 @@ type PhysicalPlan struct {
 	Offset     uint64                    // Offset 是 physical offset。
 	Estimate   CardinalityEstimate       // Estimate 是 optimizer 估计。
 	Cost       PhysicalCost              // Cost 是 physical cost model 结果。
+
+	RequiredOutput []bool // JOIN output mask; nil means unknown/all, schema indexes stay unchanged.
 }
 
 // Validate 验证 physical tree shape，并冻结同一 relation 的 scan 引用数。

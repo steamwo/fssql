@@ -40,9 +40,11 @@ type Config struct {
 const rowHashSlotWidth = 24
 
 type rowHashTable struct {
-	slots    *memory.Buffer
-	next     *memory.Buffer
-	capacity int
+	slots     *memory.Buffer
+	next      *memory.Buffer
+	slotsData []byte
+	nextData  []byte
+	capacity  int
 }
 
 func newRowHashTable(scope *memory.Scope, bm *memory.BufferManager, rows int) (*rowHashTable, error) {
@@ -69,11 +71,14 @@ func newRowHashTable(scope *memory.Scope, bm *memory.BufferManager, rows int) (*
 		slots.Release()
 		return nil, err
 	}
-	return &rowHashTable{slots: slots, next: next, capacity: capacity}, nil
+	return &rowHashTable{slots: slots, next: next, slotsData: slots.Bytes(), nextData: next.Bytes(), capacity: capacity}, nil
 }
 
+// slot and Next borrow the immutable post-build buffers. Neither backing
+// buffer is resized after construction, so the cached views stay valid until
+// Release.
 func (h *rowHashTable) slot(i int) []byte {
-	return h.slots.Bytes()[i*rowHashSlotWidth : (i+1)*rowHashSlotWidth]
+	return h.slotsData[i*rowHashSlotWidth : (i+1)*rowHashSlotWidth]
 }
 func (h *rowHashTable) Insert(hash uint64, row int) error {
 	mask := h.capacity - 1
@@ -88,7 +93,7 @@ func (h *rowHashTable) Insert(hash uint64, row int) error {
 		}
 		if binary.LittleEndian.Uint64(s[8:16]) == hash {
 			head := binary.LittleEndian.Uint32(s[16:20])
-			binary.LittleEndian.PutUint32(h.next.Bytes()[row*4:row*4+4], head)
+			binary.LittleEndian.PutUint32(h.nextData[row*4:row*4+4], head)
 			binary.LittleEndian.PutUint32(s[16:20], uint32(row+1))
 			return nil
 		}
@@ -110,7 +115,7 @@ func (h *rowHashTable) Head(hash uint64) (int, bool) {
 	return 0, false
 }
 func (h *rowHashTable) Next(row int) (int, bool) {
-	v := binary.LittleEndian.Uint32(h.next.Bytes()[row*4 : row*4+4])
+	v := binary.LittleEndian.Uint32(h.nextData[row*4 : row*4+4])
 	if v == 0 {
 		return 0, false
 	}
@@ -125,6 +130,7 @@ func (h *rowHashTable) Release() {
 		h.next.Release()
 		h.next = nil
 	}
+	h.slotsData, h.nextData = nil, nil
 }
 
 type HashJoin struct {

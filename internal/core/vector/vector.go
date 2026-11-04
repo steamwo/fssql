@@ -169,6 +169,8 @@ type Vector struct {
 	heap        *StringHeap
 	dictChild   *Vector
 	dictSel     SelectionVector
+	dictOwned   bool
+	dictRes     *memory.Reservation
 	children    []*Vector
 	listEntries []ListEntry
 }
@@ -366,6 +368,17 @@ func (v *Vector) ListEntry(i int) (ListEntry, bool) {
 	return b.listEntries[idx], true
 }
 func (v *Vector) Release() {
+	if v == nil {
+		return
+	}
+	if v.dictOwned && v.dictChild != nil {
+		v.dictChild.Release()
+		v.dictChild = nil
+	}
+	if v.dictRes != nil {
+		v.dictRes.Release()
+		v.dictRes = nil
+	}
 	if v.data != nil {
 		v.data.Release()
 		v.data = nil

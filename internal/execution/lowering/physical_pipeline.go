@@ -326,6 +326,13 @@ func (b *Builder) lowerJoinPipeline(ctx context.Context, plan *planner.PhysicalP
 	if runtime == nil {
 		return nil, fmt.Errorf("JoinFactory returned nil runtime")
 	}
+	// Optional configuration preserves compatibility with existing factories.
+	if configurable, ok := runtime.(interface{ SetRequiredOutputColumns([]bool) error }); ok && plan.RequiredOutput != nil {
+		if err := configurable.SetRequiredOutputColumns(plan.RequiredOutput); err != nil {
+			runtime.Close()
+			return nil, err
+		}
+	}
 
 	buildPlan, probePlan := right, left
 	if runtime.BuildSide() == pipeline.BinaryBuildLeft {

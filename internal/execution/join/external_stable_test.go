@@ -3,6 +3,7 @@ package join
 import (
 	"context"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
@@ -38,6 +39,105 @@ func runStableExternalJoinChunks(t *testing.T, jt Type, left, right []*vector.Da
 	stats := j.Stats()
 	j.Close()
 	return collector.rows, stats
+}
+
+type lockedRowCollector struct {
+	mu   sync.Mutex
+	rows []string
+}
+
+func (c *lockedRowCollector) Consume(_ context.Context, chunk *vector.DataChunk) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for r := 0; r < chunk.Cardinality; r++ {
+		parts := make([]string, len(chunk.Columns))
+		for i, v := range chunk.Columns {
+			parts[i] = formatInt(v, r)
+		}
+		row := ""
+		for i, part := range parts {
+			if i > 0 {
+				row += ","
+			}
+			row += part
+		}
+		c.rows = append(c.rows, row)
+	}
+	return nil
+}
+
+func (c *lockedRowCollector) Finalize(context.Context) error { return nil }
+
+func runStableExternalJoinChunksWorkers(t *testing.T, jt Type, left, right []*vector.DataChunk, q *query.Context, bm *memory.BufferManager, budget int64, workers int) ([]string, ExternalStats) {
+	t.Helper()
+	types2 := []types.LogicalType{{ID: types.BigInt}, {ID: types.BigInt}}
+	j, err := NewStableExternal(ExternalConfig{
+		Type: jt, LeftTypes: types2, RightTypes: types2, LeftKeys: []int{0}, RightKeys: []int{0},
+		MemoryBudget: budget, RadixBits: 4, MaxDepth: 3, MinReductionPercent: 10, SpillBlockBytes: 1024,
+		Scope: q.Memory, Buffers: bm, Temp: q.Temp, Compression: storagetemp.CompressionRLE,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector := &lockedRowCollector{}
+	buildChunks, probeChunks := right, left
+	if j.BuildSide() == LeftSide {
+		buildChunks, probeChunks = left, right
+	}
+	build := &pipeline.Pipeline{ID: "stable-concurrent-build", Source: &chunkSource{chunks: buildChunks}, Sink: j.BuildSink()}
+	probe := &pipeline.Pipeline{ID: "stable-concurrent-probe", Source: &chunkSource{chunks: probeChunks}, Sink: j.ProbeSink(collector), Dependencies: []*pipeline.Pipeline{build}}
+	if err := pipeline.RunDAG(q.Context(), probe, workers, q); err != nil {
+		j.Close()
+		t.Fatal(err)
+	}
+	stats := j.Stats()
+	j.Close()
+	return collector.rows, stats
+}
+
+// TestStableExternalConcurrentProbeMatchesSerial exercises worker-local probe
+// state, concurrent FULL matched-bitmap updates and serialized probe spill
+// writes against the in-memory reference.
+func TestStableExternalConcurrentProbeMatchesSerial(t *testing.T) {
+	for _, typ := range []Type{Inner, Full} {
+		t.Run(joinTypeName(typ), func(t *testing.T) {
+			want := runGeneratedReference(t, typ, 768, 640, 113)
+			manager, buffers, quotas, q := newStableExternalHarness(t)
+			left := makeGeneratedChunks(t, q.Memory, buffers, 768, 113, 100000, nil)
+			right := makeGeneratedChunks(t, q.Memory, buffers, 640, 113, 200000, nil)
+			got, stats := runStableExternalJoinChunksWorkers(t, typ, left, right, q, buffers, 8<<10, 4)
+			sort.Strings(want)
+			sort.Strings(got)
+			if len(got) != len(want) {
+				t.Fatalf("rows=%d want=%d stats=%+v", len(got), len(want), stats)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("row %d=%q want=%q", i, got[i], want[i])
+				}
+			}
+			if stats.SpilledBuildPartitions == 0 {
+				t.Fatalf("expected spill to exercise concurrent probe spill writes: %+v", stats)
+			}
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if manager.Used() != 0 || quotas.GlobalUsed() != 0 {
+				t.Fatalf("leak managed=%d temp=%d", manager.Used(), quotas.GlobalUsed())
+			}
+		})
+	}
+}
+
+func joinTypeName(typ Type) string {
+	switch typ {
+	case Inner:
+		return "inner"
+	case Full:
+		return "full"
+	default:
+		return "other"
+	}
 }
 
 func newStableExternalHarness(t *testing.T) (*memory.Manager, *memory.BufferManager, *storagetemp.TemporaryMemoryManager, *query.Context) {

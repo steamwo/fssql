@@ -20,6 +20,14 @@ type Operator interface {
 	Release()
 }
 
+// ConcurrentOperator opts into Consume calls from multiple pipeline workers.
+// The operator must keep per-worker state internally and make Finalize/Emit
+// observe every Consume that completed before the dependency pipeline ended.
+type ConcurrentOperator interface {
+	Operator
+	ConcurrentConsume() bool
+}
+
 type emitItem struct {
 	chunk *vector.DataChunk // chunk 的 ownership 从成功的 Operator.Emit callback 转移到 root Pipeline。
 }
@@ -29,8 +37,10 @@ type emitItem struct {
 type Bridge struct {
 	op Operator // op 是 Distinct/Sort/Aggregate 等真实 blocking operator。
 
-	consumeMu sync.Mutex // consumeMu 串行化非线程安全 operator 的 Consume，并与 Finalize 建立边界。
-	stateMu   sync.Mutex // stateMu 保护 finalized/closed/start/cancel/terminalErr。
+	consumeMu  sync.Mutex   // consumeMu 串行化非线程安全 operator 的 Consume，并与 Finalize 建立边界。
+	gate       sync.RWMutex // gate 为并发 Consume 提供 Finalize/Close 屏障。
+	concurrent bool         // concurrent 表示 operator 支持 worker-local 并发 Consume。
+	stateMu    sync.Mutex   // stateMu 保护 finalized/closed/start/cancel/terminalErr。
 	finalized bool       // finalized 表示 dependency pipeline 已完成全部 Consume。
 	closed    bool       // closed 表示 root Source 生命周期已经结束。
 	started   bool       // started 表示 Emit goroutine 已启动。
@@ -54,10 +64,15 @@ func New(op Operator, queueCapacity int) (*Bridge, error) {
 	if queueCapacity <= 0 || queueCapacity > maxBridgeQueue {
 		return nil, fmt.Errorf("blocking bridge queue capacity must be in [1,%d]", maxBridgeQueue)
 	}
+	concurrent := false
+	if candidate, ok := op.(ConcurrentOperator); ok {
+		concurrent = candidate.ConcurrentConsume()
+	}
 	return &Bridge{
-		op:    op,
-		items: make(chan emitItem, queueCapacity),
-		done:  make(chan struct{}),
+		op:         op,
+		concurrent: concurrent,
+		items:      make(chan emitItem, queueCapacity),
+		done:       make(chan struct{}),
 	}, nil
 }
 
@@ -72,8 +87,13 @@ func (b *Bridge) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	b.consumeMu.Lock()
-	defer b.consumeMu.Unlock()
+	if b.concurrent {
+		b.gate.RLock()
+		defer b.gate.RUnlock()
+	} else {
+		b.consumeMu.Lock()
+		defer b.consumeMu.Unlock()
+	}
 	b.stateMu.Lock()
 	if b.closed {
 		b.stateMu.Unlock()
@@ -98,6 +118,8 @@ func (b *Bridge) Finalize(ctx context.Context) error {
 	// 与 Consume 使用同一把锁，确保 Finalize 返回时没有仍在修改 blocking state 的 worker。
 	b.consumeMu.Lock()
 	defer b.consumeMu.Unlock()
+	b.gate.Lock()
+	defer b.gate.Unlock()
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
 	if b.closed {

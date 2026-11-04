@@ -13,7 +13,11 @@ import (
 
 const (
 	initialPageHeaderProbe = int64(128)
-	maxPageHeaderProbe     = int64(64 << 10)
+	// Page headers carrying min/max statistics for wide strings routinely
+	// exceed 128 bytes. Piggybacking a larger bounded probe avoids repeated
+	// header-only range reads without ever prefetching a whole chunk.
+	pageHeaderPiggyback = int64(2048)
+	maxPageHeaderProbe  = int64(64 << 10)
 )
 
 var ErrRepeatedColumnRequiresLevelReader = errors.New("parquet: repeated column requires level-aware reader")
@@ -489,6 +493,9 @@ func (c *ColumnCursor) ReadScalar(ctx context.Context, rows int) (*vector.Vector
 	}
 	if int64(rows) > remaining {
 		rows = int(remaining)
+	}
+	if out, handled, err := c.readOwnedDictionaryBatch(ctx, rows); handled || err != nil {
+		return out, err
 	}
 	out, err := vector.NewFlat(c.scope, c.bm, c.leaf.Logical, rows)
 	if err != nil {

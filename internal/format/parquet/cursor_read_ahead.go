@@ -20,13 +20,13 @@ func (c *ColumnCursor) releaseHeaderTail() {
 // Reads remain inside this column chunk and never prefetch a complete file.
 func (c *ColumnCursor) readPageBody(ctx context.Context, offset, length int64) (*memory.Buffer, error) {
 	next := offset + length // Bounds were checked by loadPage before this call.
-	extra := min(initialPageHeaderProbe, c.end-next)
+	extra := min(pageHeaderPiggyback, c.end-next)
 	if extra <= 0 {
 		c.releaseHeaderTail()
 		return c.readRange(ctx, offset, length, memory.TagParquetCompressed)
 	}
 	if c.headerTail == nil {
-		buffer, err := c.bm.Allocate(c.scope, memory.TagParquetRange, int(initialPageHeaderProbe))
+		buffer, err := c.bm.Allocate(c.scope, memory.TagParquetRange, int(pageHeaderPiggyback))
 		if err != nil {
 			if errors.Is(err, memory.ErrLimitExceeded) {
 				return c.readRange(ctx, offset, length, memory.TagParquetCompressed)

@@ -13,6 +13,9 @@ import (
 // Keep the accumulator in registers for a complete batch. The input view
 // borrows the existing vector; no payload copy or new reservation is needed.
 func (a *HashAggregate) updateGlobalFixed(ctx context.Context, st []byte, b BoundSpec, chunk *vector.DataChunk) (bool, error) {
+	if handled, err := a.updateGlobalFlatSum(ctx, st, b, chunk); handled {
+		return true, err
+	}
 	v := chunk.Columns[b.Spec.Input]
 	view, ok := v.BorrowFixedWidth()
 	if !ok {

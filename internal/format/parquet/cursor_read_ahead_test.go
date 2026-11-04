@@ -52,7 +52,7 @@ func TestColumnCursorReusesBoundedNextHeaderProbe(t *testing.T) {
 		t.Fatalf("expected first header plus three bodies: %+v", cursor.Metrics())
 	}
 	for _, request := range driver.ranges {
-		if request.Offset < 0 || request.Length > int64(len(data))-request.Offset || request.Length > 128+initialPageHeaderProbe || request.Expected == nil || request.Expected.ETag != "e" {
+		if request.Offset < 0 || request.Length > int64(len(data))-request.Offset || request.Length > 128+pageHeaderPiggyback || request.Expected == nil || request.Expected.ETag != "e" {
 			t.Fatalf("unsafe lookahead range: %+v", request)
 		}
 	}

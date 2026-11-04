@@ -36,6 +36,7 @@ type TopN struct {
 	preallocatedUsed  int
 	indices           *managedIndices
 	finalized         bool
+	nextRow           int // first unconsumed row of the last Consume call
 }
 
 const topNEntryMetadataBytes = int64(32)
@@ -266,6 +267,7 @@ func (t *TopN) copyCandidate(row []byte) (*memory.Buffer, error) {
 }
 
 func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
+	t.nextRow = 0
 	if t.finalized {
 		return errors.New("TopN finalized")
 	}
@@ -283,6 +285,7 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 	var threshold, firstData []byte
 	var firstValid bool
 	for r := 0; r < c.Cardinality; r++ {
+		t.nextRow = r
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -358,6 +361,7 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 		}
 		threshold = nil // Heap replacement changes both the root and its payload.
 	}
+	t.nextRow = c.Cardinality
 	return nil
 }
 
@@ -447,7 +451,7 @@ func (t *TopN) Emit(ctx context.Context, emit func(*vector.DataChunk) error) err
 		return err
 	}
 	defer idx.release()
-	shim := &ExternalSort{cfg: Config{InputTypes: t.cfg.InputTypes, Keys: t.cfg.Keys, Scope: t.cfg.Scope, Buffers: t.cfg.Buffers}, layout: t.layout}
+	shim := &ExternalSort{cfg: Config{InputTypes: t.cfg.InputTypes, Keys: t.cfg.Keys, Scope: t.cfg.Scope, Buffers: t.cfg.Buffers}, layout: t.layout, emitLimit: len(t.entries)}
 	err = shim.emitRows(ctx, func(consume func([]byte) error) error {
 		for i := 0; i < idx.n; i++ {
 			if err := consume(t.entries[idx.get(i)].Bytes()); err != nil {

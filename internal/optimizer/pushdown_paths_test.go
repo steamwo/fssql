@@ -51,6 +51,36 @@ func TestProjectionPushdownKeepsColumnsFromUnsupportedResidualPredicate(t *testi
 	}
 }
 
+func TestProjectionPushdownCrossesJoinAndKeepsJoinKeys(t *testing.T) {
+	left, _ := testScan("join-left", 1000)
+	right, _ := testScan("join-right", 100)
+	left.Output = []planner.Column{{Name: "id", Type: types.LogicalType{ID: types.BigInt}}, {Name: "grp", Type: types.LogicalType{ID: types.BigInt}}, {Name: "payload", Type: types.LogicalType{ID: types.Varchar}}}
+	right.Output = []planner.Column{{Name: "grp", Type: types.LogicalType{ID: types.BigInt}}, {Name: "weight", Type: types.LogicalType{ID: types.BigInt}}}
+	leftKey := &binder.BoundExpression{Kind: binder.BoundColumn, ColumnIndex: 1, Type: types.LogicalType{ID: types.BigInt}}
+	rightKey := &binder.BoundExpression{Kind: binder.BoundColumn, ColumnIndex: 3, Type: types.LogicalType{ID: types.BigInt}}
+	predicate := &binder.BoundExpression{Kind: binder.BoundBinary, Op: "=", Type: types.LogicalType{ID: types.Boolean}, Children: []*binder.BoundExpression{leftKey, rightKey}}
+	join := &planner.LogicalPlan{Kind: planner.LogicalJoin, Join: planner.JoinInner, Children: []*planner.LogicalPlan{left, right}, Predicate: predicate}
+	join.Output = append(append([]planner.Column(nil), left.Output...), right.Output...)
+	project := &planner.LogicalPlan{Kind: planner.LogicalProject, Children: []*planner.LogicalPlan{join}, Projection: []*binder.BoundExpression{
+		{Kind: binder.BoundColumn, ColumnIndex: 1, Type: types.LogicalType{ID: types.BigInt}},
+		{Kind: binder.BoundColumn, ColumnIndex: 4, Type: types.LogicalType{ID: types.BigInt}},
+	}}
+	physical, err := (&Optimizer{}).Optimize(context.Background(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	physicalJoin := physical.Children[0]
+	if physicalJoin.Kind != planner.PhysicalHashJoin || len(physicalJoin.Children) != 2 {
+		t.Fatalf("physical join=%+v", physicalJoin)
+	}
+	if got := physicalJoin.Children[0].Scan.Pushdown.Projection; len(got) != 1 || got[0] != 1 {
+		t.Fatalf("left projection=%v want [1]", got)
+	}
+	if got := physicalJoin.Children[1].Scan.Pushdown.Projection; len(got) != 2 || got[0] != 0 || got[1] != 1 {
+		t.Fatalf("right projection=%v want [0 1]", got)
+	}
+}
+
 func TestLimitPushdownCrossesOnlyPureColumnProject(t *testing.T) {
 	scan, _ := testScan("limit-project", 1000)
 	column := &binder.BoundExpression{Kind: binder.BoundColumn, ColumnIndex: 2, Type: types.LogicalType{ID: types.BigInt}}

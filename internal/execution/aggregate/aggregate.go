@@ -75,15 +75,15 @@ const groupSlotWidth = 16
 type groupTable struct { scope *memory.Scope; bm *memory.BufferManager; buf *memory.Buffer; capacity, count int }
 func newGroupTable(scope *memory.Scope, bm *memory.BufferManager, capacity int) (*groupTable,error) { if capacity<8{capacity=8};c:=1;for c<capacity{c<<=1};b,err:=bm.Allocate(scope,memory.TagAggregate,c*groupSlotWidth);if err!=nil{return nil,err};return &groupTable{scope:scope,bm:bm,buf:b,capacity:c},nil }
 func(t *groupTable)slot(i int)[]byte{return t.buf.Bytes()[i*groupSlotWidth:(i+1)*groupSlotWidth]}
-func(t *groupTable)lookup(hash uint64,eq func(int)(bool,error))(int,bool,error){mask:=t.capacity-1;for probe:=0;probe<t.capacity;probe++{idx:=(int(hash)+probe)&mask;s:=t.slot(idx);if s[0]==0{return 0,false,nil};if binary.LittleEndian.Uint64(s[4:12])==hash{row:=int(binary.LittleEndian.Uint32(s[12:16]));ok,err:=eq(row);if err!=nil{return 0,false,err};if ok{return row,true,nil}}};return 0,false,nil}
+func(t *groupTable)lookup(hash uint64,eq func(int)(bool,error))(int,bool,error){mask:=t.capacity-1;buf:=t.buf.Bytes();for probe:=0;probe<t.capacity;probe++{idx:=(int(hash)+probe)&mask;s:=buf[idx*groupSlotWidth:(idx+1)*groupSlotWidth];if s[0]==0{return 0,false,nil};if binary.LittleEndian.Uint64(s[4:12])==hash{row:=int(binary.LittleEndian.Uint32(s[12:16]));ok,err:=eq(row);if err!=nil{return 0,false,err};if ok{return row,true,nil}}};return 0,false,nil}
 func(t *groupTable)putNoGrow(hash uint64,row int)error{mask:=t.capacity-1;for p:=0;p<t.capacity;p++{i:=(int(hash)+p)&mask;s:=t.slot(i);if s[0]==0{s[0]=1;binary.LittleEndian.PutUint64(s[4:12],hash);binary.LittleEndian.PutUint32(s[12:16],uint32(row));t.count++;return nil}};return errors.New("aggregate hash table full")}
 func(t *groupTable)grow()error{n,err:=newGroupTable(t.scope,t.bm,t.capacity*2);if err!=nil{return err};for i:=0;i<t.capacity;i++{s:=t.slot(i);if s[0]!=0{if err:=n.putNoGrow(binary.LittleEndian.Uint64(s[4:12]),int(binary.LittleEndian.Uint32(s[12:16])));err!=nil{n.Release();return err}}};old:=t.buf;t.buf=n.buf;t.capacity=n.capacity;t.count=n.count;n.buf=nil;old.Release();return nil}
 func(t *groupTable)ensureInsert()error{if(t.count+1)*10>=t.capacity*7{return t.grow()};return nil}
 func(t *groupTable)Release(){if t!=nil&&t.buf!=nil{t.buf.Release();t.buf=nil}}
 
-type HashAggregate struct { scope *memory.Scope; bm *memory.BufferManager; inputTypes []types.LogicalType; groupColumns []int; groupTypes []types.LogicalType; groupLayout exechash.RowLayout; specs []BoundSpec; layout AggregateLayout; groups *exechash.TupleDataCollection; table *groupTable; states *memory.Buffer; stateCapacity int; scratch *memory.Buffer; arena *memory.Buffer; arenaUsed int; finalized bool }
+type HashAggregate struct { scope *memory.Scope; bm *memory.BufferManager; inputTypes []types.LogicalType; groupColumns []int; groupKeys []int; groupTypes []types.LogicalType; groupLayout exechash.RowLayout; specs []BoundSpec; layout AggregateLayout; groups *exechash.TupleDataCollection; table *groupTable; states *memory.Buffer; stateCapacity int; scratch *memory.Buffer; arena *memory.Buffer; arenaUsed int; finalized bool }
 func NewHashAggregate(scope *memory.Scope,bm *memory.BufferManager,inputTypes []types.LogicalType,groupColumns []int,specs []Spec,estimatedGroups int)(*HashAggregate,error){
-	if scope==nil||bm==nil{return nil,errors.New("aggregate requires memory scope and buffer manager")};gtypes:=make([]types.LogicalType,len(groupColumns));for i,c:=range groupColumns{if c<0||c>=len(inputTypes){return nil,fmt.Errorf("group column %d out of range",c)};gtypes[i]=inputTypes[c]};bound,err:=Bind(inputTypes,specs);if err!=nil{return nil,err};stateSpecs:=make([]StateSpec,len(bound));for i:=range bound{stateSpecs[i]=StateSpec{Name:fmt.Sprintf("agg_%d",i),Width:aggregateStateWidth,Alignment:8}};layout,err:=NewAggregateLayout(gtypes,stateSpecs);if err!=nil{return nil,err};groups,err:=exechash.NewTupleDataCollectionForLayout(scope,bm,layout.GroupLayout,max(estimatedGroups,1));if err!=nil{return nil,err};table,err:=newGroupTable(scope,bm,max(estimatedGroups*2,8));if err!=nil{groups.Release();return nil,err};a:=&HashAggregate{scope:scope,bm:bm,inputTypes:append([]types.LogicalType(nil),inputTypes...),groupColumns:append([]int(nil),groupColumns...),groupTypes:gtypes,groupLayout:layout.GroupLayout,specs:bound,layout:layout,groups:groups,table:table};if layout.StateWidth>0{cap:=max(estimatedGroups,8);a.states,err=bm.Allocate(scope,memory.TagAggregate,cap*layout.StateWidth);if err!=nil{a.Release();return nil,err};a.stateCapacity=cap};a.scratch,err=bm.Allocate(scope,memory.TagAggregate,max(layout.GroupLayout.FixedWidth,64));if err!=nil{a.Release();return nil,err};return a,nil
+	if scope==nil||bm==nil{return nil,errors.New("aggregate requires memory scope and buffer manager")};gtypes:=make([]types.LogicalType,len(groupColumns));for i,c:=range groupColumns{if c<0||c>=len(inputTypes){return nil,fmt.Errorf("group column %d out of range",c)};gtypes[i]=inputTypes[c]};bound,err:=Bind(inputTypes,specs);if err!=nil{return nil,err};stateSpecs:=make([]StateSpec,len(bound));for i:=range bound{stateSpecs[i]=StateSpec{Name:fmt.Sprintf("agg_%d",i),Width:aggregateStateWidth,Alignment:8}};layout,err:=NewAggregateLayout(gtypes,stateSpecs);if err!=nil{return nil,err};groups,err:=exechash.NewTupleDataCollectionForLayout(scope,bm,layout.GroupLayout,max(estimatedGroups,1));if err!=nil{return nil,err};table,err:=newGroupTable(scope,bm,max(estimatedGroups*2,8));if err!=nil{groups.Release();return nil,err};a:=&HashAggregate{scope:scope,bm:bm,inputTypes:append([]types.LogicalType(nil),inputTypes...),groupColumns:append([]int(nil),groupColumns...),groupKeys:seq(len(groupColumns)),groupTypes:gtypes,groupLayout:layout.GroupLayout,specs:bound,layout:layout,groups:groups,table:table};if layout.StateWidth>0{cap:=max(estimatedGroups,8);a.states,err=bm.Allocate(scope,memory.TagAggregate,cap*layout.StateWidth);if err!=nil{a.Release();return nil,err};a.stateCapacity=cap};a.scratch,err=bm.Allocate(scope,memory.TagAggregate,max(layout.GroupLayout.FixedWidth,64));if err!=nil{a.Release();return nil,err};return a,nil
 }
 func max(a,b int)int{if a>b{return a};return b}
 func(a *HashAggregate)GroupCount()int{if a==nil||a.groups==nil{return 0};return a.groups.Count()}
@@ -112,25 +112,19 @@ func (a *HashAggregate) Consume(ctx context.Context, chunk *vector.DataChunk) er
 		return a.consumeGlobal(ctx, chunk)
 	}
 	projected := a.projected(chunk)
+	var groupIDs [vector.DefaultVectorSize]int
+	if handled, err := a.findDictionaryGroups(ctx, projected, groupIDs[:chunk.Cardinality]); handled || err != nil {
+		if err != nil { return err }
+		return a.updateGroupsBatch(ctx, chunk, groupIDs[:chunk.Cardinality])
+	}
 	var hashes [vector.DefaultVectorSize]uint64
-	if err := exechash.HashChunk(projected, seq(len(a.groupColumns)), hashes[:chunk.Cardinality]); err != nil {
+	if err := exechash.HashChunk(projected, a.groupKeys, hashes[:chunk.Cardinality]); err != nil {
 		return err
 	}
-	for row := 0; row < chunk.Cardinality; row++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		g, err := a.findOrInsert(projected, row, hashes[row])
-		if err != nil {
-			return err
-		}
-		for i := range a.specs {
-			if err := a.update(g, i, chunk, row); err != nil {
-				return err
-			}
-		}
+	if err := a.findOrCreateGroups(ctx, projected, hashes[:chunk.Cardinality], groupIDs[:chunk.Cardinality]); err != nil {
+		return err
 	}
-	return nil
+	return a.updateGroupsBatch(ctx, chunk, groupIDs[:chunk.Cardinality])
 }
 
 func seq(n int)[]int{r:=make([]int,n);for i:=range r{r[i]=i};return r}

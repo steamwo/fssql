@@ -29,7 +29,60 @@ func newHybridStream(data []byte, bitWidth int) (*hybridStream, error) {
 	return &hybridStream{data: data, bitWidth: bitWidth}, nil
 }
 
+// nextRun parses the next RLE or bit-packed run without consuming a value.
+// Level and dictionary batch readers use it to replay whole runs at once.
+func (s *hybridStream) nextRun() error {
+	if s.runRemain > 0 || s.packedLeft > 0 {
+		return nil
+	}
+	if s.off >= len(s.data) {
+		return errors.New("parquet: hybrid stream exhausted")
+	}
+	header, n := binary.Uvarint(s.data[s.off:])
+	if n <= 0 {
+		return errors.New("parquet: invalid hybrid run header")
+	}
+	s.off += n
+	if header&1 == 0 {
+		run := int(header >> 1)
+		if run <= 0 {
+			return errors.New("parquet: zero RLE run")
+		}
+		bw := (s.bitWidth + 7) / 8
+		if s.off+bw > len(s.data) {
+			return errors.New("parquet: truncated RLE run")
+		}
+		var v uint32
+		for i := 0; i < bw; i++ {
+			v |= uint32(s.data[s.off+i]) << (8 * i)
+		}
+		s.off += bw
+		s.runValue = v
+		s.runRemain = run
+		return nil
+	}
+	groups := int(header >> 1)
+	if groups <= 0 {
+		return errors.New("parquet: zero bit-packed run")
+	}
+	if groups > int(^uint(0)>>1)/8 || (s.bitWidth > 0 && groups > (len(s.data)-s.off)/s.bitWidth) {
+		return errors.New("parquet: invalid bit-packed run length")
+	}
+	bytesNeeded := groups * s.bitWidth
+	if s.off+bytesNeeded > len(s.data) {
+		return errors.New("parquet: truncated bit-packed run")
+	}
+	s.packed = s.data[s.off : s.off+bytesNeeded]
+	s.off += bytesNeeded
+	s.packedBit = 0
+	s.packedLeft = groups * 8
+	return nil
+}
+
 func (s *hybridStream) Next() (uint32, error) {
+	if err := s.nextRun(); err != nil {
+		return 0, err
+	}
 	if s.runRemain > 0 {
 		s.runRemain--
 		return s.runValue, nil
@@ -40,48 +93,7 @@ func (s *hybridStream) Next() (uint32, error) {
 		s.packedLeft--
 		return v, nil
 	}
-	if s.off >= len(s.data) {
-		return 0, errors.New("parquet: hybrid stream exhausted")
-	}
-	header, n := binary.Uvarint(s.data[s.off:])
-	if n <= 0 {
-		return 0, errors.New("parquet: invalid hybrid run header")
-	}
-	s.off += n
-	if header&1 == 0 {
-		run := int(header >> 1)
-		if run <= 0 {
-			return 0, errors.New("parquet: zero RLE run")
-		}
-		bw := (s.bitWidth + 7) / 8
-		if s.off+bw > len(s.data) {
-			return 0, errors.New("parquet: truncated RLE run")
-		}
-		var v uint32
-		for i := 0; i < bw; i++ {
-			v |= uint32(s.data[s.off+i]) << (8 * i)
-		}
-		s.off += bw
-		s.runValue = v
-		s.runRemain = run - 1
-		return v, nil
-	}
-	groups := int(header >> 1)
-	if groups <= 0 {
-		return 0, errors.New("parquet: zero bit-packed run")
-	}
-	if groups > int(^uint(0)>>1)/8 || (s.bitWidth > 0 && groups > (len(s.data)-s.off)/s.bitWidth) {
-		return 0, errors.New("parquet: invalid bit-packed run length")
-	}
-	bytesNeeded := groups * s.bitWidth
-	if s.off+bytesNeeded > len(s.data) {
-		return 0, errors.New("parquet: truncated bit-packed run")
-	}
-	s.packed = s.data[s.off : s.off+bytesNeeded]
-	s.off += bytesNeeded
-	s.packedBit = 0
-	s.packedLeft = groups * 8
-	return s.Next()
+	return 0, errors.New("parquet: hybrid stream exhausted")
 }
 
 type levelStream struct {

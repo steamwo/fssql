@@ -16,65 +16,25 @@ func hashValue(v *vector.Vector, row int) (uint64, error) {
 	if !v.IsValid(row) {
 		return semantics.HashNull(), nil
 	}
-	switch v.Type.ID {
-	case types.Boolean:
-		x, _ := v.Bool(row)
-		return semantics.HashBool(x), nil
-	case types.TinyInt:
-		x, _ := v.Int8(row)
-		return semantics.HashInt64(int64(x)), nil
-	case types.SmallInt:
-		x, _ := v.Int16(row)
-		return semantics.HashInt64(int64(x)), nil
-	case types.Integer, types.DateType:
-		x, _ := v.Int32(row)
-		return semantics.HashInt64(int64(x)), nil
-	case types.BigInt, types.TimestampType:
-		x, _ := v.Int64(row)
-		return semantics.HashInt64(x), nil
-	case types.HugeInt:
-		x, _ := v.Int128(row)
-		return semantics.HashInt128(x.Lo, x.Hi), nil
-	case types.Float:
-		x, _ := v.Float32(row)
-		return semantics.HashFloat32(x), nil
-	case types.Double:
-		x, _ := v.Float64(row)
-		return semantics.HashFloat64(x), nil
-	case types.Decimal:
-		if v.Type.Decimal.Width <= 18 {
-			x, _ := v.Int64(row)
-			return semantics.HashInt64(x), nil
-		}
-		x, _ := v.Int128(row)
-		return semantics.HashInt128(x.Lo, x.Hi), nil
-	case types.Varchar:
-		r, heap, _ := v.StringRefAt(row)
-		if r.External {
-			return semantics.HashBytes(heap.ExternalBytes(r)), nil
-		}
-		return semantics.HashBytes(r.Inline[:r.Length]), nil
-	default:
+	if v.Type.ID == types.Varchar {
+		view, _ := v.BorrowBytes()
+		data, _ := view.Value(row)
+		return semantics.HashBytes(data), nil
+	}
+	h := fixedHasher(v.Type)
+	if h == nil {
 		return 0, fmt.Errorf("hash unsupported type %v", v.Type.ID)
 	}
+	view, _ := v.BorrowFixedWidth()
+	data, _ := view.Value(row)
+	return h(data), nil
 }
 
 func VectorHash(v *vector.Vector, out []uint64) error {
-	if len(out) < v.Count() {
-		return errors.New("hash output too small")
-	}
-	for i := 0; i < v.Count(); i++ {
-		h, err := hashValue(v, i)
-		if err != nil {
-			return err
-		}
-		out[i] = h
-	}
-	return nil
+	return hashVectorBatch(v, v.Count(), out, false)
 }
 
-// HashChunk hashes one or more key columns using the centralized semantic hashes.
-// A one-column key is byte-for-byte equivalent to VectorHash for that column.
+// HashChunk dispatches once per column and combines its batch hashes.
 func HashChunk(chunk *vector.DataChunk, keyColumns []int, out []uint64) error {
 	if chunk == nil {
 		return errors.New("nil chunk")
@@ -93,23 +53,13 @@ func HashChunk(chunk *vector.DataChunk, keyColumns []int, out []uint64) error {
 		}
 		return nil
 	}
-	for row := 0; row < chunk.Cardinality; row++ {
-		h, err := hashValue(chunk.Columns[keyColumns[0]], row)
-		if err != nil {
+	for i, col := range keyColumns {
+		if err := hashVectorBatch(chunk.Columns[col], chunk.Cardinality, out, i != 0); err != nil {
 			return err
 		}
-		for _, col := range keyColumns[1:] {
-			part, err := hashValue(chunk.Columns[col], row)
-			if err != nil {
-				return err
-			}
-			h = semantics.CombineHash(h, part)
-		}
-		out[row] = h
 	}
 	return nil
 }
-
 type ColumnLayout struct {
 	Type     types.LogicalType
 	Offset   int

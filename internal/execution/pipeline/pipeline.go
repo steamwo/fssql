@@ -33,6 +33,14 @@ type TransformOperator interface {
 	Transform(context.Context, *vector.DataChunk) (*vector.DataChunk, error)
 }
 
+// OwnedTransform may move input columns only after all fallible preparation
+// succeeds. On error input ownership remains unchanged. Only the runner's
+// exclusively owned input uses this extension; borrowed TransformSink does not.
+type OwnedTransform interface {
+	TransformOperator
+	TransformOwned(context.Context, *vector.DataChunk) (*vector.DataChunk, error)
+}
+
 // FinishingTransform reports normal early completion, rather than cancellation.
 // Workers already inside Next finish their owned work before Source.Close.
 type FinishingTransform interface{ Finished() bool }
@@ -65,6 +73,9 @@ type CloseableSink interface {
 
 type Pipeline struct {
 	ID           string
+	// PreserveOrder keeps this stage's Source/transform/sink sequence ordered.
+	// Dependency stages still use the requested worker count.
+	PreserveOrder bool
 	Source       Source
 	Operators    []Operator          // Operators 保留兼容旧原地 kernel；新 SQL transform 不应放入这里。
 	Transforms   []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
@@ -79,12 +90,14 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 	if p.Source == nil || p.Sink == nil {
 		return errors.New("pipeline requires source and sink")
 	}
-	if workers < 1 {
+	if workers < 1 || p.PreserveOrder {
 		workers = 1
 	}
 	tasks := make([]*scheduler.Task, workers)
 	for i := 0; i < workers; i++ {
+		workerID := i
 		tasks[i] = scheduler.NewTask(func(ctx context.Context) (scheduler.TaskState, error) {
+			ctx = WithWorkerID(ctx, workerID)
 			for {
 				if err := ctx.Err(); err != nil {
 					return scheduler.FAILED, err
@@ -109,7 +122,13 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 					}
 				}
 				for _, op := range p.Transforms {
-					next, err := op.Transform(ctx, owned)
+					var next *vector.DataChunk
+					var err error
+					if transfer, ok := op.(OwnedTransform); ok {
+						next, err = transfer.TransformOwned(ctx, owned)
+					} else {
+						next, err = op.Transform(ctx, owned)
+					}
 					if err != nil {
 						if next != nil && next != owned {
 							next.Release()

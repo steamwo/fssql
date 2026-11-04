@@ -10,6 +10,15 @@ type FixedWidthView struct {
 	width    int
 }
 
+// FlatData exposes a direct immutable flat batch, allowing kernels to avoid
+// per-row representation resolution. Dictionaries and constants use Value.
+func (v FixedWidthView) FlatData() ([]byte, *ValidityMask, bool) {
+	if v.source == nil || v.source.Kind != Flat {
+		return nil, nil, false
+	}
+	return v.data, v.validity, true
+}
+
 func (v *Vector) BorrowFixedWidth() (FixedWidthView, bool) {
 	width, fixed := v.Type.FixedSize()
 	if !fixed || width <= 0 {
