@@ -177,7 +177,7 @@ func Open(config Config) (*DB, error) {
 		Buffers:       buffers,
 		Scalars:       scalars,
 		Distinct:      session.ExternalDistinctRuntimeConfig{MemoryBudget: spillBudget, RadixBits: 4, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
-		Sort:          session.ExternalSortRuntimeConfig{MemoryBudget: spillBudget, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
+		Sort:          session.ExternalSortRuntimeConfig{MemoryBudget: spillBudget, TopNMemoryBudget: config.MemoryLimitBytes, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Aggregate:     session.ExternalAggregateRuntimeConfig{MemoryBudget: spillBudget, RadixBits: 4, MaxDepth: 8, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Join:          session.ExternalJoinRuntimeConfig{MemoryBudget: joinBudget, RadixBits: 4, MaxDepth: 8, MinReductionPercent: 10, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Workers:       config.Workers,

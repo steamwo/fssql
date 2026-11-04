@@ -10,7 +10,7 @@ import (
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
-func TestExternalSortFactoryUsesPreallocatedTopNForFixedWidthInput(t *testing.T) {
+func TestExternalSortFactoryUsesPackedTopNForFixedWidthInput(t *testing.T) {
 	manager, buffers, _, q := newDistinctFactoryQuery(t)
 	factory, err := NewExternalSortFactory(q, buffers, ExternalSortRuntimeConfig{MemoryBudget: 64 << 10, SpillBlockBytes: 1024})
 	if err != nil {
@@ -29,9 +29,9 @@ func TestExternalSortFactoryUsesPreallocatedTopNForFixedWidthInput(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := operator.(*execsort.TopN); !ok {
+	if _, ok := operator.(*execsort.PackedTopN); !ok {
 		operator.Release()
-		t.Fatalf("operator=%T want *sort.TopN", operator)
+		t.Fatalf("operator=%T want *sort.PackedTopN", operator)
 	}
 	operator.Release()
 	if manager.Used() != 0 {
@@ -86,6 +86,39 @@ func TestExternalSortFactoryTopNFallsBackWhenPreallocationExceedsBudget(t *testi
 		t.Fatalf("operator=%T want *sort.ExternalSort", operator)
 	}
 	operator.Release()
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestExternalSortFactoryTopNUsesQueryBudgetForFixedWidth 验证固定宽度 TopN 按查询内存预算保留候选集，
+// 不因较小的溢写预算而退回全排序；这是 OFFSET+LIMIT 不走 TopN 的直接原因。
+func TestExternalSortFactoryTopNUsesQueryBudgetForFixedWidth(t *testing.T) {
+	manager, buffers, _, q := newDistinctFactoryQuery(t)
+	factory, err := NewExternalSortFactory(q, buffers, ExternalSortRuntimeConfig{
+		MemoryBudget: 4 << 10, TopNMemoryBudget: 1 << 20, SpillBlockBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory.setTopNRows(1_000)
+	columns := []planner.Column{
+		{Name: "id", Type: types.LogicalType{ID: types.BigInt}},
+		{Name: "value", Type: types.LogicalType{ID: types.BigInt}},
+	}
+	key := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}
+	operator, err := factory.OpenSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := operator.(*execsort.PackedTopN); !ok {
+		operator.Release()
+		t.Fatalf("operator=%T want *sort.PackedTopN", operator)
+	}
+	operator.Release()
+	if manager.Used() != 0 {
+		t.Fatalf("managed leak=%d", manager.Used())
+	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
 	}
