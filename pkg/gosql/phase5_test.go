@@ -27,3 +27,52 @@ func TestPhase5SamplingRepeatableAndBoundaries(t *testing.T){
 }
 
 func TestPhase5IsNotDistinctFrom(t *testing.T){db:=phase5DB(t,1<<20);var got [][2]int64;_,err:=db.QueryChunks(context.Background(),"SELECT a.id,b.id FROM phase5_rows() a JOIN phase5_rows() b ON a.id IS NOT DISTINCT FROM b.id WHERE a.id=2",func(c *Chunk)error{for r:=0;r<c.RowCount();r++{a,_,_:=c.Int64(r,0);b,_,_:=c.Int64(r,1);got=append(got,[2]int64{a,b})};return nil});if err!=nil{t.Fatal(err)};if !reflect.DeepEqual(got,[][2]int64{{2,2}}){t.Fatalf("null-safe join=%v",got)}}
+
+
+func TestPhase5WindowRemediation(t *testing.T) {
+	db := phase5DB(t, 1<<20)
+
+	nested := collectPhase5Int(t, db, "SELECT COUNT(*) OVER () + 1 FROM phase5_rows() ORDER BY id", 0)
+	if !reflect.DeepEqual(nested, []int64{6, 6, 6, 6, 6}) {
+		t.Fatalf("nested window=%v", nested)
+	}
+
+	var ordered [][3]int64
+	_, err := db.QueryChunks(context.Background(), "SELECT d.id, ROW_NUMBER() OVER (ORDER BY d.id), ROW_NUMBER() OVER (ORDER BY d.rev) FROM (SELECT id, -id AS rev FROM phase5_rows()) d ORDER BY d.id", func(c *Chunk) error {
+		for row := 0; row < c.RowCount(); row++ {
+			id, _, e := c.Int64(row, 0)
+			if e != nil { return e }
+			asc, _, e := c.Int64(row, 1)
+			if e != nil { return e }
+			desc, _, e := c.Int64(row, 2)
+			if e != nil { return e }
+			ordered = append(ordered, [3]int64{id, asc, desc})
+		}
+		return nil
+	})
+	if err != nil { t.Fatal(err) }
+	want := [][3]int64{{1,1,5},{2,2,4},{3,3,3},{4,4,2},{5,5,1}}
+	if !reflect.DeepEqual(ordered, want) {
+		t.Fatalf("different window sorts=%v want=%v", ordered, want)
+	}
+
+	var sumRows float64
+	var windowSum float64
+	_, err = db.QueryChunks(context.Background(), "SELECT r, SUM(r) OVER () FROM (SELECT random() AS r FROM phase5_rows()) d", func(c *Chunk) error {
+		for row := 0; row < c.RowCount(); row++ {
+			r, ok, e := c.Float64(row, 0)
+			if e != nil || !ok { return fmt.Errorf("random valid=%v err=%v", ok, e) }
+			s, ok, e := c.Float64(row, 1)
+			if e != nil || !ok { return fmt.Errorf("window sum valid=%v err=%v", ok, e) }
+			sumRows += r
+			windowSum = s
+		}
+		return nil
+	})
+	if err != nil { t.Fatal(err) }
+	diff := sumRows - windowSum
+	if diff < 0 { diff = -diff }
+	if diff > 1e-12 {
+		t.Fatalf("global window re-executed upstream: rows sum=%g window sum=%g", sumRows, windowSum)
+	}
+}

@@ -108,11 +108,28 @@ func scalarFromVector(v *vector.Vector,row int)(ScalarValue,error){
 	switch v.Type.ID{case types.Boolean:out.Bool,_=v.Bool(row);case types.TinyInt:x,_:=v.Int8(row);out.Int64=int64(x);case types.SmallInt:x,_:=v.Int16(row);out.Int64=int64(x);case types.Integer:x,_:=v.Int32(row);out.Int64=int64(x);case types.BigInt:out.Int64,_=v.Int64(row);case types.HugeInt:out.Int128,_=v.Int128(row);case types.Float:x,_:=v.Float32(row);out.Float64=float64(x);case types.Double:out.Float64,_=v.Float64(row);case types.Decimal:if v.Type.Decimal.Width<=18{x,_:=v.Int64(row);out.Int128=types.Int128FromInt64(x)}else{out.Int128,_=v.Int128(row)};case types.Varchar:b,_:=v.Bytes(row);out.Bytes=append([]byte(nil),b...);case types.DateType:x,_:=v.Int32(row);out.Int64=int64(x);case types.TimestampType:out.Int64,_=v.Int64(row);default:return ScalarValue{},fmt.Errorf("scalar type %d is unsupported",v.Type.ID)};return out,nil
 }
 
-func writeScalarValue(dst *vector.Vector,row int,target types.LogicalType,value ScalarValue)error{
+func writeScalarValue(dst *vector.Vector,row int,t types.LogicalType,value ScalarValue)error{
 	if !value.Valid{dst.SetNull(row);return nil}
-	if value.Type.ID!=types.Invalid&&!value.Type.Same(target){return fmt.Errorf("scalar returned type %d, want %d",value.Type.ID,target.ID)}
-	if target.IsUnsignedInteger(){switch target.ID{case types.TinyInt:if value.Uint64>math.MaxUint8{return fmt.Errorf("scalar unsigned overflow")};dst.SetUint8(row,uint8(value.Uint64));case types.SmallInt:if value.Uint64>math.MaxUint16{return fmt.Errorf("scalar unsigned overflow")};dst.SetUint16(row,uint16(value.Uint64));case types.Integer:if value.Uint64>math.MaxUint32{return fmt.Errorf("scalar unsigned overflow")};dst.SetUint32(row,uint32(value.Uint64));case types.BigInt:dst.SetUint64(row,value.Uint64)};return nil}
-	switch target.ID{case types.Boolean:dst.SetBool(row,value.Bool);case types.TinyInt:dst.SetInt8(row,int8(value.Int64));case types.SmallInt:dst.SetInt16(row,int16(value.Int64));case types.Integer:dst.SetInt32(row,int32(value.Int64));case types.BigInt:dst.SetInt64(row,value.Int64);case types.HugeInt:dst.SetInt128(row,value.Int128);case types.Float:dst.SetFloat32(row,float32(value.Float64));case types.Double:dst.SetFloat64(row,value.Float64);case types.Decimal:if target.Decimal.Width<=18{b:=types.Int128Big(value.Int128);if !b.IsInt64(){return fmt.Errorf("scalar DECIMAL overflow")};dst.SetInt64(row,b.Int64())}else{dst.SetInt128(row,value.Int128)};case types.Varchar:return dst.SetStringBytes(row,value.Bytes);case types.DateType:dst.SetInt32(row,int32(value.Int64));case types.TimestampType:dst.SetInt64(row,value.Int64);default:return fmt.Errorf("scalar result type %d unsupported",target.ID)};return nil
+	if t.IsUnsignedInteger(){
+		switch t.ID{case types.TinyInt:if value.Uint64>255{return fmt.Errorf("unsigned tinyint overflow")};dst.SetUint8(row,uint8(value.Uint64));case types.SmallInt:if value.Uint64>65535{return fmt.Errorf("unsigned smallint overflow")};dst.SetUint16(row,uint16(value.Uint64));case types.Integer:if value.Uint64>4294967295{return fmt.Errorf("unsigned integer overflow")};dst.SetUint32(row,uint32(value.Uint64));case types.BigInt:dst.SetUint64(row,value.Uint64)}
+		return nil
+	}
+	switch t.ID{
+	case types.Boolean:dst.SetBool(row,value.Bool)
+	case types.TinyInt:if value.Int64 < -128 || value.Int64 > 127{return fmt.Errorf("TINYINT overflow")};dst.SetInt8(row,int8(value.Int64))
+	case types.SmallInt:if value.Int64 < -32768 || value.Int64 > 32767{return fmt.Errorf("SMALLINT overflow")};dst.SetInt16(row,int16(value.Int64))
+	case types.Integer:if value.Int64 < -2147483648 || value.Int64 > 2147483647{return fmt.Errorf("INTEGER overflow")};dst.SetInt32(row,int32(value.Int64))
+	case types.BigInt:dst.SetInt64(row,value.Int64)
+	case types.HugeInt:dst.SetInt128(row,value.Int128)
+	case types.Float:dst.SetFloat32(row,float32(value.Float64))
+	case types.Double:dst.SetFloat64(row,value.Float64)
+	case types.Decimal:if t.Decimal.Width<=18{n:=types.Int128Big(value.Int128);if !n.IsInt64(){return fmt.Errorf("DECIMAL64 overflow")};dst.SetInt64(row,n.Int64())}else{dst.SetInt128(row,value.Int128)}
+	case types.Varchar:return dst.SetBytes(row,value.Bytes)
+	case types.DateType:if value.Int64 < -2147483648 || value.Int64 > 2147483647{return fmt.Errorf("DATE overflow")};dst.SetInt32(row,int32(value.Int64))
+	case types.TimestampType:dst.SetInt64(row,value.Int64)
+	default:return fmt.Errorf("scalar write unsupported type %d",t.ID)
+	}
+	return nil
 }
 
 func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []ScalarValue)(ScalarValue,error){
@@ -157,6 +174,84 @@ func goTimeLayout(f string)string{r:=strings.NewReplacer("%Y","2006","%m","01","
 func truncateTemporal(unit string,v ScalarValue,t types.LogicalType)(ScalarValue,error){tm:=temporalTime(v);switch strings.ToLower(unit){case "second":tm=tm.Truncate(time.Second);case "minute":tm=tm.Truncate(time.Minute);case "hour":tm=tm.Truncate(time.Hour);case "day":tm=time.Date(tm.Year(),tm.Month(),tm.Day(),0,0,0,0,time.UTC);case "month":tm=time.Date(tm.Year(),tm.Month(),1,0,0,0,0,time.UTC);case "year":tm=time.Date(tm.Year(),1,1,0,0,0,0,time.UTC);default:return ScalarValue{},fmt.Errorf("unsupported date_trunc unit %q",unit)};out:=ScalarValue{Type:t,Valid:true};if t.ID==types.DateType{out.Int64=tm.Unix()/86400;return out,nil};switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()};return out,nil}
 
 func (e *Executor) executeCastFunction(expr *binder.BoundExpression,chunk *vector.DataChunk)(*vector.Vector,error){if len(expr.Children)!=1{return nil,fmt.Errorf("CAST requires one argument")};src,err:=e.ExecuteSQL(expr.Children[0],chunk);if err!=nil{return nil,err};defer src.Release();out,err:=vector.NewFlat(e.Scope,e.Buffers,expr.Type,chunk.Cardinality);if err!=nil{return nil,err};for row:=0;row<chunk.Cardinality;row++{v,err:=scalarFromVector(src,row);if err!=nil{out.Release();return nil,err};casted,err:=castScalar(v,expr.Type);if err!=nil{out.Release();return nil,err};if err:=writeScalarValue(out,row,expr.Type,casted);err!=nil{out.Release();return nil,err}};return out,nil}
-func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){if !v.Valid{return ScalarValue{Type:target,Valid:false},nil};if v.Type.Same(target){v.Type=target;return v,nil};out:=ScalarValue{Type:target,Valid:true};if target.ID==types.Varchar&&!target.Binary{s,err:=scalarText(v);if err!=nil{return ScalarValue{},err};out.Bytes=[]byte(s);return out,nil};if v.Type.ID==types.Varchar&&!v.Type.Binary{return parseScalarText(string(v.Bytes),target)};if target.ID==types.Decimal{var n *big.Int;switch{case v.Type.IsUnsignedInteger():n=new(big.Int).SetUint64(v.Uint64);case v.Type.ID>=types.TinyInt&&v.Type.ID<=types.BigInt:n=big.NewInt(v.Int64);case v.Type.ID==types.Decimal:n=types.Int128Big(v.Int128);default:return ScalarValue{},fmt.Errorf("unsupported CAST to DECIMAL")};if v.Type.ID!=types.Decimal{n.Mul(n,new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(target.Decimal.Scale)),nil))};wide,ok:=types.Int128FromBig(n);if !ok{return ScalarValue{},fmt.Errorf("CAST DECIMAL overflow")};out.Int128=wide;return out,nil};if v.Type.ID==types.Decimal{if target.ID==types.Double{f,_:=new(big.Rat).SetFrac(types.Int128Big(v.Int128),new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(v.Type.Decimal.Scale)),nil)).Float64();out.Float64=f;return out,nil};return ScalarValue{},fmt.Errorf("unsupported DECIMAL CAST")};if target.IsUnsignedInteger(){if v.Type.IsUnsignedInteger(){out.Uint64=v.Uint64}else if v.Int64>=0{out.Uint64=uint64(v.Int64)}else{return ScalarValue{},fmt.Errorf("negative value cannot CAST to unsigned")};return out,nil};switch target.ID{case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:if v.Type.IsUnsignedInteger(){if v.Uint64>math.MaxInt64{return ScalarValue{},fmt.Errorf("CAST integer overflow")};out.Int64=int64(v.Uint64)}else if v.Type.ID==types.Float||v.Type.ID==types.Double{out.Int64=int64(v.Float64)}else{out.Int64=v.Int64};return out,nil;case types.Float,types.Double:if v.Type.IsUnsignedInteger(){out.Float64=float64(v.Uint64)}else if v.Type.ID==types.Float||v.Type.ID==types.Double{out.Float64=v.Float64}else{out.Float64=float64(v.Int64)};return out,nil;case types.DateType,types.TimestampType:out.Int64=v.Int64;return out,nil};return ScalarValue{},fmt.Errorf("unsupported CAST %d -> %d",v.Type.ID,target.ID)}
+func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
+	if !v.Valid{return ScalarValue{Type:target,Valid:false},nil}
+	if v.Type.Same(target){v.Type=target;return v,nil}
+	out:=ScalarValue{Type:target,Valid:true}
+	if target.ID==types.Varchar&&!target.Binary{s,err:=scalarText(v);if err!=nil{return ScalarValue{},err};out.Bytes=[]byte(s);return out,nil}
+	if v.Type.ID==types.Varchar&&!v.Type.Binary{return parseScalarText(string(v.Bytes),target)}
+	if target.ID==types.Decimal{
+		var n *big.Int
+		switch{case v.Type.IsUnsignedInteger():n=new(big.Int).SetUint64(v.Uint64);case phase4CastSignedIntegerType(v.Type):n=big.NewInt(v.Int64);case v.Type.ID==types.Decimal:n=types.Int128Big(v.Int128);default:return ScalarValue{},fmt.Errorf("unsupported CAST to DECIMAL")}
+		if v.Type.ID!=types.Decimal{n.Mul(n,new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(target.Decimal.Scale)),nil))}
+		if !decimalIntegerFitsWidth(n,target.Decimal.Width){return ScalarValue{},fmt.Errorf("CAST DECIMAL(%d,%d) overflow",target.Decimal.Width,target.Decimal.Scale)}
+		wide,ok:=types.Int128FromBig(n);if !ok{return ScalarValue{},fmt.Errorf("CAST DECIMAL overflow")};out.Int128=wide;return out,nil
+	}
+	if v.Type.ID==types.Decimal{
+		if target.ID==types.Double{f,_:=new(big.Rat).SetFrac(types.Int128Big(v.Int128),new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(v.Type.Decimal.Scale)),nil)).Float64();out.Float64=f;return out,nil}
+		return ScalarValue{},fmt.Errorf("unsupported DECIMAL CAST")
+	}
+	if target.IsUnsignedInteger(){
+		var x uint64;var err error
+		switch{case v.Type.IsUnsignedInteger():x=v.Uint64;case phase4CastSignedIntegerType(v.Type):if v.Int64<0{return ScalarValue{},fmt.Errorf("negative value cannot CAST to unsigned")};x=uint64(v.Int64);case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=phase4CastFloatToUnsigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> unsigned",v.Type.ID)}
+		if err!=nil{return ScalarValue{},err};if x>phase4CastUnsignedMax(target.ID){return ScalarValue{},fmt.Errorf("CAST integer overflow")};out.Uint64=x;return out,nil
+	}
+	if phase4CastSignedIntegerID(target.ID){
+		var x int64;var err error
+		switch{case v.Type.IsUnsignedInteger():if v.Uint64>uint64(math.MaxInt64){return ScalarValue{},fmt.Errorf("CAST integer overflow")};x=int64(v.Uint64);case phase4CastSignedIntegerType(v.Type):x=v.Int64;case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=phase4CastFloatToSigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> integer",v.Type.ID)}
+		if err!=nil{return ScalarValue{},err};if !phase4CastSignedFits(target.ID,x){return ScalarValue{},fmt.Errorf("CAST integer overflow")};out.Int64=x;return out,nil
+	}
+	switch target.ID{
+	case types.Float,types.Double:
+		if v.Type.IsUnsignedInteger(){out.Float64=float64(v.Uint64)}else if phase4CastSignedIntegerType(v.Type)||v.Type.ID==types.DateType||v.Type.ID==types.TimestampType{out.Float64=float64(v.Int64)}else if v.Type.ID==types.Float||v.Type.ID==types.Double{out.Float64=v.Float64}else{return ScalarValue{},fmt.Errorf("unsupported CAST %d -> floating point",v.Type.ID)}
+		return out,nil
+	case types.DateType:
+		switch{case v.Type.ID==types.TimestampType:days,err:=phase4TimestampToDate(v.Int64,v.Type.Timestamp.Unit);if err!=nil{return ScalarValue{},err};out.Int64=days;case phase4CastSignedIntegerType(v.Type):out.Int64=v.Int64;case v.Type.IsUnsignedInteger():if v.Uint64>2147483647{return ScalarValue{},fmt.Errorf("DATE overflow")};out.Int64=int64(v.Uint64);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> DATE",v.Type.ID)}
+		if out.Int64 < -2147483648 || out.Int64 > 2147483647{return ScalarValue{},fmt.Errorf("DATE overflow")};return out,nil
+	case types.TimestampType:
+		switch{case v.Type.ID==types.DateType:raw,err:=phase4DateToTimestamp(v.Int64,target.Timestamp.Unit);if err!=nil{return ScalarValue{},err};out.Int64=raw;case v.Type.ID==types.TimestampType:raw,err:=phase4ConvertTimestampUnit(v.Int64,v.Type.Timestamp.Unit,target.Timestamp.Unit);if err!=nil{return ScalarValue{},err};out.Int64=raw;case phase4CastSignedIntegerType(v.Type):out.Int64=v.Int64;case v.Type.IsUnsignedInteger():if v.Uint64>uint64(math.MaxInt64){return ScalarValue{},fmt.Errorf("TIMESTAMP overflow")};out.Int64=int64(v.Uint64);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> TIMESTAMP",v.Type.ID)}
+		return out,nil
+	}
+	return ScalarValue{},fmt.Errorf("unsupported CAST %d -> %d",v.Type.ID,target.ID)
+}
+
+func phase4CastSignedIntegerID(id types.LogicalTypeID)bool{return id==types.TinyInt||id==types.SmallInt||id==types.Integer||id==types.BigInt}
+func phase4CastSignedIntegerType(t types.LogicalType)bool{return !t.Unsigned&&phase4CastSignedIntegerID(t.ID)}
+func phase4CastSignedFits(id types.LogicalTypeID,x int64)bool{switch id{case types.TinyInt:return x>=-128&&x<=127;case types.SmallInt:return x>=-32768&&x<=32767;case types.Integer:return x>=-2147483648&&x<=2147483647;case types.BigInt:return true};return false}
+func phase4CastUnsignedMax(id types.LogicalTypeID)uint64{switch id{case types.TinyInt:return 255;case types.SmallInt:return 65535;case types.Integer:return 4294967295;case types.BigInt:return ^uint64(0)};return 0}
+func phase4CastFloatToSigned(f float64,id types.LogicalTypeID)(int64,error){
+	if math.IsNaN(f)||math.IsInf(f,0){return 0,fmt.Errorf("CAST integer overflow")};f=math.Trunc(f)
+	if id==types.BigInt{if f < -9223372036854775808.0 || f >= 9223372036854775808.0{return 0,fmt.Errorf("CAST integer overflow")}}else{var lo,hi float64;switch id{case types.TinyInt:lo,hi=-128,127;case types.SmallInt:lo,hi=-32768,32767;case types.Integer:lo,hi=-2147483648,2147483647;default:return 0,fmt.Errorf("invalid integer target")};if f<lo||f>hi{return 0,fmt.Errorf("CAST integer overflow")}}
+	return int64(f),nil
+}
+func phase4CastFloatToUnsigned(f float64,id types.LogicalTypeID)(uint64,error){
+	if math.IsNaN(f)||math.IsInf(f,0)||f<0{return 0,fmt.Errorf("CAST unsigned integer overflow")};f=math.Trunc(f)
+	if id==types.BigInt{if f>=18446744073709551616.0{return 0,fmt.Errorf("CAST unsigned integer overflow")}}else if f>float64(phase4CastUnsignedMax(id)){return 0,fmt.Errorf("CAST unsigned integer overflow")}
+	return uint64(f),nil
+}
+func phase4TimestampUnitsPerSecond(unit types.TimestampUnit)(int64,error){switch unit{case types.TimestampMillis:return 1000,nil;case types.TimestampMicros:return 1000000,nil;case types.TimestampNanos:return 1000000000,nil;default:return 0,fmt.Errorf("invalid timestamp unit %d",unit)}}
+func phase4CheckedMulScale(x,factor int64)(int64,error){if factor<=0{return 0,fmt.Errorf("invalid timestamp scale")};if x>0&&x>math.MaxInt64/factor{return 0,fmt.Errorf("TIMESTAMP overflow")};if x<0&&x<math.MinInt64/factor{return 0,fmt.Errorf("TIMESTAMP overflow")};return x*factor,nil}
+func phase4FloorDiv(x,d int64)int64{q:=x/d;r:=x%d;if r!=0&&x<0{q--};return q}
+func phase4ConvertTimestampUnit(raw int64,from,to types.TimestampUnit)(int64,error){fu,err:=phase4TimestampUnitsPerSecond(from);if err!=nil{return 0,err};tu,err:=phase4TimestampUnitsPerSecond(to);if err!=nil{return 0,err};if fu==tu{return raw,nil};if tu>fu{return phase4CheckedMulScale(raw,tu/fu)};return phase4FloorDiv(raw,fu/tu),nil}
+func phase4DateToTimestamp(days int64,unit types.TimestampUnit)(int64,error){u,err:=phase4TimestampUnitsPerSecond(unit);if err!=nil{return 0,err};return phase4CheckedMulScale(days,86400*u)}
+func phase4TimestampToDate(raw int64,unit types.TimestampUnit)(int64,error){u,err:=phase4TimestampUnitsPerSecond(unit);if err!=nil{return 0,err};return phase4FloorDiv(raw,86400*u),nil}
+
 func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:return temporalTime(v).Format("2006-01-02 15:04:05.999999999"),nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
-func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){out:=ScalarValue{Type:t,Valid:true};var err error;if t.IsUnsignedInteger(){out.Uint64,err=strconv.ParseUint(strings.TrimSpace(s),10,64);return out,err};switch t.ID{case types.Boolean:out.Bool,err=strconv.ParseBool(strings.ToLower(strings.TrimSpace(s)));case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:out.Int64,err=strconv.ParseInt(strings.TrimSpace(s),10,64);case types.Float,types.Double:out.Float64,err=strconv.ParseFloat(strings.TrimSpace(s),64);case types.Decimal:out.Int128,err=types.ParseDecimalText(s,t.Decimal.Width,t.Decimal.Scale);case types.Varchar:out.Bytes=[]byte(s);case types.DateType:var tm time.Time;tm,err=time.Parse("2006-01-02",strings.TrimSpace(s));if err==nil{out.Int64=tm.Unix()/86400};case types.TimestampType:var tm time.Time;tm,err=time.ParseInLocation("2006-01-02 15:04:05.999999999",strings.TrimSpace(s),time.UTC);if err==nil{switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()}};default:err=fmt.Errorf("CAST target type %d unsupported",t.ID)};return out,err}
+func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
+	out:=ScalarValue{Type:t,Valid:true};text:=strings.TrimSpace(s);var err error
+	if t.IsUnsignedInteger(){bits:=0;switch t.ID{case types.TinyInt:bits=8;case types.SmallInt:bits=16;case types.Integer:bits=32;case types.BigInt:bits=64};out.Uint64,err=strconv.ParseUint(text,10,bits);return out,err}
+	switch t.ID{
+	case types.Boolean:out.Bool,err=strconv.ParseBool(strings.ToLower(text))
+	case types.TinyInt:out.Int64,err=strconv.ParseInt(text,10,8)
+	case types.SmallInt:out.Int64,err=strconv.ParseInt(text,10,16)
+	case types.Integer:out.Int64,err=strconv.ParseInt(text,10,32)
+	case types.BigInt:out.Int64,err=strconv.ParseInt(text,10,64)
+	case types.Float,types.Double:out.Float64,err=strconv.ParseFloat(text,64)
+	case types.Decimal:out.Int128,err=types.ParseDecimalText(s,t.Decimal.Width,t.Decimal.Scale)
+	case types.Varchar:out.Bytes=[]byte(s)
+	case types.DateType:var tm time.Time;tm,err=time.Parse("2006-01-02",text);if err==nil{out.Int64=tm.Unix()/86400}
+	case types.TimestampType:var tm time.Time;tm,err=time.ParseInLocation("2006-01-02 15:04:05.999999999",text,time.UTC);if err==nil{switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()}}
+	default:err=fmt.Errorf("CAST target type %d unsupported",t.ID)
+	}
+	return out,err
+}

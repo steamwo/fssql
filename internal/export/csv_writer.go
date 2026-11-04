@@ -47,6 +47,7 @@ func(w *CSVWriter)ensureStarted(ctx context.Context)error{if w.started{return ni
 
 func(w *CSVWriter)writeField(ctx context.Context,vec *vector.Vector,typ types.LogicalType,row int)error{
 	if !vec.IsValid(row){return w.out.WriteString(ctx,w.opts.NullString)}
+	if typ.IsBlob(){b,_:=vec.Bytes(row);if len(b)==0{return w.writeStringField(ctx,"",w.opts.NullString=="")};const digits="0123456789ABCDEF";for _,v:=range b{if err:=w.out.WriteContextByte(ctx,digits[v>>4]);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,digits[v&0x0f]);err!=nil{return err}};return nil}
 	if typ.ID==types.Varchar{b,_:=vec.Bytes(row);return w.writeStringField(ctx,string(b),w.opts.NullString==""&&len(b)==0)}
 	if typ.ID==types.List||typ.ID==types.Struct{if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};quoted:=csvQuotedOutput{out:w.out,quote:w.opts.Quote};if err:=writeDuckDBTextValue(ctx,&quoted,vec,typ,row);err!=nil{return err};return w.out.WriteContextByte(ctx,w.opts.Quote)}
 	return writeCSVScalar(ctx,w.out,vec,typ,row)

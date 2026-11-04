@@ -89,6 +89,18 @@ func (a *HashAggregate) updateGlobalFixed(ctx context.Context, st []byte, b Boun
 }
 
 func aggregateInteger(typ types.LogicalType, data []byte) types.Int128 {
+	if typ.IsUnsignedInteger() {
+		switch typ.ID {
+		case types.TinyInt:
+			return types.Int128{Lo: uint64(data[0])}
+		case types.SmallInt:
+			return types.Int128{Lo: uint64(binary.LittleEndian.Uint16(data))}
+		case types.Integer:
+			return types.Int128{Lo: uint64(binary.LittleEndian.Uint32(data))}
+		case types.BigInt:
+			return types.Int128{Lo: binary.LittleEndian.Uint64(data)}
+		}
+	}
 	switch typ.ID {
 	case types.Boolean:
 		if data[0] != 0 {

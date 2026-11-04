@@ -77,7 +77,12 @@ func URIFromPath(localPath string) (vfs.URI, error) {
 }
 
 func infoIdentity(info os.FileInfo) vfs.ObjectIdentity {
-	return vfs.ObjectIdentity{Size: info.Size(), ModifiedAt: info.ModTime().UTC()}
+	modified := info.ModTime().UTC()
+	// Local files have no protocol ETag/version. Promote the existing durable
+	// size+mtime identity into an opaque token so atomic publish/recovery can
+	// persist and reconcile the same identity after rename and restart.
+	etag := "local-" + strconv.FormatInt(info.Size(), 16) + "-" + strconv.FormatInt(modified.UnixNano(), 16)
+	return vfs.ObjectIdentity{ETag: etag, Size: info.Size(), ModifiedAt: modified}
 }
 
 func (d *Driver) Stat(ctx context.Context, u vfs.URI) (vfs.ObjectInfo, error) {

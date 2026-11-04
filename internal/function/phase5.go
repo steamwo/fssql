@@ -12,6 +12,7 @@ const (
 	WindowSumID
 	SampleMarkerID
 	CTEMarkerID
+	GlobalWindowMarkerID
 )
 
 func NewPhase5Catalog() *Catalog {
@@ -22,11 +23,12 @@ func NewPhase5Catalog() *Catalog {
 	must(Definition{ID: WindowSumID, Name: "__fssql_window_sum", Kind: Scalar, MinArgs: 2, MaxArgs: -1, Bind: bindWindowSum})
 	must(Definition{ID: SampleMarkerID, Name: "__fssql_sample_marker", Kind: Scalar, MinArgs: 1, MaxArgs: 1, Bind: bindPhase5Marker})
 	must(Definition{ID: CTEMarkerID, Name: "__fssql_cte_marker", Kind: Scalar, MinArgs: 1, MaxArgs: 1, Bind: bindPhase5Marker})
+	must(Definition{ID: GlobalWindowMarkerID, Name: "__fssql_global_window_marker", Kind: Scalar, MinArgs: 1, MaxArgs: 1, Bind: bindPhase5Marker})
 	return c
 }
 
 func IsWindowID(id ID) bool { return id == WindowRowNumberID || id == WindowCountID || id == WindowSumID }
-func IsPhase5MarkerID(id ID) bool { return id == SampleMarkerID || id == CTEMarkerID }
+func IsPhase5MarkerID(id ID) bool { return id == SampleMarkerID || id == CTEMarkerID || id == GlobalWindowMarkerID }
 
 func windowArgumentTypes(in BindInput, valueIndex int, valueType types.LogicalType) []types.LogicalType {
 	out := make([]types.LogicalType, len(in.Arguments))

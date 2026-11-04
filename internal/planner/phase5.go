@@ -144,25 +144,78 @@ func parseWindowSpec(e *binder.BoundExpression)(phase5WindowSpec,error){
 	return s,nil
 }
 
-func windowSortSignature(s phase5WindowSpec)string{return fmt.Sprintf("p=%d;o=%d;d=%s;n=%s",s.partition,s.order,s.desc,s.nulls)}
+func collectPhase5Windows(e *binder.BoundExpression,out *[]*binder.BoundExpression,seen map[*binder.BoundExpression]bool){
+	if e==nil{return}
+	if e.Kind==binder.BoundFunction&&function.IsWindowID(e.FunctionID){if !seen[e]{seen[e]=true;*out=append(*out,e)};return}
+	for _,child:=range e.Children{collectPhase5Windows(child,out,seen)}
+}
+func phase5PassThrough(columns []Column)[]*binder.BoundExpression{
+	out:=make([]*binder.BoundExpression,len(columns))
+	for i,column:=range columns{out[i]=&binder.BoundExpression{Kind:binder.BoundColumn,Type:column.Type,Nullable:column.Nullable,ColumnIndex:i}}
+	return out
+}
+func phase5ReplaceWindows(e *binder.BoundExpression,replacements map[*binder.BoundExpression]*binder.BoundExpression)*binder.BoundExpression{
+	if e==nil{return nil}
+	if replacement,ok:=replacements[e];ok{return replacement}
+	out:=*e
+	if len(e.Children)>0{out.Children=make([]*binder.BoundExpression,len(e.Children));for i,child:=range e.Children{out.Children[i]=phase5ReplaceWindows(child,replacements)}}
+	return &out
+}
+func phase5WindowColumn(w *binder.BoundExpression,index int)Column{return Column{Name:fmt.Sprintf("__phase5_window_%d",index),Type:w.Type,Nullable:w.Nullable}}
 
 func rewritePhase5WindowProject(project *LogicalPlan)(*LogicalPlan,error){
 	if len(project.Children)!=1{return nil,fmt.Errorf("phase5: window project requires one child")}
-	windows:=make([]int,0);for i,e:=range project.Projection{if e!=nil&&e.Kind==binder.BoundFunction&&function.IsWindowID(e.FunctionID){windows=append(windows,i)}};if len(windows)==0{return project,nil}
+	windows:=make([]*binder.BoundExpression,0)
+	seen:=map[*binder.BoundExpression]bool{}
+	for _,e:=range project.Projection{collectPhase5Windows(e,&windows,seen)}
+	if len(windows)==0{return project,nil}
 	child:=project.Children[0]
-	globalIdx:=make([]int,0);statefulIdx:=make([]int,0)
-	for _,i:=range windows{e:=project.Projection[i];spec,err:=parseWindowSpec(e);if err!=nil{return nil,err};if (e.FunctionID==function.WindowCountID||e.FunctionID==function.WindowSumID)&&spec.partition==0&&spec.order==0&&spec.frame=="none"{globalIdx=append(globalIdx,i)}else{statefulIdx=append(statefulIdx,i)}}
-	if len(globalIdx)>0{
-		aggs:=make([]AggregateSpec,0,len(globalIdx));aggOut:=make([]Column,0,len(globalIdx));baseCols:=len(child.Output)
-		for n,i:=range globalIdx{w:=project.Projection[i];spec:=AggregateSpec{Output:project.Output[i]};if w.FunctionID==function.WindowCountID{spec.FunctionID=uint16(function.CountID)}else{spec.FunctionID=uint16(function.SumID);spec.Arguments=[]*binder.BoundExpression{w.Children[1]}};aggs=append(aggs,spec);aggOut=append(aggOut,project.Output[i]);project.Projection[i]=&binder.BoundExpression{Kind:binder.BoundColumn,Type:project.Output[i].Type,Nullable:project.Output[i].Nullable,ColumnIndex:baseCols+n}}
-		agg:=&LogicalPlan{Kind:LogicalAggregate,Children:[]*LogicalPlan{clonePhase5Logical(child)},Output:aggOut,Aggregates:aggs}
-		joinOut:=append(clonePlannerColumns(child.Output),clonePlannerColumns(aggOut)...);child=&LogicalPlan{Kind:LogicalJoin,Children:[]*LogicalPlan{child,agg},Output:joinOut,Join:JoinCross};project.Children[0]=child
+	globals:=make([]*binder.BoundExpression,0)
+	stateful:=make([]*binder.BoundExpression,0)
+	for _,w:=range windows{spec,err:=parseWindowSpec(w);if err!=nil{return nil,err};if (w.FunctionID==function.WindowCountID||w.FunctionID==function.WindowSumID)&&spec.partition==0&&spec.order==0&&spec.frame=="none"{globals=append(globals,w)}else{stateful=append(stateful,w)}}
+	replacements:=make(map[*binder.BoundExpression]*binder.BoundExpression,len(windows))
+
+	if len(globals)>0{
+		globalChild:=child
+		projection:=phase5PassThrough(child.Output)
+		materializedOut:=clonePlannerColumns(child.Output)
+		specs:=make([]string,len(globals))
+		for i,w:=range globals{
+			if w.FunctionID==function.WindowCountID{specs[i]="c";continue}
+			if len(w.Children)<2{return nil,fmt.Errorf("phase5: SUM window is missing its value")}
+			input:=len(materializedOut)
+			projection=append(projection,w.Children[1])
+			materializedOut=append(materializedOut,Column{Name:fmt.Sprintf("__phase5_global_arg_%d",i),Type:w.Children[1].Type,Nullable:w.Children[1].Nullable})
+			specs[i]="s:"+strconv.Itoa(input)
+		}
+		if len(materializedOut)!=len(child.Output){globalChild=&LogicalPlan{Kind:LogicalProject,Children:[]*LogicalPlan{child},Output:materializedOut,Projection:projection}}
+		base:=len(globalChild.Output)
+		globalOut:=clonePlannerColumns(globalChild.Output)
+		for i,w:=range globals{column:=phase5WindowColumn(w,base+i);globalOut=append(globalOut,column);replacements[w]=&binder.BoundExpression{Kind:binder.BoundColumn,Type:w.Type,Nullable:w.Nullable,ColumnIndex:base+i}}
+		marker:=phase5Marker(function.GlobalWindowMarkerID,strings.Join(specs,";"))
+		child=&LogicalPlan{Kind:LogicalSort,Children:[]*LogicalPlan{globalChild},Output:globalOut,Sort:[]SortKey{{Expr:marker}}}
 	}
-	if len(statefulIdx)>0{
-		var keys []SortKey;signature:=""
-		for _,i:=range statefulIdx{w:=project.Projection[i];spec,err:=parseWindowSpec(w);if err!=nil{return nil,err};valueOffset:=1;if w.FunctionID==function.WindowSumID{valueOffset=2};need:=spec.partition+spec.order;if len(w.Children)<valueOffset+need{return nil,fmt.Errorf("phase5: incomplete window arguments")};sig:=windowSortSignature(spec);if signature==""{signature=sig;for k:=0;k<need;k++{expr:=w.Children[valueOffset+k];if expr.Kind!=binder.BoundColumn{return nil,fmt.Errorf("phase5: window partition/order expressions must be materialized columns")};key:=SortKey{Expr:expr};if k>=spec.partition{oi:=k-spec.partition;key.Descending=spec.desc[oi]=='1';nf:=spec.nulls[oi]=='f';key.NullsFirst=&nf};keys=append(keys,key)}}else if signature!=sig{return nil,fmt.Errorf("phase5: multiple incompatible window sort specifications are not supported")}}
-		if len(keys)>0{project.Children[0]=&LogicalPlan{Kind:LogicalSort,Children:[]*LogicalPlan{project.Children[0]},Output:clonePlannerColumns(project.Children[0].Output),Sort:keys}}
+
+	for _,w:=range stateful{
+		spec,err:=parseWindowSpec(w);if err!=nil{return nil,err}
+		valueOffset:=1;if w.FunctionID==function.WindowSumID{valueOffset=2}
+		need:=spec.partition+spec.order
+		if len(w.Children)<valueOffset+need{return nil,fmt.Errorf("phase5: incomplete window arguments")}
+		keys:=make([]SortKey,0,need)
+		for k:=0;k<need;k++{expr:=w.Children[valueOffset+k];if expr==nil||expr.Kind!=binder.BoundColumn{return nil,fmt.Errorf("phase5: window partition/order expressions must be materialized columns")};key:=SortKey{Expr:expr};if k>=spec.partition{oi:=k-spec.partition;key.Descending=spec.desc[oi]=='1';nf:=spec.nulls[oi]=='f';key.NullsFirst=&nf};keys=append(keys,key)}
+		if len(keys)>0{child=&LogicalPlan{Kind:LogicalSort,Children:[]*LogicalPlan{child},Output:clonePlannerColumns(child.Output),Sort:keys}}
+		base:=len(child.Output)
+		stageProjection:=phase5PassThrough(child.Output)
+		stageProjection=append(stageProjection,w)
+		stageOut:=clonePlannerColumns(child.Output)
+		column:=phase5WindowColumn(w,base)
+		stageOut=append(stageOut,column)
+		child=&LogicalPlan{Kind:LogicalProject,Children:[]*LogicalPlan{child},Output:stageOut,Projection:stageProjection}
+		replacements[w]=&binder.BoundExpression{Kind:binder.BoundColumn,Type:w.Type,Nullable:w.Nullable,ColumnIndex:base}
 	}
+
+	for i,e:=range project.Projection{project.Projection[i]=phase5ReplaceWindows(e,replacements)}
+	project.Children[0]=child
 	return project,nil
 }
 
@@ -170,3 +223,4 @@ func clonePhase5Logical(p *LogicalPlan)*LogicalPlan{if p==nil{return nil};out:=*
 
 func IsPhase5SampleSort(keys []SortKey)(string,bool){if len(keys)!=1||keys[0].Expr==nil||keys[0].Expr.Kind!=binder.BoundFunction||keys[0].Expr.FunctionID!=function.SampleMarkerID||len(keys[0].Expr.Children)!=1{return "",false};return keys[0].Expr.Children[0].Literal,true}
 func IsPhase5CTESort(keys []SortKey)(string,bool){if len(keys)!=1||keys[0].Expr==nil||keys[0].Expr.Kind!=binder.BoundFunction||keys[0].Expr.FunctionID!=function.CTEMarkerID||len(keys[0].Expr.Children)!=1{return "",false};return keys[0].Expr.Children[0].Literal,true}
+func IsPhase5GlobalWindowSort(keys []SortKey)(string,bool){if len(keys)!=1||keys[0].Expr==nil||keys[0].Expr.Kind!=binder.BoundFunction||keys[0].Expr.FunctionID!=function.GlobalWindowMarkerID||len(keys[0].Expr.Children)!=1{return "",false};return keys[0].Expr.Children[0].Literal,true}

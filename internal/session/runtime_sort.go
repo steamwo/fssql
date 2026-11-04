@@ -44,6 +44,7 @@ func(f *ExternalSortFactory)OpenSort(ctx context.Context,columns []planner.Colum
 	if err:=ctx.Err();err!=nil{return nil,err};if f.query.Closed(){return nil,fmt.Errorf("session: external SORT query context is closed")}
 	if spec,ok:=planner.IsPhase5SampleSort(keys);ok{return newPhase5SampleOperator(f.query,f.buffers,spec)}
 	if key,ok:=planner.IsPhase5CTESort(keys);ok{return newPhase5CTEOperator(f,key)}
+	if spec,ok:=planner.IsPhase5GlobalWindowSort(keys);ok{return newPhase5GlobalWindowOperator(f,columns,spec)}
 	if len(columns)==0||len(keys)==0{return nil,fmt.Errorf("session: SORT requires input columns and sort keys")};_ = estimate
 	inputTypes,executionKeys,err:=prepareSortRuntime(columns,keys);if err!=nil{return nil,err}
 	if f.topNRows>0&&f.topNRows<=uint64(math.MaxInt)&&fixedWidthSortInput(inputTypes){topN,err:=execsort.NewTopN(execsort.TopNConfig{InputTypes:inputTypes,Keys:executionKeys,N:int(f.topNRows),MemoryBudget:f.config.MemoryBudget,Scope:f.query.Memory,Buffers:f.buffers,PreallocateFixed:true});if err==nil{return topN,nil};if !errors.Is(err,memory.ErrLimitExceeded){return nil,err}}
