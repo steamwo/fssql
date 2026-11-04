@@ -1,5 +1,7 @@
 # Architecture & Release Verification Contract
 
+测试实施与判定统一遵循 [项目测试规范与 DuckDB 对标方案](../testing-standard.md)。发布必需项为 BLOCKED、NOT_RUN 或被跳过时，不满足本契约；测试规范中的建设目标不代表已获得验收证据。
+
 ## 每阶段 Gate
 
 每个 Phase 都必须通过：

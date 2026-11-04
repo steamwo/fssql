@@ -111,6 +111,10 @@ func rewritePhase5Logical(root *LogicalPlan,counts map[string]int)(*LogicalPlan,
 }
 
 func isPhase5NullSafeEquality(e *binder.BoundExpression) bool {
+	// A null-safe conjunct requires the same residual execution as a single key.
+	if e != nil && e.Kind == binder.BoundBinary && e.Op == "AND" && len(e.Children) == 2 {
+		return isPhase5NullSafeEquality(e.Children[0]) || isPhase5NullSafeEquality(e.Children[1])
+	}
 	if e==nil || e.Kind!=binder.BoundBinary || e.Op!="OR" || len(e.Children)!=2 { return false }
 	coalesce,bothNull:=e.Children[0],e.Children[1]
 	if coalesce==nil || coalesce.Kind!=binder.BoundFunction || coalesce.FunctionID!=function.CoalesceID || len(coalesce.Children)!=2 { return false }

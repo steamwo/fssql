@@ -57,6 +57,7 @@ func (e *Executor) executeScalarFunction(expr *binder.BoundExpression, chunk *ve
 		args = append(args, v)
 	}
 	defer releaseScalarVectors(args)
+	if expr.FunctionID == function.RepeatID { return e.executeManagedRepeat(args, chunk.Cardinality) }
 	out, err := vector.NewFlat(e.Scope, e.Buffers, expr.Type, chunk.Cardinality); if err != nil { return nil, err }
 	for row:=0; row<chunk.Cardinality; row++ {
 		values:=make([]ScalarValue,len(args)); anyNull:=false
@@ -142,7 +143,6 @@ func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []Scalar
 	case function.SubstrID:out.Bytes=[]byte(substrRunes(string(args[0].Bytes),args[1].Int64,func() *int64{if len(args)<3{return nil};v:=args[2].Int64;return &v}()))
 	case function.StrposID:out.Int64=int64(strposRunes(string(args[0].Bytes),string(args[1].Bytes)))
 	case function.ReplaceID:out.Bytes=[]byte(strings.ReplaceAll(string(args[0].Bytes),string(args[1].Bytes),string(args[2].Bytes)))
-	case function.RepeatID:if args[1].Int64<0{return ScalarValue{},fmt.Errorf("repeat count must be non-negative")};out.Bytes=[]byte(strings.Repeat(string(args[0].Bytes),int(args[1].Int64)))
 	case function.LowerID:out.Bytes=[]byte(strings.ToLower(string(args[0].Bytes)))
 	case function.HexID:out.Bytes=[]byte(strings.ToUpper(hex.EncodeToString(args[0].Bytes)))
 	case function.FloorID:return floorScalar(resultType,args[0])
@@ -220,12 +220,12 @@ func phase4CastSignedIntegerType(t types.LogicalType)bool{return !t.Unsigned&&ph
 func phase4CastSignedFits(id types.LogicalTypeID,x int64)bool{switch id{case types.TinyInt:return x>=-128&&x<=127;case types.SmallInt:return x>=-32768&&x<=32767;case types.Integer:return x>=-2147483648&&x<=2147483647;case types.BigInt:return true};return false}
 func phase4CastUnsignedMax(id types.LogicalTypeID)uint64{switch id{case types.TinyInt:return 255;case types.SmallInt:return 65535;case types.Integer:return 4294967295;case types.BigInt:return ^uint64(0)};return 0}
 func phase4CastFloatToSigned(f float64,id types.LogicalTypeID)(int64,error){
-	if math.IsNaN(f)||math.IsInf(f,0){return 0,fmt.Errorf("CAST integer overflow")};f=math.Trunc(f)
+	if math.IsNaN(f)||math.IsInf(f,0){return 0,fmt.Errorf("CAST integer overflow")};f=math.RoundToEven(f)
 	if id==types.BigInt{if f < -9223372036854775808.0 || f >= 9223372036854775808.0{return 0,fmt.Errorf("CAST integer overflow")}}else{var lo,hi float64;switch id{case types.TinyInt:lo,hi=-128,127;case types.SmallInt:lo,hi=-32768,32767;case types.Integer:lo,hi=-2147483648,2147483647;default:return 0,fmt.Errorf("invalid integer target")};if f<lo||f>hi{return 0,fmt.Errorf("CAST integer overflow")}}
 	return int64(f),nil
 }
 func phase4CastFloatToUnsigned(f float64,id types.LogicalTypeID)(uint64,error){
-	if math.IsNaN(f)||math.IsInf(f,0)||f<0{return 0,fmt.Errorf("CAST unsigned integer overflow")};f=math.Trunc(f)
+	if math.IsNaN(f)||math.IsInf(f,0)||f<0{return 0,fmt.Errorf("CAST unsigned integer overflow")};f=math.RoundToEven(f)
 	if id==types.BigInt{if f>=18446744073709551616.0{return 0,fmt.Errorf("CAST unsigned integer overflow")}}else if f>float64(phase4CastUnsignedMax(id)){return 0,fmt.Errorf("CAST unsigned integer overflow")}
 	return uint64(f),nil
 }
