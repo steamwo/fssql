@@ -86,6 +86,7 @@ func rewritePhase5Logical(root *LogicalPlan,counts map[string]int)(*LogicalPlan,
 	projectKey:=phase5ProjectIdentity(root)
 	for i,child:=range root.Children{rewritten,err:=rewritePhase5Logical(child,counts);if err!=nil{return nil,err};root.Children[i]=rewritten}
 	if root.Kind==LogicalJoin && root.Join==JoinInner && isPhase5NullSafeEquality(root.Predicate) {
+		if _,err:=ExtractHashJoinKeys(root.Predicate,len(root.Children[0].Output),len(root.Children[1].Output));err==nil{return root,nil}
 		predicate:=root.Predicate
 		root.Join=JoinCross
 		root.Predicate=nil
@@ -122,7 +123,7 @@ func isPhase5NullSafeEquality(e *binder.BoundExpression) bool {
 	if eq==nil || eq.Kind!=binder.BoundBinary || eq.Op!="=" || len(eq.Children)!=2 || falseLit==nil || falseLit.Kind!=binder.BoundLiteral || !strings.EqualFold(falseLit.Literal,"FALSE") { return false }
 	if eq.Children[0]==nil || eq.Children[1]==nil || eq.Children[0].Kind!=binder.BoundColumn || eq.Children[1].Kind!=binder.BoundColumn { return false }
 	if bothNull==nil || bothNull.Kind!=binder.BoundBinary || bothNull.Op!="AND" || len(bothNull.Children)!=2 { return false }
-	for _,child:=range bothNull.Children { if child==nil || child.Kind!=binder.BoundIsNull || len(child.Children)!=1 || child.Children[0]==nil || child.Children[0].Kind!=binder.BoundColumn { return false } }
+	for _,child:=range bothNull.Children { if child==nil || child.Kind!=binder.BoundIsNull || child.Op!="IS NULL" || len(child.Children)!=1 || child.Children[0]==nil || child.Children[0].Kind!=binder.BoundColumn { return false } }
 	return bothNull.Children[0].Children[0].ColumnIndex==eq.Children[0].ColumnIndex && bothNull.Children[1].Children[0].ColumnIndex==eq.Children[1].ColumnIndex
 }
 

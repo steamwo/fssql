@@ -140,10 +140,8 @@ func (c *Catalog) BindCall(name string, kind Kind, in BindInput) (Definition, Bi
 	if d.Kind != kind {
 		return Definition{}, BindResult{}, fmt.Errorf("function %s has kind %d, want %d", d.Name, d.Kind, kind)
 	}
-	// v1 Stable 只冻结 SELECT DISTINCT，没有冻结 aggregate-level DISTINCT。
-	// 在 FunctionCatalog 绑定阶段显式拒绝，避免 Binder 丢失标志后被静默当普通 aggregate 执行。
-	if in.Distinct {
-		return Definition{}, BindResult{}, fmt.Errorf("aggregate DISTINCT is not part of Stable v1")
+	if in.Distinct && (d.Kind != Aggregate || in.Star || len(in.Arguments) != 1 || (d.ID != CountID && d.ID != SumID && d.ID != AvgID && d.ID != MinID && d.ID != MaxID)) {
+		return Definition{}, BindResult{}, fmt.Errorf("DISTINCT requires a supported aggregate with one expression")
 	}
 	argc := len(in.Arguments)
 	if in.Star {
@@ -180,6 +178,7 @@ func bindCount(in BindInput) (BindResult, error) {
 		return BindResult{}, fmt.Errorf("count expects one argument")
 	}
 	args := make([]types.LogicalType, 1)
+	args[0] = types.LogicalType{ID: types.Integer}
 	if !in.Arguments[0].SQLNull {
 		args[0] = in.Arguments[0].Type
 	}

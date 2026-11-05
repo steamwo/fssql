@@ -1,3 +1,4 @@
 # 本机测试产生的构建缓存与隔离 Python 环境。
 /.cache/
+/.codebase-memory/
 /artifacts/local-validation/2026-11-04/

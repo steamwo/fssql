@@ -69,9 +69,8 @@ func (f *ExternalAggregateFactory) OpenAggregate(ctx context.Context, columns []
 	if f.query.Closed() {
 		return nil, fmt.Errorf("session: external AGGREGATE query context is closed")
 	}
-	if len(columns) == 0 && (len(groups) != 0 || len(specs) != 0) {
-		return nil, fmt.Errorf("session: AGGREGATE has no input columns")
-	}
+	// COUNT(*) consumes cardinality and needs no input value columns. Group and
+	// aggregate argument indexes are validated individually below.
 	_ = estimate // 未冻结 estimate->initial managed bytes 规则前，不允许 cardinality estimate 驱动大预分配。
 
 	inputTypes := make([]types.LogicalType, len(columns))

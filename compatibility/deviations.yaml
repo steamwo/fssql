@@ -8,12 +8,12 @@
     {
       "id": "DBSQL-001",
       "classification": "unsupported_feature",
-      "surface": "database/sql parameters",
+      "surface": "database/sql transaction and parameterized statement boundaries",
       "stable_sql_semantics": false,
-      "summary": "Parameterized database/sql execution is not part of the frozen Stable v1 API boundary.",
-      "duckdb": "DuckDB client APIs support parameter binding.",
-      "fssql": "database/sql QueryContext and ExecContext reject non-empty argument lists; callers pass Stable SQL text without bind parameters.",
-      "rationale": "AD-022 requires database/sql compatibility, but the frozen Stable v1 feature contract does not define a parameter placeholder or prepared-statement contract. Rejecting arguments is explicit and avoids inventing post-freeze SQL/API semantics."
+      "summary": "SELECT parameter binding and prepared syntax are supported; transactions and parameterized DDL/COPY remain unsupported.",
+      "duckdb": "DuckDB client APIs support parameter binding, prepared statements and transactions.",
+      "fssql": "QueryContext/ExecContext and prepared SELECT statements bind ?, numbered or named placeholders as AST values. Begin/BeginTx explicitly reject transactions; DDL/COPY with parameters is rejected.",
+      "rationale": "Parsed statement templates can be reused safely with independent execution resources. Atomic catalog and external-file transactions require a separate commit/rollback contract; persistent view SQL must not retain unbound parameters."
     },
     {
       "id": "DBSQL-002",
@@ -56,24 +56,14 @@
       "rationale": "Keep the defect open until the original and replacement >budget fixtures complete under 64 MiB and 256 MiB managed-memory budgets with measured cleanup. Small fixtures prove the implementation shape, not the large-file acceptance gate."
     },
     {
-      "id": "SQL-SAMPLE-001",
-      "classification": "unsupported_feature",
-      "surface": "SQL sampling syntax, random function, explicit CAST and BIGINT modulo sampling expressions",
-      "stable_sql_semantics": false,
-      "summary": "TABLESAMPLE, USING SAMPLE, random(), explicit CAST and the tested BIGINT modulo expression are not executable through the current public SQL path.",
-      "duckdb": "DuckDB accepts these sampling, explicit CAST and modulo expressions.",
-      "fssql": "Sampling syntax and CAST ... AS ... fail parsing; random() fails binding; BIGINT modulo fails execution. Stratified predicates on existing columns and client-side reservoir sampling are tested separately.",
-      "rationale": "The frozen Stable contract does not define statistical sampling or a complete arithmetic-operator surface. These unsupported capabilities must not be reported as implemented; adding them requires scope review. Client-side reservoir sampling is tested separately."
-    },
-    {
       "id": "SQL-SUBQUERY-001",
       "classification": "unsupported_feature",
-      "surface": "outer aggregate scalar subqueries and FROM derived tables",
+      "surface": "general correlated and nested scalar subqueries",
       "stable_sql_semantics": false,
-      "summary": "The tested aggregate query with a scalar subquery and derived-table JOIN syntax exceed the current limited non-correlated subquery surface.",
-      "duckdb": "DuckDB accepts both query forms.",
-      "fssql": "The aggregate/scalar combination is explicitly rejected as outside limited Stable support, and FROM derived tables fail parsing. Supported non-aggregate scalar queries and CTE joins are tested separately.",
-      "rationale": "The frozen feature contract promises limited non-correlated subqueries, not arbitrary derived-table or aggregate/subquery compositions. This documents the current boundary without waiving a mismatch in the existing Stable corpus."
+      "summary": "Equality and parameter-domain EXISTS/IN/scalars, relation propagation, outer-owned aggregates, lateral derived inputs and nested scalar dependencies are supported; full subquery grammar and operator coverage remain limited.",
+      "duckdb": "DuckDB accepts derived tables, aggregate/scalar combinations and correlated or nested scalar subqueries.",
+      "fssql": "Parameter domains support non-equality predicates, constant per-domain LIMIT/OFFSET, nested references, empty global aggregates/HAVING, derived tables/CTEs, UNION ALL, JOIN ON subqueries, outer-owned aggregates and explicit/implicit INNER/CROSS/LEFT lateral derived inputs. Non-correlated scalar dependencies are prepared bottom-up. Dynamic table-function arguments and quantified ANY/ALL remain unsupported. Correlation through SAMPLE, non-constant correlated limits and disallowed dependent join types are rejected as in DuckDB 2.0.0.",
+      "rationale": "The implementation reuses materialization, NULL-safe hash joins, grouping and partitioned row numbers. Full operator coverage remains future work; candidate pairs without usable hash keys still require a cross product/filter with a managed-memory build side."
     }
   ]
 }

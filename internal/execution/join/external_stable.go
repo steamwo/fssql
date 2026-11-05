@@ -382,7 +382,7 @@ func (j *StableExternalHashJoin) matchLoaded(ctx context.Context, build recordRe
 	buildIndex, ok := index.Head(hash)
 	for ok {
 		_, buildRow, valid := build.record(buildIndex); if !valid { return false, errors.New("invalid build record") }
-		equal, err := exechash.EqualProjectedRows(j.core.buildLayout, buildRow, j.core.buildKeys, j.core.probeLayout, probeRow, j.core.probeKeys, exechash.NullsUnequal)
+		equal, err := exechash.EqualProjectedRows(j.core.buildLayout, buildRow, j.core.buildKeys, j.core.probeLayout, probeRow, j.core.probeKeys, j.core.nullEquality())
 		if err != nil { return false, err }
 		if equal {
 			matched = true
@@ -423,7 +423,7 @@ func (j *StableExternalHashJoin) terminalNestedLoop(ctx context.Context, buildSe
 				return scanRecords(probeBuf.Bytes(), func(probeHash uint64, probeRow []byte) error {
 					idx := probeIndex; probeIndex++
 					if buildHash != probeHash { return nil }
-					equal, err := exechash.EqualProjectedRows(j.core.buildLayout, buildRow, j.core.buildKeys, j.core.probeLayout, probeRow, j.core.probeKeys, exechash.NullsUnequal)
+					equal, err := exechash.EqualProjectedRows(j.core.buildLayout, buildRow, j.core.buildKeys, j.core.probeLayout, probeRow, j.core.probeKeys, j.core.nullEquality())
 					if err != nil || !equal { return err }
 					if (j.core.config.Type == Semi || j.core.config.Type == Anti) && isMatched(probeMatched, idx) { return nil }
 					setMatched(probeMatched, idx)

@@ -21,6 +21,7 @@ const (
 	LogicalSort
 	LogicalLimit
 	LogicalOneRow // LogicalOneRow 为 SELECT 无 FROM 提供单行零列关系；追加在末尾避免改变既有 kind 数值。
+	LogicalUnionAll
 )
 
 // JoinType 是 planner 层的 SQL join 语义，不包含具体执行算法。
@@ -99,6 +100,15 @@ func (p *LogicalPlan) Validate() error {
 		return fmt.Errorf("logical plan is nil")
 	}
 	switch p.Kind {
+	case LogicalUnionAll:
+		if len(p.Children) != 2 {
+			return fmt.Errorf("UNION ALL requires two inputs")
+		}
+		for _, child := range p.Children {
+			if !plannerColumnsEqual(child.Output, p.Output) {
+				return fmt.Errorf("UNION ALL input schema mismatch")
+			}
+		}
 	case LogicalOneRow:
 		if len(p.Children) != 0 || len(p.Output) != 0 || p.Scan != nil {
 			return fmt.Errorf("one-row source requires no children/output/scan")

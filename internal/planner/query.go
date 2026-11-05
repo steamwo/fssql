@@ -55,11 +55,16 @@ func (p *QueryPlanner) Plan(ctx context.Context, query *binder.BoundQuery) (*Log
 		return nil, err
 	}
 	if query.Where != nil {
+		var predicate *binder.BoundExpression
+		root, predicate, err = p.lowerSubqueryExpression(ctx, root, query.Where)
+		if err != nil {
+			return nil, err
+		}
 		root = &LogicalPlan{
 			Kind:      LogicalFilter,
 			Children:  []*LogicalPlan{root},
 			Output:    clonePlannerColumns(root.Output),
-			Predicate: query.Where,
+			Predicate: predicate,
 		}
 	}
 
@@ -68,7 +73,10 @@ func (p *QueryPlanner) Plan(ctx context.Context, query *binder.BoundQuery) (*Log
 		if item.Expression == nil {
 			return nil, fmt.Errorf("query planner: projection %d is nil", i)
 		}
-		projection[i] = item.Expression
+		root, projection[i], err = p.lowerSubqueryExpression(ctx, root, item.Expression)
+		if err != nil {
+			return nil, err
+		}
 	}
 	root = &LogicalPlan{
 		Kind:       LogicalProject,
@@ -112,6 +120,37 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		return nil, err
 	}
 	switch relation.Kind {
+	case binder.RelationProject:
+		if len(relation.Children) != 1 {
+			return nil, fmt.Errorf("query planner: projected relation requires one input")
+		}
+		child, err := p.planRelation(ctx, relation.Children[0])
+		if err != nil {
+			return nil, err
+		}
+		return &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{child}, Output: relationColumnsToPlanner(relation.Columns), Projection: relation.Projection}, nil
+	case binder.RelationUnion:
+		if len(relation.Children) != 2 {
+			return nil, fmt.Errorf("query planner: UNION ALL requires two inputs")
+		}
+		left, err := p.planRelation(ctx, relation.Children[0])
+		if err != nil {
+			return nil, err
+		}
+		right, err := p.planRelation(ctx, relation.Children[1])
+		if err != nil {
+			return nil, err
+		}
+		return &LogicalPlan{Kind: LogicalUnionAll, Children: []*LogicalPlan{left, right}, Output: relationColumnsToPlanner(relation.Columns)}, nil
+	case binder.RelationSample:
+		if len(relation.Children) != 1 {
+			return nil, fmt.Errorf("query planner: sample requires one input")
+		}
+		input, err := p.planRelation(ctx, relation.Children[0])
+		if err != nil {
+			return nil, err
+		}
+		return &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: []SortKey{{Expr: phase5Marker(function.SampleMarkerID, relation.ID)}}}, nil
 	case binder.RelationTableFunction:
 		return p.planTableFunction(relation)
 	case binder.RelationJoin:
@@ -133,6 +172,9 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		expected := relationColumnsToPlanner(relation.Columns)
 		if !plannerColumnsEqual(planned.Output, expected) {
 			return nil, fmt.Errorf("query planner: CTE %s executable schema does not match Binder schema", relation.ID)
+		}
+		if relation.Materialize {
+			planned = &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{planned}, Output: clonePlannerColumns(planned.Output), Sort: []SortKey{{Expr: phase5Marker(function.CTEMarkerID, relation.ID)}}}
 		}
 		return planned, nil
 	case binder.RelationCatalog:
@@ -191,6 +233,14 @@ func (p *QueryPlanner) planJoin(ctx context.Context, relation *binder.BoundRelat
 	if len(relation.Children) != 2 {
 		return nil, fmt.Errorf("query planner: join relation requires two children")
 	}
+	general := relation.Dependent || joinConditionHasSubquery(relation.Condition)
+	if !general && relation.Condition != nil {
+		_, err := ExtractHashJoinKeys(relation.Condition, len(relation.Children[0].Columns), len(relation.Children[1].Columns))
+		general = err != nil
+	}
+	if general {
+		return p.planDomainJoin(ctx, relation, &LogicalPlan{Kind: LogicalOneRow}, nil)
+	}
 	left, err := p.planRelation(ctx, relation.Children[0])
 	if err != nil {
 		return nil, err
@@ -206,9 +256,6 @@ func (p *QueryPlanner) planJoin(ctx context.Context, relation *binder.BoundRelat
 	if join != JoinCross && relation.Condition == nil {
 		return nil, fmt.Errorf("query planner: non-cross join requires bound condition")
 	}
-	if containsBoundSubquery(relation.Condition) {
-		return nil, fmt.Errorf("query planner: subquery join condition lowering is not implemented")
-	}
 	return &LogicalPlan{
 		Kind:      LogicalJoin,
 		Children:  []*LogicalPlan{left, right},
@@ -216,6 +263,21 @@ func (p *QueryPlanner) planJoin(ctx context.Context, relation *binder.BoundRelat
 		Predicate: relation.Condition,
 		Join:      join,
 	}, nil
+}
+
+func joinConditionHasSubquery(e *binder.BoundExpression) bool {
+	if e == nil {
+		return false
+	}
+	if e.Kind == binder.BoundSubquery || e.Kind == binder.BoundRuntimeConstant {
+		return true
+	}
+	for _, c := range e.Children {
+		if joinConditionHasSubquery(c) {
+			return true
+		}
+	}
+	return false
 }
 
 // plannerJoinType 显式映射 Own AST Stable join enum，禁止依赖两个 package 的枚举数值偶然一致。
@@ -313,32 +375,21 @@ func queryHasAggregate(query *binder.BoundQuery) bool {
 
 // containsBoundAggregate 递归识别 FunctionCatalog aggregate 调用。
 func containsBoundAggregate(expression *binder.BoundExpression) bool {
-	if expression == nil {
-		return false
-	}
-	if expression.Kind == binder.BoundFunction && expression.FunctionKind == function.Aggregate {
-		return true
-	}
-	for _, child := range expression.Children {
-		if containsBoundAggregate(child) {
-			return true
-		}
-	}
-	return false
+	return binder.ExpressionHasLocalAggregate(expression)
 }
 
 // queryHasSubquery 检查当前 foundation 尚未 lowering 的 scalar subquery。
 func queryHasSubquery(query *binder.BoundQuery) bool {
 	for _, item := range query.Projection {
-		if containsBoundSubquery(item.Expression) {
+		if containsUnplannedSubquery(item.Expression) {
 			return true
 		}
 	}
-	if containsBoundSubquery(query.Where) || containsBoundSubquery(query.Having) {
+	if containsUnplannedSubquery(query.Where) || containsUnplannedSubquery(query.Having) {
 		return true
 	}
 	for _, term := range query.OrderBy {
-		if containsBoundSubquery(term.Expression) {
+		if containsUnplannedSubquery(term.Expression) {
 			return true
 		}
 	}
@@ -355,6 +406,21 @@ func containsBoundSubquery(expression *binder.BoundExpression) bool {
 	}
 	for _, child := range expression.Children {
 		if containsBoundSubquery(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsUnplannedSubquery(expr *binder.BoundExpression) bool {
+	if expr == nil {
+		return false
+	}
+	if expr.Kind == binder.BoundSubquery {
+		return !plannedSubquery(expr)
+	}
+	for _, child := range expr.Children {
+		if containsUnplannedSubquery(child) {
 			return true
 		}
 	}

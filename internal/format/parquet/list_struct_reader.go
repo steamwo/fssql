@@ -95,6 +95,8 @@ func (r *ListStructColumnReader) Metrics() ColumnCursorMetrics {
 		out.PlannedBytes += m.PlannedBytes
 		out.TransferredBytes += m.TransferredBytes
 		out.PagesRead += m.PagesRead
+		out.PagesSkipped += m.PagesSkipped
+		out.UsefulBytes += m.UsefulBytes
 		out.DataValues += m.DataValues
 	}
 	return out

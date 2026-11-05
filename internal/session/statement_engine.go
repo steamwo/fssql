@@ -56,6 +56,15 @@ func newStableStatementEngine(selects *StableSQLEngine, control *SQLControlAdapt
 
 // Prepare 只做 parse/bind/planning，不提前执行 Catalog/Secret/Export 副作用。
 func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, sql string) (PreparedStatement, error) {
+	parsed, err := parser.Parse(sql)
+	if err != nil {
+		return nil, err
+	}
+	return e.PrepareParsed(ctx, q, sql, parsed)
+}
+
+// PrepareParsed binds immutable parsed syntax against a fresh statement snapshot.
+func (e *StableStatementEngine) PrepareParsed(ctx context.Context, q *query.Context, sql string, parsed ast.Statement) (PreparedStatement, error) {
 	if e == nil || e.selects == nil || e.control == nil {
 		return nil, fmt.Errorf("session: Stable statement engine is uninitialized")
 	}
@@ -65,12 +74,8 @@ func (e *StableStatementEngine) Prepare(ctx context.Context, q *query.Context, s
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	parsed, err := parser.Parse(sql)
-	if err != nil {
-		return nil, err
-	}
-	if _, ok := parsed.(*ast.SelectStmt); ok {
-		return e.selects.Prepare(ctx, q, sql)
+	if selectQuery, ok := parsed.(*ast.SelectStmt); ok {
+		return e.selects.prepareSelect(ctx, q, sql, selectQuery)
 	}
 
 	// CREATE SECRET 的 Binder 不需要 Catalog/source resolver，避免无关 VFS/source configuration 阻塞 credential control path。

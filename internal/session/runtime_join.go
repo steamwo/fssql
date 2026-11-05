@@ -105,6 +105,7 @@ func (f *ExternalJoinFactory) OpenJoin(ctx context.Context, kind planner.JoinTyp
 	rightBytes := estimateJoinBytes(rightEstimate, rightTypes)
 	core, err := execjoin.NewStableExternal(execjoin.ExternalConfig{
 		Type:                execType,
+		NullsEqual:          keys.NullsEqual,
 		LeftTypes:           leftTypes,
 		RightTypes:          rightTypes,
 		LeftKeys:            append([]int(nil), keys.Left...),

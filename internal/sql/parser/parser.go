@@ -2,7 +2,6 @@ package parser
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 
@@ -15,6 +14,7 @@ type Parser struct {
 	pos         int
 	internalSeq uint64
 	pendingCTEs []ast.CTE
+	parameterSlots map[int]int
 }
 
 func Parse(sql string) (ast.Statement, error) {
@@ -32,7 +32,7 @@ func Parse(sql string) (ast.Statement, error) {
 func (p *Parser) mark() int { return p.pos }
 func (p *Parser) restore(mark int) { p.pos = mark }
 
-func (p *Parser) parseSelectStatement() (*ast.SelectStmt, bool, error) {
+func (p *Parser) parseSelectCore() (*ast.SelectStmt, bool, error) {
 	mark := p.mark()
 	pendingBase := len(p.pendingCTEs)
 	start := p.peek().Span.Start
@@ -54,7 +54,8 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStmt, bool, error) {
 	if p.accept(lexer.KeywordFrom) {
 		from, err := p.parseTableExpr()
 		if err != nil { return nil, false, err }
-		s.From = from
+		s.From, err = p.parseUsingSample(from)
+		if err != nil { return nil, false, err }
 	}
 	if p.accept(lexer.KeywordWhere) {
 		e, err := p.parseExpr(0); if err != nil { return nil, false, err }; s.Where = e
@@ -65,6 +66,12 @@ func (p *Parser) parseSelectStatement() (*ast.SelectStmt, bool, error) {
 	}
 	if p.accept(lexer.KeywordHaving) {
 		e, err := p.parseExpr(0); if err != nil { return nil, false, err }; s.Having = e
+	}
+	if p.peek().Kind == lexer.KeywordUsing && p.peekNWord(1, "sample") {
+		if s.From == nil { return nil, false, p.errorf("USING SAMPLE requires FROM") }
+		if sample, sampled := s.From.(*ast.SampleTableExpr); sampled && sample.Using { return nil, false, p.errorf("duplicate USING SAMPLE") }
+		s.From, err = p.parseUsingSample(s.From)
+		if err != nil { return nil, false, err }
 	}
 	if p.accept(lexer.KeywordOrder) {
 		if err := p.expect(lexer.KeywordBy, "BY"); err != nil { return nil, false, err }
@@ -135,6 +142,15 @@ func (p *Parser) parseOrderTerms() ([]ast.OrderTerm, error) {
 }
 
 func (p *Parser) parseTableExpr() (ast.TableExpr, error) {
+	left,err:=p.parseJoinedTable();if err!=nil{return nil,err}
+	for p.accept(lexer.Comma){
+		right,err:=p.parseJoinedTable();if err!=nil{return nil,err}
+		left=&ast.JoinExpr{Span:ast.Span{Start:left.NodeSpan().Start,End:right.NodeSpan().End},Left:left,Right:right,Type:ast.JoinCross}
+	}
+	return left,nil
+}
+
+func (p *Parser) parseJoinedTable() (ast.TableExpr, error) {
 	left, err := p.parseTablePrimary(); if err != nil { return nil, err }
 	for {
 		mark := p.mark(); jt := ast.JoinInner; explicit := false
@@ -165,15 +181,19 @@ func (p *Parser) parseTableExpr() (ast.TableExpr, error) {
 func (p *Parser) parseTablePrimary() (ast.TableExpr, error) {
 	start := p.peek().Span.Start
 	var out ast.TableExpr
+	lateral:=p.acceptWord("lateral")
+	if lateral&&p.peek().Kind!=lexer.LParen{return nil,p.errorf("LATERAL requires a derived table")}
 	if p.accept(lexer.LParen) {
 		q, ok, err := p.parseSelectStatement(); if err != nil { return nil, err }; if !ok { return nil, p.errorf("derived table requires SELECT") }
 		if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
-		alias := p.parseOptionalAlias(); if alias == nil { return nil, p.errorf("derived table requires alias") }
-		name := p.generatedName("derived")
-		cte := ast.CTE{Name: name, Query: q, Span: ast.Span{Start: start, End: p.previous().Span.End}}
-		p.pendingCTEs = append(p.pendingCTEs, cte)
-		qn := ast.QualifiedName{Span: name.Span, Parts: []ast.Identifier{name}}
-		out = &ast.TableName{Span: ast.Span{Start: start, End: p.previous().Span.End}, Name: qn, Alias: alias}
+		alias := p.parseOptionalAlias(); if alias == nil { name:=p.generatedName("derived");alias=&name }
+		derived:=&ast.DerivedTable{Query:q,Alias:*alias,Lateral:lateral}
+		if p.accept(lexer.LParen){
+			for{id,err:=p.parseIdentifier();if err!=nil{return nil,err};derived.Columns=append(derived.Columns,id);if !p.accept(lexer.Comma){break}}
+			if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err}
+		}
+		derived.Span=ast.Span{Start:start,End:p.previous().Span.End}
+		out=derived
 	} else {
 		name, err := p.parseQualifiedName(); if err != nil { return nil, err }; start = name.Span.Start
 		if p.accept(lexer.LParen) {
@@ -182,54 +202,13 @@ func (p *Parser) parseTablePrimary() (ast.TableExpr, error) {
 				for { e, err := p.parseExpr(0); if err != nil { return nil, err }; call.Args = append(call.Args, e); if !p.accept(lexer.Comma) { break } }
 				if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
 			}
-			call.Span = ast.Span{Start: start, End: p.previous().Span.End}; if err := foldStaticTableArguments(call); err != nil { return nil, err }
+			call.Span = ast.Span{Start: start, End: p.previous().Span.End}; if !expressionHasParameter(call) { if err := foldStaticTableArguments(call); err != nil { return nil, err } }
 			t := &ast.TableFunction{Call: call}; t.Alias = p.parseOptionalAlias(); t.Span = ast.Span{Start: start, End: p.previous().Span.End}; out = t
 		} else {
 			t := &ast.TableName{Name: name}; t.Alias = p.parseOptionalAlias(); t.Span = ast.Span{Start: start, End: p.previous().Span.End}; out = t
 		}
 	}
-	return p.parseSampleSuffix(out)
-}
-
-func (p *Parser) parseSampleSuffix(source ast.TableExpr) (ast.TableExpr, error) {
-	if p.peek().Kind != lexer.KeywordUsing || !p.peekNWord(1, "sample") { return source, nil }
-	p.pos += 2
-	method := "reservoir"
-	var amount uint64
-	var percentBits uint64
-	if p.peekWord("reservoir") || p.peekWord("bernoulli") {
-		method = strings.ToLower(p.peek().Text); p.pos++
-		if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }
-		t := p.peek(); if t.Kind != lexer.Number { return nil, p.errorf("sample amount must be numeric") }; p.pos++
-		if method == "reservoir" {
-			if strings.Contains(t.Raw, ".") { return nil, p.errorf("reservoir sample requires integer rows") }
-			v, err := strconv.ParseUint(t.Raw, 10, 64); if err != nil { return nil, p.errorf("invalid reservoir size") }; amount = v
-			if !p.acceptWord("rows") { return nil, p.errorf("reservoir sample requires ROWS") }
-		} else {
-			v, err := strconv.ParseFloat(t.Raw, 64); if err != nil || v < 0 || v > 100 { return nil, p.errorf("bernoulli percentage must be in [0,100]") }; percentBits = math.Float64bits(v)
-			if !p.acceptWord("percent") { return nil, p.errorf("bernoulli sample requires PERCENT") }
-		}
-		if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
-	} else {
-		t := p.peek(); if t.Kind != lexer.Number || strings.Contains(t.Raw, ".") { return nil, p.errorf("sample row count must be an integer") }; p.pos++
-		v, err := strconv.ParseUint(t.Raw, 10, 64); if err != nil { return nil, p.errorf("invalid sample row count") }; amount = v
-		if !p.acceptWord("rows") { return nil, p.errorf("fixed sample requires ROWS") }
-	}
-	hasSeed := false; seed := uint64(0)
-	if p.acceptWord("repeatable") {
-		hasSeed = true; if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }
-		t := p.peek(); if t.Kind != lexer.Number || strings.Contains(t.Raw, ".") { return nil, p.errorf("REPEATABLE seed must be an integer") }; p.pos++
-		v, err := strconv.ParseUint(t.Raw, 10, 64); if err != nil { return nil, p.errorf("invalid REPEATABLE seed") }; seed = v
-		if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
-	}
-	code := "r"; value := amount
-	if method == "bernoulli" { code = "b"; value = percentBits }
-	seedCode := "n"; if hasSeed { seedCode = "s" }
-	name := p.generatedName(fmt.Sprintf("sample_%s_%x_%s_%x", code, value, seedCode, seed))
-	q := &ast.SelectStmt{Projection: []ast.SelectItem{{Star: true, Span: source.NodeSpan()}}, From: source, Span: source.NodeSpan()}
-	p.pendingCTEs = append(p.pendingCTEs, ast.CTE{Name: name, Query: q, Span: source.NodeSpan()})
-	qn := ast.QualifiedName{Span: name.Span, Parts: []ast.Identifier{name}}
-	return &ast.TableName{Span: ast.Span{Start: source.NodeSpan().Start, End: p.previous().Span.End}, Name: qn}, nil
+	return p.parseTableSample(out)
 }
 
 func (p *Parser) generatedName(kind string) ast.Identifier {
@@ -241,13 +220,14 @@ func (p *Parser) generatedName(kind string) ast.Identifier {
 
 func (p *Parser) parseOptionalAlias() *ast.Identifier {
 	if p.accept(lexer.KeywordAs) { id, err := p.parseIdentifier(); if err == nil { return &id }; return nil }
-	if p.peek().Kind == lexer.Identifier || p.peek().Kind == lexer.QuotedIdentifier { id, _ := p.parseIdentifier(); return &id }
+	if (p.peek().Kind == lexer.Identifier && !p.peekWord("tablesample")) || p.peek().Kind == lexer.QuotedIdentifier { id, _ := p.parseIdentifier(); return &id }
 	return nil
 }
 
 func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 	left, err := p.parsePrefix(); if err != nil { return nil, err }
 	for {
+		if predicate,handled,err := p.parsePredicate(left,minBP); handled { if err != nil { return nil,err };left=predicate;continue }
 		if p.peek().Kind == lexer.KeywordIs {
 			if 30 < minBP { return left, nil }
 			start := left.NodeSpan().Start; p.pos++; not := p.accept(lexer.KeywordNot)
@@ -275,8 +255,10 @@ func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 func (p *Parser) parsePrefix() (ast.Expr, error) {
 	t := p.peek()
 	switch t.Kind {
+	case lexer.Parameter:
+		slot, ok := p.parameterSlots[t.Span.Start.Offset]; if !ok { return nil, p.errorf("unbound SQL parameter") }; p.pos++; return &ast.ParameterExpr{Span: t.Span, Slot: slot}, nil
 	case lexer.KeywordNot, lexer.Plus, lexer.Minus:
-		p.pos++; e, err := p.parseExpr(70); if err != nil { return nil, err }; return &ast.UnaryExpr{Span: ast.Span{Start: t.Span.Start, End: e.NodeSpan().End}, Op: strings.ToUpper(t.Raw), Expr: e}, nil
+		p.pos++; binding := 70; if t.Kind == lexer.KeywordNot { binding = 30 }; e, err := p.parseExpr(binding); if err != nil { return nil, err }; return &ast.UnaryExpr{Span: ast.Span{Start: t.Span.Start, End: e.NodeSpan().End}, Op: strings.ToUpper(t.Raw), Expr: e}, nil
 	case lexer.KeywordNull:
 		p.pos++; return &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralNull, Value: "NULL"}, nil
 	case lexer.KeywordTrue, lexer.KeywordFalse:
@@ -289,6 +271,7 @@ func (p *Parser) parsePrefix() (ast.Expr, error) {
 		start := t.Span.Start; p.pos++; if q, ok, err := p.parseSelectStatement(); err != nil { return nil, err } else if ok { if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return &ast.SubqueryExpr{Span: ast.Span{Start: start, End: p.previous().Span.End}, Query: q}, nil }
 		e, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return e, nil
 	case lexer.Identifier, lexer.QuotedIdentifier:
+		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text,"exists") { start:=t.Span.Start;p.pos++;if err:=p.expect(lexer.LParen,"(");err!=nil{return nil,err};q,ok,err:=p.parseSelectStatement();if err!=nil{return nil,err};if !ok{return nil,p.errorf("EXISTS requires SELECT")};if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err};return &ast.SubqueryExpr{Span:ast.Span{Start:start,End:p.previous().Span.End},Query:q,Exists:true},nil }
 		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "case") { return p.parsePhase4Case() }
 		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "cast") { return p.parsePhase4Cast() }
 		name, err := p.parseQualifiedName(); if err != nil { return nil, err }
@@ -364,7 +347,7 @@ func (p *Parser) parsePhase4Cast() (ast.Expr, error) {
 func (p *Parser) parsePhase4CastType() (string, error) {
 	id, err := p.parseIdentifier(); if err != nil { return "", err }; name := strings.ToLower(id.Name)
 	switch name {
-	case "boolean", "tinyint", "smallint", "integer", "bigint", "utinyint", "usmallint", "uinteger", "ubigint", "float", "double", "varchar", "blob", "date", "timestamp", "timestamp_ns", "timestamptz": return name, nil
+	case "boolean", "tinyint", "smallint", "integer", "bigint", "hugeint", "utinyint", "usmallint", "uinteger", "ubigint", "float", "double", "varchar", "blob", "date", "timestamp", "timestamp_ns", "timestamptz": return name, nil
 	case "decimal", "numeric":
 		if err := p.expect(lexer.LParen, "("); err != nil { return "", err }; wTok := p.peek(); if wTok.Kind != lexer.Number || strings.Contains(wTok.Raw, ".") { return "", p.errorf("expected DECIMAL precision") }; p.pos++; w, err := strconv.Atoi(wTok.Raw); if err != nil || w < 1 || w > 38 { return "", p.errorf("invalid DECIMAL precision") }; scale := 0
 		if p.accept(lexer.Comma) { sTok := p.peek(); if sTok.Kind != lexer.Number || strings.Contains(sTok.Raw, ".") { return "", p.errorf("expected DECIMAL scale") }; p.pos++; scale, err = strconv.Atoi(sTok.Raw); if err != nil || scale < 0 || scale > w { return "", p.errorf("invalid DECIMAL scale") } }

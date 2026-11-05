@@ -13,7 +13,7 @@ For a complete runnable example of both Go query APIs, see [quickstart](../examp
 | Native queries and statements | `Open`, `DB.QueryChunks`, `DB.Exec`, `DB.Close`, `DB.MemoryUsed`. |
 | `database/sql` | `OpenSQLDB`; query and execute through the same engine. |
 | Catalog | `Open` constructs a MemoryCatalog shared within that DB instance. SQLiteCatalog exists internally, but Config has no catalog injection or persistence option. |
-| Data sources and COPY destinations | Optional `Config.S3` registers the S3 driver. No other driver is registered by Open; unconfigured schemes fail explicitly. Local TempDir/ManifestDir configure spill and recovery state, not a local-file data-source driver. |
+| Data sources and COPY destinations | `Config.LocalFiles` and `Config.S3` register explicitly configured local and S3 drivers. Unconfigured schemes fail explicitly. TempDir/ManifestDir configure spill and recovery state. |
 | Other protocol adapters | SFTP, FTP and WebDAV implementations are internal; Config has no public driver registration option. |
 | Source introspection | SQL `DESCRIBE`, `parquet_schema` and `parquet_file_metadata` use the query path. There is no exported `DB.InspectSource` method. |
 | HTTP service | The wire adapter is internal; the public package has no HTTP server constructor. |
@@ -37,7 +37,7 @@ if err != nil {
 defer db.Close()
 ```
 
-`gosql.Config` exposes bounded engine memory, temporary storage, spill policy, catalog/cache capacities, worker/queue limits, local spill/COPY manifest roots, and optional S3 configuration. Zero values select defaults:
+`gosql.Config` exposes bounded engine memory, temporary storage, spill policy, catalog/cache capacities, worker/queue limits, local spill/COPY manifest roots, and optional local-file/S3 configuration. Zero values select defaults:
 
 | Field | Default |
 | --- | --- |
@@ -50,7 +50,7 @@ defer db.Close()
 | `TempDir` | `filepath.Join(os.TempDir(), "fssql-spill")` |
 | `ManifestDir` | `filepath.Join(os.TempDir(), "fssql-copy-manifests")` |
 
-MemoryUsed and MemoryLimitBytes describe engine-managed memory, not total process RSS. Configuring local spill or manifest paths does not enable reading or exporting local data files.
+MemoryUsed and MemoryLimitBytes describe engine-managed memory, not total process RSS. Configuring local spill or manifest paths does not enable reading or exporting local data files; configure `LocalFiles.RootDir` explicitly for local data access.
 
 `DB.Close` prevents new work. Query calls already in progress retain their own query-scoped context/ownership and finish or cancel through the supplied context.
 
@@ -119,15 +119,51 @@ rows, err := sqlDB.QueryContext(ctx, "SELECT 1")
 
 `OpenSQLDB` uses `sql.OpenDB` with a private Connector over the same native DB execution path; it does not register a process-global driver name.
 
-Frozen v1 boundary rules:
+Current boundary rules:
 
-- positional/named database/sql parameters are not part of Stable v1 and non-empty argument lists are rejected;
-- LIST/STRUCT values are rejected by the row adapter; the current public native Chunk exposes their type metadata but has no nested value accessors;
-- DECIMAL/HUGEINT cross `database/sql` as exact base-10 text;
-- `LastInsertId` is not applicable;
-- transaction/statement preparation is not a separately frozen v1 execution model and the driver does not invent one behind the native engine.
+- `QueryContext`/`ExecContext` and prepared statements support `?`, `$1`/`$2`, or `$name` parameters in SELECT statements. Do not mix placeholder styles. Numbered placeholders must be contiguous from `$1`; named placeholders use `sql.Named` and can be repeated.
+- Parameters are bound as AST values, never interpolated into SQL. Supported values are `nil`, bool, int64, float64, string, []byte and time.Time, including the standard `database/sql` conversions and `driver.Valuer`. A time.Time parameter preserves nanoseconds as TIMESTAMP_NS and must fit that type's range. An untyped NULL parameter projected directly defaults to nullable VARCHAR.
+- `PrepareContext` caches parsed syntax. Each execution binds its own values and plans against a fresh statement/source snapshot; physical plans and query resources are not shared across executions. Parameterized DDL/COPY is rejected.
+- Transactions are not supported; `Begin`/`BeginTx` return an explicit error, including read-only transactions.
+- LIST/STRUCT values are rejected by the row adapter; the current public native Chunk exposes their type metadata but has no nested value accessors.
+- DECIMAL/HUGEINT cross `database/sql` as exact base-10 text. Use an explicit CAST for decimal/wide-integer input, for example `SELECT CAST(? AS DECIMAL(38,2))` with a decimal string.
+- `LastInsertId` is not applicable.
 
-These boundary differences are documented in `compatibility/deviations.yaml` and are marked as not changing Stable SQL semantics.
+```go
+stmt, err := sqlDB.PrepareContext(ctx, "SELECT CAST($amount AS DECIMAL(38,2))")
+if err != nil {
+    // handle error
+}
+defer stmt.Close()
+var amount string
+err = stmt.QueryRowContext(ctx, sql.Named("amount", "12345678901234567890.12")).Scan(&amount)
+```
+
+SQL compatibility additions:
+
+- `TABLESAMPLE` samples one FROM input while preserving its qualifiers; `USING SAMPLE` samples the entire FROM input after joins and before WHERE/aggregation. The latter may appear immediately after FROM or after WHERE/GROUP BY/HAVING, before ORDER BY.
+- Both accept fixed rows (reservoir), percentages using PERCENT or %, explicit reservoir/bernoulli/system methods, and REPEATABLE seeds or `(method, seed)` syntax. Fixed-size sampling defaults to reservoir; percentages default to system. System sampling makes one decision per execution batch; Bernoulli sampling decides per row. Reservoir percentages first spill/store the population to determine the exact sample size and may use more temporary I/O.
+- BIGINT `%` supports signed operands and NULL propagation; a zero divisor returns an error.
+- Integer arithmetic covers TINYINT/SMALLINT/INTEGER/BIGINT/HUGEINT and their supported unsigned forms, with checked arithmetic overflow. Mixed signed/unsigned operands widen to BIGINT or HUGEINT without losing the unsigned range. FLOAT arithmetic retains its FLOAT result type.
+- DECIMAL-to-integer CAST rounds halfway cases away from zero and checks the rounded value against the target range.
+- Aggregate SELECT without FROM uses the single implicit input row; WHERE FALSE produces the standard empty global-aggregate result.
+- Explicit `CAST(... AS HUGEINT)` supports exact decimal text and checked numeric conversions. Overflow returns an error.
+- Non-correlated scalar subqueries may be combined with aggregates/HAVING and FROM derived tables/CTEs. They are materialized before outer execution; zero rows produce NULL and more than one row is an error. Supported correlated forms and remaining scope limits are described below.
+- Nested scalar dependencies are prepared from inner to outer queries and reuse managed runtime constants. Dependencies removed by EXISTS projection pruning are not evaluated.
+
+Common SQL extensions:
+
+- `IN (...)` / `NOT IN (...)` accept expression lists or single-column SELECT subqueries and preserve SQL NULL semantics, including empty sets and a NULL left operand. Subquery membership is lowered to a reusable right set, joins and NULL statistics. `BETWEEN` / `NOT BETWEEN` evaluate the tested value once.
+- `LIKE` / `NOT LIKE` support `%`, `_` and an optional empty or single-byte ESCAPE string. The default has no escape character. Matching follows DuckDB 2.0 Unicode semantics: `_` consumes one Unicode code point.
+- Non-correlated `EXISTS (SELECT ...)` / `NOT EXISTS` test row presence, including multi-column projections, aggregates, LIMIT and OFFSET. Correlated EXISTS, IN and scalar queries use equality joins or parameter-domain decorrelation. Missing COUNT groups return zero; scalar lookups returning more than one row fail explicitly. See the scope limits below.
+- `UNION ALL` preserves duplicates and combines compatible column types without converting exact integers to floating point. Output names come from the first SELECT; a trailing ORDER BY/LIMIT/OFFSET applies to the combined result. Plain UNION/INTERSECT/EXCEPT remain unsupported.
+- `COUNT/SUM/AVG/MIN/MAX(DISTINCT expression)` support one scalar argument and retain their normal NULL, empty-input, result-type and overflow behavior. COUNT/SUM/AVG share a sort-and-mark input for the same DISTINCT argument; MIN/MAX do not require a de-duplication pass. Different DISTINCT arguments may add sorting and temporary I/O.
+- `JOIN USING (column, ...)` supports merged unqualified keys and each side's original qualified keys, including outer joins. SELECT * retains the left input's column order and omits duplicate right keys. Compatible numeric join keys are materialized in their common type before hashing.
+- Derived SELECT inputs support explicit `LATERAL` and implicit references to preceding FROM inputs, including comma/CROSS/INNER joins and LEFT JOIN. Chained inputs, local aggregates, constant per-parameter row limits, prepared values and derived column aliases are supported. Dependent RIGHT/FULL/SEMI/ANTI joins and aggregates owned by a sibling input are rejected, as in DuckDB 2.0.0.
+
+Parameter-domain correlation supports non-equality/OR predicates, constant per-parameter LIMIT/OFFSET with ORDER BY, nested expression-subquery references across query levels, global aggregate expressions/HAVING, and references to grouping columns from outer aggregate outputs/HAVING. Domains propagate through derived tables/CTEs, UNION ALL and JOINs, including outer/semi/anti joins and expression subqueries in ON. Pure outer aggregate calls are evaluated by their owning scope; child scalar cardinality and grouping legality are still checked. Non-constant correlated LIMIT/OFFSET and correlation pushed through SAMPLE remain rejected. Sampling an independent source before a correlated filter is supported. LATERAL table functions retain the static-argument binding restriction; quantified ANY/ALL remains unsupported. Plans without usable hash keys currently use a cross product/filter and retain the CROSS build side in managed memory. See [subquery lowering](architecture/subquery-lowering.md).
+
+Remaining boundary differences are documented in `compatibility/deviations.yaml`.
 
 ## S3 public configuration
 

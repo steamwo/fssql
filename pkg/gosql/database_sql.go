@@ -18,6 +18,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/query"
 	"github.com/steamwo/fssql/internal/session"
+	"github.com/steamwo/fssql/internal/sql/parser"
 )
 
 // OpenSQLDB returns the database/sql compatibility boundary over the same
@@ -58,14 +59,28 @@ type sqlConn struct {
 	mu     sync.Mutex
 }
 
-func (c *sqlConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (c *sqlConn) Prepare(sqlText string) (driver.Stmt, error) {
+	return c.PrepareContext(context.Background(), sqlText)
+}
 func (c *sqlConn) Close() error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
 	return nil
 }
-func (c *sqlConn) Begin() (driver.Tx, error) { return nil, driver.ErrSkip }
+func (c *sqlConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c *sqlConn) BeginTx(ctx context.Context, _ driver.TxOptions) (driver.Tx, error) {
+	if err := c.check(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, errors.New("gosql: transactions are not supported")
+}
 
 func (c *sqlConn) Ping(ctx context.Context) error {
 	c.mu.Lock()
@@ -78,26 +93,42 @@ func (c *sqlConn) Ping(ctx context.Context) error {
 }
 
 func (c *sqlConn) ExecContext(ctx context.Context, sqlText string, args []driver.NamedValue) (driver.Result, error) {
-	if len(args) != 0 {
-		return nil, errors.New("gosql: database/sql parameters are not part of Stable v1")
-	}
 	if err := c.check(); err != nil {
 		return nil, err
 	}
-	if err := c.db.Exec(ctx, sqlText); err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return sqlResult{}, nil
+	template, err := parser.Compile(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	return c.execTemplate(ctx, sqlText, template, args)
 }
 
 func (c *sqlConn) QueryContext(ctx context.Context, sqlText string, args []driver.NamedValue) (driver.Rows, error) {
-	if len(args) != 0 {
-		return nil, errors.New("gosql: database/sql parameters are not part of Stable v1")
-	}
 	if err := c.check(); err != nil {
 		return nil, err
 	}
-	q, prepared, columns, err := c.db.prepare(ctx, sqlText)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	template, err := parser.Compile(sqlText)
+	if err != nil {
+		return nil, err
+	}
+	return c.queryTemplate(ctx, sqlText, template, args)
+}
+
+func (c *sqlConn) queryTemplate(ctx context.Context, sqlText string, template *parser.Template, args []driver.NamedValue) (driver.Rows, error) {
+	if err := c.check(); err != nil {
+		return nil, err
+	}
+	parsed, err := bindSQLParameters(template, args)
+	if err != nil {
+		return nil, err
+	}
+	q, prepared, columns, err := c.db.prepareParsed(ctx, sqlText, parsed)
 	if err != nil {
 		return nil, err
 	}
@@ -119,12 +150,14 @@ func (c *sqlConn) check() error {
 }
 
 var (
-	_ driver.Connector      = (*sqlConnector)(nil)
-	_ driver.Driver         = sqlDriver{}
-	_ driver.Conn           = (*sqlConn)(nil)
-	_ driver.ExecerContext  = (*sqlConn)(nil)
-	_ driver.QueryerContext = (*sqlConn)(nil)
-	_ driver.Pinger         = (*sqlConn)(nil)
+	_ driver.Connector          = (*sqlConnector)(nil)
+	_ driver.Driver             = sqlDriver{}
+	_ driver.Conn               = (*sqlConn)(nil)
+	_ driver.ConnPrepareContext = (*sqlConn)(nil)
+	_ driver.ConnBeginTx        = (*sqlConn)(nil)
+	_ driver.ExecerContext      = (*sqlConn)(nil)
+	_ driver.QueryerContext     = (*sqlConn)(nil)
+	_ driver.Pinger             = (*sqlConn)(nil)
 )
 
 type sqlResult struct{}

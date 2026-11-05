@@ -34,6 +34,7 @@ func (e *Executor) executePhase4CastFunction(expr *binder.BoundExpression, chunk
 func phase4CastScalar(value ScalarValue, target types.LogicalType) (ScalarValue, error) {
 	if !value.Valid { return ScalarValue{Type: target, Valid: false}, nil }
 	if value.Type.Same(target) { value.Type = target; return value, nil }
+	if value.Type.ID == types.HugeInt || target.ID == types.HugeInt { return castHugeIntScalar(value, target) }
 	if target.ID != types.Decimal { return castScalar(value, target) }
 
 	if value.Type.ID == types.Varchar && !value.Type.Binary { return parseScalarText(string(value.Bytes), target) }

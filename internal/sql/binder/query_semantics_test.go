@@ -20,9 +20,20 @@ func TestQueryBinderScalarNonCorrelatedSubquery(t *testing.T) {
 	}
 }
 
-func TestQueryBinderRejectsCorrelatedAndMultiColumnScalarSubquery(t *testing.T) {
+func TestQueryBinderCorrelatedReferenceAndMultiColumnScalarSubquery(t *testing.T) {
+	if BoundOuterColumn == BoundRuntimeConstant {
+		t.Fatal("outer references must not share the runtime-constant expression kind")
+	}
+	sql := "SELECT a, (SELECT t.a) FROM t"
+	q, err := testQueryBinder(sql).BindSelect(context.Background(), mustQueryAST(t, sql))
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := q.Projection[1].Expression.Subquery.Projection[0].Expression
+	if inner.Kind != BoundOuterColumn || inner.Depth != 1 {
+		t.Fatalf("outer binding=%+v", inner)
+	}
 	for _, sql := range []string{
-		"SELECT a, (SELECT t.a) FROM t",
 		"SELECT (SELECT a, b FROM t) FROM t",
 	} {
 		if _, err := testQueryBinder(sql).BindSelect(context.Background(), mustQueryAST(t, sql)); err == nil {

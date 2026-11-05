@@ -27,6 +27,14 @@ func (e *Executor) ExecuteSQL(expr *binder.BoundExpression, chunk *vector.DataCh
 	if out, handled, err := e.executeBatchComparison(expr, chunk); handled {
 		return out, err
 	}
+	// Unsigned BIGINT shares its logical ID with signed BIGINT, but must never
+	// enter the legacy signed arithmetic kernels.
+	if expr.Kind == binder.BoundBinary && len(expr.Children) == 2 && expr.Children[0].Type.IsUnsignedInteger() {
+		return e.executeSQLExactIntegerBinary(expr, chunk)
+	}
+	if expr.Kind == binder.BoundUnary && expr.Type.IsUnsignedInteger() {
+		return e.executeSQLExactIntegerUnary(expr, chunk)
+	}
 	if lowered, err := LowerSQLExpression(expr); err == nil {
 		return e.Execute(lowered, chunk)
 	}
@@ -42,6 +50,27 @@ func (e *Executor) ExecuteSQL(expr *binder.BoundExpression, chunk *vector.DataCh
 		return e.executeSQLBinary(expr, chunk)
 	case binder.BoundCast:
 		return e.executeSQLCast(expr, chunk)
+	case binder.BoundIsNull:
+		if len(expr.Children) != 1 {
+			return nil, fmt.Errorf("SQL expression executor: IS NULL requires one child")
+		}
+		child, err := e.ExecuteSQL(expr.Children[0], chunk)
+		if err != nil {
+			return nil, err
+		}
+		defer child.Release()
+		out, err := vector.NewFlat(e.Scope, e.Buffers, types.LogicalType{ID: types.Boolean}, chunk.Cardinality)
+		if err != nil {
+			return nil, err
+		}
+		for row := 0; row < chunk.Cardinality; row++ {
+			isNull := !child.IsValid(row)
+			if expr.Op == "IS NOT NULL" {
+				isNull = !isNull
+			}
+			out.SetBool(row, isNull)
+		}
+		return out, nil
 	default:
 		return nil, fmt.Errorf("SQL expression executor: no exact kernel for kind %d type %d op %q", expr.Kind, expr.Type.ID, expr.Op)
 	}
@@ -98,6 +127,9 @@ func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.D
 	if len(expr.Children) != 1 {
 		return nil, fmt.Errorf("SQL expression executor: unary %q requires one child", expr.Op)
 	}
+	if (phase4CastSignedIntegerType(expr.Type) && expr.Type.ID != types.Integer) || expr.Type.ID == types.HugeInt {
+		return e.executeSQLExactIntegerUnary(expr, chunk)
+	}
 	child, err := e.ExecuteSQL(expr.Children[0], chunk)
 	if err != nil {
 		return nil, err
@@ -108,6 +140,36 @@ func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.D
 		return nil, err
 	}
 	switch expr.Type.ID {
+	case types.Boolean:
+		if expr.Op != "NOT" {
+			out.Release()
+			return nil, fmt.Errorf("unsupported BOOLEAN unary operator %q", expr.Op)
+		}
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Bool(row)
+			if !ok {
+				out.SetNull(row)
+			} else {
+				out.SetBool(row, !value)
+			}
+		}
+	case types.Float:
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, ok := child.Float32(row)
+			if !ok {
+				out.SetNull(row)
+				continue
+			}
+			switch expr.Op {
+			case "+":
+				out.SetFloat32(row, value)
+			case "-":
+				out.SetFloat32(row, -value)
+			default:
+				out.Release()
+				return nil, fmt.Errorf("unsupported FLOAT unary operator %q", expr.Op)
+			}
+		}
 	case types.Integer:
 		for row := 0; row < chunk.Cardinality; row++ {
 			value, ok := child.Int32(row)
@@ -153,12 +215,16 @@ func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.D
 	return out, nil
 }
 
-// executeSQLCast 补齐 legacy executor 尚未覆盖的 Binder numeric widening；不实现 narrowing 或字符串转换。
+// executeSQLCast keeps the existing INTEGER widening kernels and delegates other
+// casts before evaluation so volatile children are evaluated exactly once.
 func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if len(expr.Children) != 1 {
 		return nil, fmt.Errorf("SQL expression executor: CAST requires one child")
 	}
 	childExpr := expr.Children[0]
+	if childExpr.Type.IsUnsignedInteger() || expr.Type.IsUnsignedInteger() || childExpr.Type.ID != types.Integer || (expr.Type.ID != types.BigInt && expr.Type.ID != types.Double) {
+		return e.executePhase4SQL(expr, chunk)
+	}
 	child, err := e.ExecuteSQL(childExpr, chunk)
 	if err != nil {
 		return nil, err
@@ -189,7 +255,7 @@ func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.Da
 		}
 	default:
 		out.Release()
-		return nil, fmt.Errorf("SQL expression executor: CAST kernel %d -> %d is not implemented", childExpr.Type.ID, expr.Type.ID)
+		return nil, fmt.Errorf("SQL expression executor: invalid INTEGER widening cast")
 	}
 	return out, nil
 }
@@ -209,6 +275,10 @@ func (e *Executor) executeSQLBinary(expr *binder.BoundExpression, chunk *vector.
 		return e.executeSQLBooleanBinary(expr, chunk)
 	case types.Integer:
 		return e.executeSQLIntegerBinary(expr, chunk)
+	case types.TinyInt, types.SmallInt, types.HugeInt:
+		return e.executeSQLExactIntegerBinary(expr, chunk)
+	case types.Float:
+		return e.executeSQLFloatBinary(expr, chunk)
 	case types.BigInt:
 		return e.executeSQLBigIntBinary(expr, chunk)
 	case types.Varchar:
@@ -265,6 +335,10 @@ func (e *Executor) executeSQLIntegerBinary(expr *binder.BoundExpression, chunk *
 			if y == 0 {
 				out.Release()
 				return nil, fmt.Errorf("SQL expression executor: INTEGER modulo by zero")
+			}
+			if x == math.MinInt32 && y == -1 {
+				out.Release()
+				return nil, fmt.Errorf("SQL expression executor: INTEGER modulo overflow")
 			}
 			value = int64(x) % int64(y)
 		default:

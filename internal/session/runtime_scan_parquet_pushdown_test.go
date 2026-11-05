@@ -62,3 +62,26 @@ func TestTranslateParquetPushdownKeepsUnsupportedOrResidualOnly(t *testing.T) {
 		t.Fatalf("OR must remain residual only: %+v", out.Filters)
 	}
 }
+
+func TestParquetPushdownRejectsLossyColumnAndLiteralCasts(t *testing.T) {
+	integer := types.LogicalType{ID: types.Integer}
+	bigint := types.LogicalType{ID: types.BigInt}
+	text := types.LogicalType{ID: types.Varchar}
+	for _, pair := range [][2]types.LogicalType{{bigint, integer}, {integer, text}, {bigint, {ID: types.Double}}} {
+		column := &binder.BoundExpression{Kind: binder.BoundColumn, Type: pair[0], ColumnIndex: 0}
+		cast := &binder.BoundExpression{Kind: binder.BoundCast, Type: pair[1], Children: []*binder.BoundExpression{column}}
+		if _, ok := parquetColumnIndex(cast); ok {
+			t.Fatalf("unsafe column cast accepted: %+v", pair)
+		}
+		literal := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: pair[0], Literal: "1"}
+		cast.Children = []*binder.BoundExpression{literal}
+		if _, ok := parquetLiteral(cast); ok {
+			t.Fatalf("unsafe literal cast accepted: %+v", pair)
+		}
+	}
+	column := &binder.BoundExpression{Kind: binder.BoundColumn, Type: integer, ColumnIndex: 2}
+	cast := &binder.BoundExpression{Kind: binder.BoundCast, Type: bigint, Children: []*binder.BoundExpression{column}}
+	if index, ok := parquetColumnIndex(cast); !ok || index != 2 {
+		t.Fatalf("safe widening rejected: %d/%v", index, ok)
+	}
+}

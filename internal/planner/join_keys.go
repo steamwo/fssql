@@ -9,8 +9,9 @@ import (
 // HashJoinKeys 是从已绑定 JOIN predicate 中提取的左右等值 key 列。
 // Right 中的序号已重映射为 right child 自身的 0-based column index。
 type HashJoinKeys struct {
-	Left  []int // Left 按 predicate conjunct 顺序保存 left child key index。
-	Right []int // Right 与 Left 一一对应保存 right child key index。
+	NullsEqual bool  // All keys use NULL-safe equality; mixed modes are rejected.
+	Left       []int // Left 按 predicate conjunct 顺序保存 left child key index。
+	Right      []int // Right 与 Left 一一对应保存 right child key index。
 }
 
 // ExtractHashJoinKeys 只接受纯 equi-join predicate：`left_col = right_col`，可用 AND 连接多个 key。
@@ -45,6 +46,14 @@ func extractHashJoinConjunct(expr *binder.BoundExpression, leftColumns, rightCol
 		}
 		return extractHashJoinConjunct(expr.Children[1], leftColumns, rightColumns, out)
 	}
+	nullSafe := isPhase5NullSafeEquality(expr)
+	if nullSafe {
+		expr = expr.Children[0].Children[0]
+	}
+	if len(out.Left) > 0 && out.NullsEqual != nullSafe {
+		return fmt.Errorf("mixed NULL-safe and ordinary hash keys are unsupported")
+	}
+	out.NullsEqual = nullSafe
 	if expr.Kind != binder.BoundBinary || expr.Op != "=" || len(expr.Children) != 2 {
 		return fmt.Errorf("non-equi/residual JOIN predicate is not hash-join executable")
 	}

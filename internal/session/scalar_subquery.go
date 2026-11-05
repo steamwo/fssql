@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -22,83 +21,14 @@ type preparedScalarSubquery struct {
 }
 
 // rewriteScalarSubqueries 把 non-correlated scalar child query 改写成执行期 managed constant。
-// Stable v1 当前拒绝 nested subquery 以及 aggregate query 内 subquery，保持“limited”边界可验证。
+// 非相关子查询按依赖顺序在聚合之前物化；相关子查询交由 Planner 去相关。
 func rewriteScalarSubqueries(ctx context.Context, queryPlanner *planner.QueryPlanner, opt *optimizer.Optimizer, query *binder.BoundQuery) (*binder.BoundQuery, []preparedScalarSubquery, error) {
 	if query == nil || queryPlanner == nil || opt == nil {
 		return nil, nil, fmt.Errorf("session: scalar subquery rewrite requires query, planner and optimizer")
 	}
-	if !queryContainsScalarSubquery(query) {
-		return query, nil, nil
-	}
-	if len(query.GroupBy) != 0 || query.Having != nil || queryHasAggregateExpression(query) {
-		return nil, nil, fmt.Errorf("session: scalar subquery inside aggregate/HAVING query is outside Stable v1 limited subquery support")
-	}
-	out := *query
-	out.Projection = append([]binder.BoundSelectItem(nil), query.Projection...)
-	out.OrderBy = append([]binder.BoundOrderTerm(nil), query.OrderBy...)
-	prepared := make([]preparedScalarSubquery, 0, 2)
-
-	var rewriteExpr func(*binder.BoundExpression) (*binder.BoundExpression, error)
-	rewriteExpr = func(expr *binder.BoundExpression) (*binder.BoundExpression, error) {
-		if expr == nil {
-			return nil, nil
-		}
-		if expr.Kind == binder.BoundSubquery {
-			if expr.Subquery == nil || len(expr.Subquery.Output) != 1 {
-				return nil, fmt.Errorf("session: scalar subquery must have one bound output")
-			}
-			if queryContainsScalarSubquery(expr.Subquery) {
-				return nil, fmt.Errorf("session: nested scalar subquery is outside Stable v1 limited support")
-			}
-			logical, err := queryPlanner.PlanStable(ctx, expr.Subquery)
-			if err != nil {
-				return nil, fmt.Errorf("session: plan scalar subquery: %w", err)
-			}
-			physical, err := opt.Optimize(ctx, logical)
-			if err != nil {
-				return nil, fmt.Errorf("session: optimize scalar subquery: %w", err)
-			}
-			id := len(prepared)
-			prepared = append(prepared, preparedScalarSubquery{id: id, physical: physical, typeID: cloneSourceType(expr.Type)})
-			return &binder.BoundExpression{
-				Kind:     binder.BoundRuntimeConstant,
-				Span:     expr.Span,
-				Type:     cloneSourceType(expr.Type),
-				Nullable: true,
-				Literal:  strconv.Itoa(id),
-			}, nil
-		}
-		copyExpr := *expr
-		copyExpr.Type = cloneSourceType(expr.Type)
-		copyExpr.Children = make([]*binder.BoundExpression, len(expr.Children))
-		for i, child := range expr.Children {
-			rewritten, err := rewriteExpr(child)
-			if err != nil {
-				return nil, err
-			}
-			copyExpr.Children[i] = rewritten
-		}
-		return &copyExpr, nil
-	}
-
-	var err error
-	for i := range out.Projection {
-		out.Projection[i].Expression, err = rewriteExpr(query.Projection[i].Expression)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	out.Where, err = rewriteExpr(query.Where)
-	if err != nil {
-		return nil, nil, err
-	}
-	for i := range out.OrderBy {
-		out.OrderBy[i].Expression, err = rewriteExpr(query.OrderBy[i].Expression)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	return &out, prepared, nil
+	rewriter := &scalarQueryRewriter{ctx: ctx, planner: queryPlanner, optimizer: opt, queries: make(map[*binder.BoundQuery]*binder.BoundQuery)}
+	rewritten, err := rewriter.rewriteQuery(query)
+	return rewritten, rewriter.prepared, err
 }
 
 func queryContainsScalarSubquery(query *binder.BoundQuery) bool {

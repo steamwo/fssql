@@ -96,6 +96,11 @@ func (o *Optimizer) markRequiredScanColumns(node *planner.LogicalPlan, needed ma
 		case planner.LogicalFilter:
 			collectBoundColumnIndexes(node.Predicate, needed)
 		case planner.LogicalSort:
+			// Cached rows are shared by consumers with different projections.
+			// Preserve the complete materialized schema for every cache reader.
+			if _, ok := planner.IsPhase5CTESort(node.Sort); ok {
+				return
+			}
 			// Global windows append columns; their output indexes are not scan indexes.
 			if _, ok := planner.IsPhase5GlobalWindowSort(node.Sort); ok {
 				return
@@ -257,6 +262,8 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 	switch p.Kind {
 	case planner.LogicalOneRow:
 		out.Kind = planner.PhysicalOneRow
+	case planner.LogicalUnionAll:
+		out.Kind = planner.PhysicalUnionAll
 	case planner.LogicalScan:
 		out.Kind = planner.PhysicalScan
 	case planner.LogicalFilter:
@@ -287,6 +294,15 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 // estimate 计算 conservative cardinality；Unknown statistics 保持低置信度而不是伪造精确结果。
 func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, children []*planner.PhysicalPlan) (planner.CardinalityEstimate, error) {
 	switch p.Kind {
+	case planner.LogicalUnionAll:
+		rows := children[0].Estimate.Rows
+		extra := children[1].Estimate.Rows
+		if ^uint64(0)-rows < extra {
+			rows = ^uint64(0)
+		} else {
+			rows += extra
+		}
+		return planner.CardinalityEstimate{Rows: rows, Confidence: minFloat(children[0].Estimate.Confidence, children[1].Estimate.Confidence)}, nil
 	case planner.LogicalOneRow:
 		return planner.CardinalityEstimate{Rows: 1, Confidence: 1}, nil
 	case planner.LogicalScan:

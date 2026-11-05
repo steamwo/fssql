@@ -204,7 +204,7 @@ func TestDuckDBDifferentialCorpus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("python3", "duckdb_runner.py")
+	cmd := exec.Command(duckDBPython(), "duckdb_runner.py")
 	cmd.Stdin = bytes.NewReader(payload)
 	output, err := cmd.CombinedOutput()
 	if err != nil {

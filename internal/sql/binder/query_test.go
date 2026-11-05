@@ -115,7 +115,6 @@ func TestQueryBinderJoinAndSemanticRejections(t *testing.T) {
 		"SELECT a FROM t WHERE count(a) > 1",
 		"SELECT a FROM t GROUP BY count(a)",
 		"SELECT a FROM t LIMIT a",
-		"SELECT * FROM t JOIN u USING (a)",
 		"SELECT *",
 	} {
 		if _, err := testQueryBinder(bad).BindSelect(context.Background(), mustQueryAST(t, bad)); err == nil {

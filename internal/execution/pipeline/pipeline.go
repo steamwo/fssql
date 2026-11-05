@@ -72,15 +72,18 @@ type CloseableSink interface {
 }
 
 type Pipeline struct {
-	ID           string
+	ID string
 	// PreserveOrder keeps this stage's Source/transform/sink sequence ordered.
 	// Dependency stages still use the requested worker count.
 	PreserveOrder bool
-	Source       Source
-	Operators    []Operator          // Operators 保留兼容旧原地 kernel；新 SQL transform 不应放入这里。
-	Transforms   []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
-	Sink         Sink
-	Dependencies []*Pipeline
+	Source        Source
+	Operators     []Operator          // Operators 保留兼容旧原地 kernel；新 SQL transform 不应放入这里。
+	Transforms    []TransformOperator // Transforms 按声明顺序执行，并由 runner 集中管理 replacement ownership。
+	Sink          Sink
+	Dependencies  []*Pipeline
+	// SkipDependencies reuses already materialized state. Dependencies must be
+	// unstarted; their resources are closed before this stage runs normally.
+	SkipDependencies func() bool
 	// Abort 仅用于“dependency 失败导致本 Pipeline 根本未运行”时回收当前节点已创建的 ownership。
 	// 成功运行、当前 Pipeline 自身失败、cycle 检测都不会通过此字段重复清理。
 	Abort func() error
@@ -205,8 +208,15 @@ func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Obse
 		}
 		state[p] = visiting
 		mu.Unlock()
+		skip := p.SkipDependencies != nil && p.SkipDependencies()
 		for _, d := range p.Dependencies {
-			if err := visit(d); err != nil {
+			var err error
+			if skip {
+				err = AbortUnstarted(d)
+			} else {
+				err = visit(d)
+			}
+			if err != nil {
 				// 当前 Pipeline 尚未运行；若它已经持有 join/runtime 等 ownership，必须在 dependency 错误返回前释放。
 				var abortErr error
 				if p.Abort != nil {

@@ -120,7 +120,7 @@ func (j *ExternalHashJoin) probeResidentBatch(ctx context.Context, chunk *vector
 			}
 			buildRows[i] = row
 		}
-		matches, err := comparer.SelectEqual(activeRows[:n], j.buildLayout, buildRows[:n], j.buildKeys, exechash.NullsUnequal, selection[:n])
+		matches, err := comparer.SelectEqual(activeRows[:n], j.buildLayout, buildRows[:n], j.buildKeys, j.nullEquality(), selection[:n])
 		if err != nil {
 			return err
 		}

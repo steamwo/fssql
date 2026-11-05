@@ -62,11 +62,13 @@ const (
 	KeywordTrue
 	KeywordFalse
 	Concat // appended to preserve existing token numeric identities
+	Parameter
+	KeywordUnion
 )
 
 type Token struct {
 	Kind Kind
-	Raw string
+	Raw  string
 	Text string
 	Span ast.Span
 }

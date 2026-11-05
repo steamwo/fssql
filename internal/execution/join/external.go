@@ -24,6 +24,7 @@ const (
 )
 
 type ExternalConfig struct {
+	NullsEqual          bool // Parameter-domain identity includes NULL keys.
 	Type                Type
 	RequiredOutput      []bool // nil keeps all output columns; otherwise full schema width.
 	LeftTypes           []types.LogicalType
@@ -52,6 +53,13 @@ type ExternalStats struct {
 	PeakResidentBytes       int64
 	BuildRows               uint64
 	ProbeRows               uint64
+}
+
+func (j *ExternalHashJoin) nullEquality() exechash.NullEquality {
+	if j.config.NullsEqual {
+		return exechash.NullsEqual
+	}
+	return exechash.NullsUnequal
 }
 
 const externalPartitionMetadataBytes = 128
@@ -862,7 +870,7 @@ func (j *ExternalHashJoin) matchRecord(ctx context.Context, build recordReader, 
 		if !valid {
 			return errors.New("invalid build record")
 		}
-		equal, err := exechash.EqualProjectedRows(j.buildLayout, buildRow, j.buildKeys, j.probeLayout, probeRow, j.probeKeys, exechash.NullsUnequal)
+		equal, err := exechash.EqualProjectedRows(j.buildLayout, buildRow, j.buildKeys, j.probeLayout, probeRow, j.probeKeys, j.nullEquality())
 		if err != nil {
 			return err
 		}
@@ -1073,7 +1081,7 @@ func (j *ExternalHashJoin) terminalNestedLoop(ctx context.Context, buildSet, pro
 					if buildHash != probeHash {
 						return nil
 					}
-					eq, err := exechash.EqualProjectedRows(j.buildLayout, buildRow, j.buildKeys, j.probeLayout, probeRow, j.probeKeys, exechash.NullsUnequal)
+					eq, err := exechash.EqualProjectedRows(j.buildLayout, buildRow, j.buildKeys, j.probeLayout, probeRow, j.probeKeys, j.nullEquality())
 					if err != nil || !eq {
 						return err
 					}

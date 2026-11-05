@@ -68,6 +68,15 @@ type phase5CTEOperator struct {
 
 var _ blocking.Operator = (*phase5CTEOperator)(nil)
 
+func (o *phase5CTEOperator) ReuseReady() bool {
+	if o == nil || o.cache == nil {
+		return false
+	}
+	o.cache.mu.Lock()
+	defer o.cache.mu.Unlock()
+	return o.cache.ready
+}
+
 func newPhase5CTEOperator(f *ExternalSortFactory, key string) (blocking.Operator, error) {
 	cache, err := phase5CTECacheFor(f, key)
 	if err != nil { return nil, err }

@@ -18,6 +18,7 @@ import (
 	"github.com/steamwo/fssql/internal/query"
 	"github.com/steamwo/fssql/internal/security"
 	"github.com/steamwo/fssql/internal/session"
+	"github.com/steamwo/fssql/internal/sql/ast"
 	s3remote "github.com/steamwo/fssql/internal/storage/remote/s3"
 	storagetemp "github.com/steamwo/fssql/internal/storage/temp"
 	"github.com/steamwo/fssql/internal/storage/vfs"
@@ -288,6 +289,10 @@ func (db *DB) Exec(ctx context.Context, sql string) error {
 }
 
 func (db *DB) prepare(ctx context.Context, sql string) (*query.Context, session.PreparedStatement, []Column, error) {
+	return db.prepareParsed(ctx, sql, nil)
+}
+
+func (db *DB) prepareParsed(ctx context.Context, sql string, parsed ast.Statement) (*query.Context, session.PreparedStatement, []Column, error) {
 	if db == nil || db.engine == nil || db.memory == nil || db.temporary == nil {
 		return nil, nil, nil, errors.New("gosql: DB is uninitialized")
 	}
@@ -302,7 +307,12 @@ func (db *DB) prepare(ctx context.Context, sql string) (*query.Context, session.
 		return nil, nil, nil, err
 	}
 	q := query.NewWithTemp(ctx, db.memory, tempScope)
-	prepared, err := db.engine.Prepare(ctx, q, sql)
+	var prepared session.PreparedStatement
+	if parsed == nil {
+		prepared, err = db.engine.Prepare(ctx, q, sql)
+	} else {
+		prepared, err = db.engine.PrepareParsed(ctx, q, sql, parsed)
+	}
 	if err != nil {
 		closeErr := q.Close()
 		return nil, nil, nil, errors.Join(err, closeErr)

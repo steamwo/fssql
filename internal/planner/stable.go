@@ -121,15 +121,24 @@ func (p *QueryPlanner) planStableNoSource(ctx context.Context, query *binder.Bou
 		return nil, fmt.Errorf("query planner: scalar subquery lowering is not implemented")
 	}
 	root := &LogicalPlan{Kind: LogicalOneRow}
+	var err error
 	if query.Where != nil {
-		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Predicate: query.Where}
+		var predicate *binder.BoundExpression
+		root, predicate, err = p.lowerSubqueryExpression(ctx, root, query.Where)
+		if err != nil {
+			return nil, err
+		}
+		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Predicate: predicate}
 	}
 	projection := make([]*binder.BoundExpression, len(query.Projection))
 	for i, item := range query.Projection {
 		if item.Expression == nil {
 			return nil, fmt.Errorf("query planner: projection %d is nil", i)
 		}
-		projection[i] = item.Expression
+		root, projection[i], err = p.lowerSubqueryExpression(ctx, root, item.Expression)
+		if err != nil {
+			return nil, err
+		}
 	}
 	root = &LogicalPlan{
 		Kind:       LogicalProject,
@@ -159,7 +168,17 @@ func prepareStableOrder(base *binder.BoundQuery, terms []binder.BoundOrderTerm, 
 			return nil, false, fmt.Errorf("query planner: ORDER BY term %d is nil", i)
 		}
 		index := term.OutputIndex
-		if term.UsesOutput {
+		usesOutput := term.UsesOutput
+		if distinct && !usesOutput {
+			for j, item := range base.Projection {
+				if aggregateExpressionEqual(item.Expression, term.Expression) {
+					index = j
+					usesOutput = true
+					break
+				}
+			}
+		}
+		if usesOutput {
 			if index < 0 || index >= len(base.Output) {
 				return nil, false, fmt.Errorf("query planner: ORDER BY output index %d out of range", index)
 			}

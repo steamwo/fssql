@@ -14,6 +14,7 @@ import (
 )
 
 type phase5WindowState struct {
+ distinctPrevious *vector.DataChunk
 	mu sync.Mutex
 	partition []ScalarValue
 	rowNumber int64
@@ -25,7 +26,7 @@ type phase5WindowState struct {
 var phase5WindowStateMu sync.Mutex
 var phase5WindowStates = map[*Executor]map[*binder.BoundExpression]*phase5WindowState{}
 
-func ReleasePhase5State(e *Executor){phase5WindowStateMu.Lock();delete(phase5WindowStates,e);phase5WindowStateMu.Unlock()}
+func ReleasePhase5State(e *Executor){phase5WindowStateMu.Lock();for _,state:=range phase5WindowStates[e]{if state.distinctPrevious!=nil{state.distinctPrevious.Release();state.distinctPrevious=nil}};delete(phase5WindowStates,e);phase5WindowStateMu.Unlock()}
 func phase5State(e *Executor,expr *binder.BoundExpression)*phase5WindowState{phase5WindowStateMu.Lock();defer phase5WindowStateMu.Unlock();m:=phase5WindowStates[e];if m==nil{m=map[*binder.BoundExpression]*phase5WindowState{};phase5WindowStates[e]=m};s:=m[expr];if s==nil{s=&phase5WindowState{};m[expr]=s};return s}
 
 type runtimeWindowSpec struct{partition,order int;frame string}

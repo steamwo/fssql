@@ -59,7 +59,7 @@ func physicalSortOverHiddenProject() *planner.PhysicalPlan {
 	child := hiddenProjectPhysical()
 	return &planner.PhysicalPlan{
 		Kind: planner.PhysicalSort, Children: []*planner.PhysicalPlan{child}, Output: child.Output,
-		Sort: []planner.SortKey{{Expr: key, Descending: true}},
+		Sort:     []planner.SortKey{{Expr: key, Descending: true}},
 		Estimate: planner.CardinalityEstimate{Rows: 11, Confidence: 0.7},
 	}
 }
@@ -111,6 +111,9 @@ func TestBuildHiddenProjectSortDropLimitDAG(t *testing.T) {
 	}
 	if sorts.calls.Load() != 1 || sources.calls != 1 || len(sorts.keys) != 1 || sorts.keys[0].Expr.ColumnIndex != 1 || sorts.estimate.Rows != 11 {
 		t.Fatalf("sort calls=%d source=%d keys=%+v estimate=%+v", sorts.calls.Load(), sources.calls, sorts.keys, sorts.estimate)
+	}
+	if !root.PreserveOrder {
+		t.Fatal("sorted stage must preserve order before LIMIT")
 	}
 	bridge, ok := root.Source.(*blocking.Bridge)
 	if !ok {

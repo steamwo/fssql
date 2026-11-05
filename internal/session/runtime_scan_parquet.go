@@ -116,6 +116,9 @@ func parquetColumnIndex(expression *binder.BoundExpression) (int, bool) {
 		return 0, false
 	}
 	for expression.Kind == binder.BoundCast && len(expression.Children) == 1 {
+		if !parquetSafeCast(expression.Children[0].Type, expression.Type) {
+			return 0, false
+		}
 		expression = expression.Children[0]
 	}
 	if expression.Kind != binder.BoundColumn || expression.ColumnIndex < 0 {
@@ -164,6 +167,9 @@ func parquetLiteral(expression *binder.BoundExpression) (formatscan.Literal, boo
 	}
 	target := expression.Type
 	for expression.Kind == binder.BoundCast && len(expression.Children) == 1 {
+		if !parquetSafeCast(expression.Children[0].Type, expression.Type) {
+			return formatscan.Literal{}, false
+		}
 		expression = expression.Children[0]
 	}
 	if expression.Kind == binder.BoundNull {
@@ -200,4 +206,30 @@ func parquetLiteral(expression *binder.BoundExpression) (formatscan.Literal, boo
 		return formatscan.Literal{}, false
 	}
 	return out, true
+}
+
+// Stripping a cast is safe only when it preserves every input value exactly.
+// Narrowing, text/numeric and lossy floating conversions remain residual.
+func parquetSafeCast(from, to types.LogicalType) bool {
+	if from.Same(to) {
+		return true
+	}
+	if from.IsUnsignedInteger() || to.IsUnsignedInteger() {
+		return false
+	}
+	rank := func(t types.LogicalType) int {
+		switch t.ID {
+		case types.TinyInt:
+			return 1
+		case types.SmallInt:
+			return 2
+		case types.Integer:
+			return 3
+		case types.BigInt:
+			return 4
+		}
+		return 0
+	}
+	a, b := rank(from), rank(to)
+	return (a > 0 && b > a) || (from.ID == types.Float && to.ID == types.Double)
 }

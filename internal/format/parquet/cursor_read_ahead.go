@@ -21,6 +21,9 @@ func (c *ColumnCursor) releaseHeaderTail() {
 func (c *ColumnCursor) readPageBody(ctx context.Context, offset, length int64) (*memory.Buffer, error) {
 	next := offset + length // Bounds were checked by loadPage before this call.
 	extra := min(pageHeaderPiggyback, c.end-next)
+	if c.index != nil && len(c.index.pages) > 0 {
+		extra = 0
+	}
 	if extra <= 0 {
 		c.releaseHeaderTail()
 		return c.readRange(ctx, offset, length, memory.TagParquetCompressed)

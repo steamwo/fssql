@@ -118,6 +118,11 @@ func (e *Executor) binary(expr *BoundExpression, c *vector.DataChunk) (*vector.V
 	if expr.Kind == Equal || expr.Kind == LessThan || expr.Kind == And || expr.Kind == Or { outType = types.LogicalType{ID: types.Boolean} }
 	out, err := vector.NewFlat(e.Scope, e.Buffers, outType, c.Cardinality)
 	if err != nil { return nil, err }
+	if booleanBatch(expr.Kind, a, b, out, c.Cardinality) { return out, nil }
+	if handled, err := int64ArithmeticBatch(expr.Kind, a, b, out, c.Cardinality); handled {
+		if err != nil { out.Release(); return nil, err }
+		return out, nil
+	}
 	for i := 0; i < c.Cardinality; i++ {
 		switch expr.Kind {
 		case And, Or:

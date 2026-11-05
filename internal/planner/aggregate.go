@@ -15,15 +15,25 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 	if query == nil {
 		return nil, fmt.Errorf("query planner: nil aggregate query")
 	}
-	if query.Source == nil {
-		return nil, fmt.Errorf("query planner: aggregate SELECT without FROM requires one-row source lowering")
-	}
-	root, err := p.planRelation(ctx, query.Source)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	root := &LogicalPlan{Kind: LogicalOneRow}
+	if query.Source != nil {
+		var err error
+		root, err = p.planRelation(ctx, query.Source)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if query.Where != nil {
-		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Output: clonePlannerColumns(root.Output), Predicate: query.Where}
+		var predicate *binder.BoundExpression
+		var err error
+		root, predicate, err = p.lowerSubqueryExpression(ctx, root, query.Where)
+		if err != nil {
+			return nil, err
+		}
+		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Output: clonePlannerColumns(root.Output), Predicate: predicate}
 	}
 
 	collector := newAggregateCollector(query.GroupBy)
@@ -49,11 +59,19 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 		preProjection = append(preProjection, cloneAggregateExpression(argument))
 		preOutput = append(preOutput, Column{Name: fmt.Sprintf("__fssql_agg_arg_%d", i), Type: cloneQueryPlannerType(argument.Type), Nullable: argument.Nullable})
 	}
+	for i, expr := range preProjection {
+		var err error
+		root, preProjection[i], err = p.lowerSubqueryExpression(ctx, root, expr)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if len(preProjection) != 0 {
 		root = &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{root}, Output: preOutput, Projection: preProjection}
 	}
 
 	aggregates := make([]AggregateSpec, len(collector.aggregates))
+	distinctArguments := map[int]int{}
 	aggregateOutput := make([]Column, 0, len(collector.groups)+len(collector.aggregates))
 	aggregateOutput = append(aggregateOutput, preOutput[:len(collector.groups)]...)
 	for i, aggregateExpr := range collector.aggregates {
@@ -64,6 +82,19 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 				return nil, fmt.Errorf("query planner: aggregate argument provenance missing")
 			}
 			columnIndex := len(collector.groups) + argumentIndex
+			if aggregateExpr.Distinct && aggregateExpr.FunctionID != function.MinID && aggregateExpr.FunctionID != function.MaxID {
+				if marked, ok := distinctArguments[columnIndex]; ok {
+					columnIndex = marked
+				} else {
+					var err error
+					original := columnIndex
+					root, columnIndex, err = markDistinctArgument(root, groupColumns, columnIndex)
+					if err != nil {
+						return nil, err
+					}
+					distinctArguments[original] = columnIndex
+				}
+			}
 			arguments[j] = &binder.BoundExpression{Kind: binder.BoundColumn, Type: cloneQueryPlannerType(child.Type), Nullable: child.Nullable, ColumnIndex: columnIndex}
 		}
 		output := Column{Name: fmt.Sprintf("__fssql_aggregate_%d", i), Type: cloneQueryPlannerType(aggregateExpr.Type), Nullable: aggregateExpr.Nullable}
@@ -86,6 +117,10 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 		if err != nil {
 			return nil, err
 		}
+		root, predicate, err = p.lowerSubqueryExpression(ctx, root, predicate)
+		if err != nil {
+			return nil, err
+		}
 		root = &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{root}, Output: clonePlannerColumns(root.Output), Predicate: predicate}
 	}
 
@@ -94,7 +129,11 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 		if item.Expression == nil {
 			return nil, fmt.Errorf("query planner: projection %d is nil", i)
 		}
+		var err error
 		projection[i], err = collector.rewritePostAggregate(item.Expression)
+		if err == nil {
+			root, projection[i], err = p.lowerSubqueryExpression(ctx, root, projection[i])
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -107,9 +146,10 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 }
 
 type aggregateCollector struct {
-	groups     []*binder.BoundExpression
-	aggregates []*binder.BoundExpression
-	arguments  []*binder.BoundExpression
+	outerAggregates map[*binder.BoundExpression]*binder.BoundExpression
+	groups          []*binder.BoundExpression
+	aggregates      []*binder.BoundExpression
+	arguments       []*binder.BoundExpression
 }
 
 func newAggregateCollector(groups []*binder.BoundExpression) *aggregateCollector {
@@ -125,8 +165,13 @@ func (c *aggregateCollector) collect(expr *binder.BoundExpression) error {
 	if expr == nil {
 		return nil
 	}
-	if expr.Kind == binder.BoundSubquery {
+	if expr.Kind == binder.BoundSubquery && !plannedSubquery(expr) {
 		return fmt.Errorf("query planner: scalar subquery inside aggregate query is not lowered yet")
+	}
+	if expr.Kind == binder.BoundSubquery {
+		if err := c.collectCorrelatedAggregates(expr.Subquery); err != nil {
+			return err
+		}
 	}
 	if expr.Kind == binder.BoundFunction && expr.FunctionKind == function.Aggregate {
 		if c.aggregateIndex(expr) < 0 {
@@ -191,7 +236,23 @@ func (c *aggregateCollector) rewritePostAggregate(expr *binder.BoundExpression) 
 	if expr.Kind == binder.BoundColumn {
 		return nil, fmt.Errorf("query planner: ungrouped column %d remained after aggregate binding", expr.ColumnIndex)
 	}
-	if expr.Kind == binder.BoundSubquery {
+	if expr.Kind == binder.BoundSubquery && binder.QueryCorrelated(expr.Subquery) {
+		out := *expr
+		var err error
+		out.Subquery, err = c.rewriteCorrelatedAggregateQuery(expr.Subquery)
+		if err != nil {
+			return nil, err
+		}
+		out.Children = make([]*binder.BoundExpression, len(expr.Children))
+		for i, child := range expr.Children {
+			out.Children[i], err = c.rewritePostAggregate(child)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return &out, nil
+	}
+	if expr.Kind == binder.BoundSubquery && !plannedSubquery(expr) {
 		return nil, fmt.Errorf("query planner: scalar subquery inside aggregate query is not lowered yet")
 	}
 	out := cloneAggregateExpression(expr)
@@ -224,7 +285,7 @@ func aggregateExpressionEqual(left, right *binder.BoundExpression) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	if left.Kind != right.Kind || left.ColumnIndex != right.ColumnIndex || left.Op != right.Op || left.FunctionID != right.FunctionID || left.FunctionKind != right.FunctionKind || left.Literal != right.Literal || left.Nullable != right.Nullable || !queryPlannerTypeEqual(left.Type, right.Type) || len(left.Children) != len(right.Children) {
+	if left.Kind != right.Kind || left.Distinct != right.Distinct || left.Depth != right.Depth || left.Subquery != right.Subquery || left.ColumnIndex != right.ColumnIndex || left.Op != right.Op || left.FunctionID != right.FunctionID || left.FunctionKind != right.FunctionKind || left.Literal != right.Literal || left.Nullable != right.Nullable || !queryPlannerTypeEqual(left.Type, right.Type) || len(left.Children) != len(right.Children) {
 		return false
 	}
 	for i := range left.Children {

@@ -23,6 +23,7 @@ type RowGroupScanMetrics struct {
 	TransferredBytes int64
 	UsefulBytes      int64
 	PagesRead        int64
+	PagesSkipped     int64
 	DataValues       int64
 }
 
@@ -55,6 +56,9 @@ type RowGroupScanner struct {
 	closed        bool
 	finalMetrics  RowGroupScanMetrics
 	metricsFrozen bool
+	filters       []scanBatchFilter
+	scope         *memory.Scope
+	buffers       *memory.BufferManager
 }
 
 func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, tree *SchemaTree, rg RowGroup, requested []string, filters []scan.Filter, scope *memory.Scope, bm *memory.BufferManager, batchSize int) (*RowGroupScanner, error) {
@@ -77,6 +81,7 @@ func NewRowGroupScanner(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdent
 		s.skipped = true
 		return s, nil
 	}
+	defer func() { s.initFilters(filters, scope, bm) }()
 
 	explicit := nonEmptyProjectionNames(requested)
 	if len(explicit) == 0 && tree.Root != nil {
@@ -195,6 +200,12 @@ func projectedReaderForNode(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectI
 		if err != nil {
 			return nil, err
 		}
+		for _, chunk := range rg.Columns {
+			if chunk.MetaData == meta {
+				cursor.configurePageIndex(chunk)
+				break
+			}
+		}
 		return &scalarColumnReader{cursor: cursor}, nil
 	}
 	listNode, err := standardListAncestor(node)
@@ -257,6 +268,9 @@ func (s *RowGroupScanner) Next(ctx context.Context) (*vector.DataChunk, error) {
 	if s.skipped || s.position >= s.rowGroup.NumRows {
 		return nil, io.EOF
 	}
+	if len(s.filters) > 0 {
+		return s.nextFiltered(ctx)
+	}
 	remaining := s.rowGroup.NumRows - s.position
 	rows := s.batchSize
 	if int64(rows) > remaining {
@@ -307,13 +321,10 @@ func (s *RowGroupScanner) collectMetrics() RowGroupScanMetrics {
 		m.PlannedBytes += cm.PlannedBytes
 		m.TransferredBytes += cm.TransferredBytes
 		m.PagesRead += cm.PagesRead
+		m.PagesSkipped += cm.PagesSkipped
 		m.DataValues += cm.DataValues
-	}
-	if !s.skipped && s.position >= s.rowGroup.NumRows {
-		for _, idx := range s.plan.ColumnIndexes {
-			if idx >= 0 && idx < len(s.rowGroup.Columns) && s.rowGroup.Columns[idx].MetaData != nil {
-				m.UsefulBytes += s.rowGroup.Columns[idx].MetaData.TotalCompressedSize
-			}
+		if !s.skipped && s.position >= s.rowGroup.NumRows {
+			m.UsefulBytes += cm.UsefulBytes
 		}
 	}
 	return m

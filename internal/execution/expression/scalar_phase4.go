@@ -48,6 +48,7 @@ type ScalarRegistry map[function.ID]ScalarRuntime
 
 func (e *Executor) executeScalarFunction(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if expr == nil || expr.FunctionKind != function.Scalar { return nil, fmt.Errorf("scalar execution requires scalar BoundFunction") }
+	if expr.FunctionID == function.DistinctValueID { return e.executeDistinctValue(expr,chunk) }
 	if expr.FunctionID == function.CaseWhenID { return e.executeCaseWhen(expr, chunk) }
 	if expr.FunctionID == function.CoalesceID { return e.executeCoalesce(expr, chunk) }
 	if expr.FunctionID >= function.FirstCastFunctionID && expr.FunctionID < function.FirstDynamicScalarID { return e.executeCastFunction(expr, chunk) }
@@ -58,6 +59,7 @@ func (e *Executor) executeScalarFunction(expr *binder.BoundExpression, chunk *ve
 	}
 	defer releaseScalarVectors(args)
 	if expr.FunctionID == function.RepeatID { return e.executeManagedRepeat(args, chunk.Cardinality) }
+	if out, handled, err := e.executeStringBatch(expr, args, chunk.Cardinality); handled { return out, err }
 	out, err := vector.NewFlat(e.Scope, e.Buffers, expr.Type, chunk.Cardinality); if err != nil { return nil, err }
 	for row:=0; row<chunk.Cardinality; row++ {
 		values:=make([]ScalarValue,len(args)); anyNull:=false
@@ -134,6 +136,7 @@ func writeScalarValue(dst *vector.Vector,row int,t types.LogicalType,value Scala
 }
 
 func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []ScalarValue)(ScalarValue,error){
+ if id==function.InListID||id==function.BetweenID||id==function.LikeID||id==function.MembershipMarkID||id==function.ScalarCardinalityID{return evalPredicate(id,args)}
 	propagate:=func()bool{for _,a:=range args{if !a.Valid{return true}};return false}
 	if id!=function.LeastID&&id!=function.GreatestID&&id!=function.NullIfID&&propagate(){return ScalarValue{Type:resultType,Valid:false},nil}
 	out:=ScalarValue{Type:resultType,Valid:true}
@@ -177,6 +180,8 @@ func (e *Executor) executeCastFunction(expr *binder.BoundExpression,chunk *vecto
 func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
 	if !v.Valid{return ScalarValue{Type:target,Valid:false},nil}
 	if v.Type.Same(target){v.Type=target;return v,nil}
+	if v.Type.ID==types.HugeInt||target.ID==types.HugeInt{return castHugeIntScalar(v,target)}
+	if v.Type.ID==types.Decimal&&(phase4CastSignedIntegerType(target)||target.IsUnsignedInteger()){return castHugeIntScalar(v,target)}
 	out:=ScalarValue{Type:target,Valid:true}
 	if target.ID==types.Varchar&&!target.Binary{s,err:=scalarText(v);if err!=nil{return ScalarValue{},err};out.Bytes=[]byte(s);return out,nil}
 	if v.Type.ID==types.Varchar&&!v.Type.Binary{return parseScalarText(string(v.Bytes),target)}
@@ -188,7 +193,7 @@ func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
 		wide,ok:=types.Int128FromBig(n);if !ok{return ScalarValue{},fmt.Errorf("CAST DECIMAL overflow")};out.Int128=wide;return out,nil
 	}
 	if v.Type.ID==types.Decimal{
-		if target.ID==types.Double{f,_:=new(big.Rat).SetFrac(types.Int128Big(v.Int128),new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(v.Type.Decimal.Scale)),nil)).Float64();out.Float64=f;return out,nil}
+		if target.ID==types.Double||target.ID==types.Float{f,_:=new(big.Rat).SetFrac(types.Int128Big(v.Int128),new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(v.Type.Decimal.Scale)),nil)).Float64();out.Float64=f;return out,nil}
 		return ScalarValue{},fmt.Errorf("unsupported DECIMAL CAST")
 	}
 	if target.IsUnsignedInteger(){

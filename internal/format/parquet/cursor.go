@@ -27,6 +27,8 @@ type ColumnCursorMetrics struct {
 	PlannedBytes     int64
 	TransferredBytes int64
 	PagesRead        int64
+	PagesSkipped     int64
+	UsefulBytes      int64
 	DataValues       int64
 }
 
@@ -70,18 +72,22 @@ type ColumnCursor struct {
 	scope    *memory.Scope
 	bm       *memory.BufferManager
 
-	offset     int64
-	end        int64
-	consumed   int64
-	page       *columnPageState
-	pending    ColumnEntry
-	hasPending bool
-	dictionary *vector.Vector
-	headerTail *memory.Buffer
-	headerAt   int64
-	headerSize int
-	metrics    ColumnCursorMetrics
-	closed     bool
+	offset          int64
+	end             int64
+	consumed        int64
+	page            *columnPageState
+	pending         ColumnEntry
+	hasPending      bool
+	dictionary      *vector.Vector
+	headerTail      *memory.Buffer
+	headerAt        int64
+	headerSize      int
+	cachedHeader    PageHeader
+	cachedHeaderAt  int64
+	cachedHeaderLen int
+	metrics         ColumnCursorMetrics
+	closed          bool
+	index           *cursorPageIndex
 }
 
 func NewColumnCursor(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity, meta *ColumnMetaData, leaf *SchemaNode, scope *memory.Scope, bm *memory.BufferManager) (*ColumnCursor, error) {
@@ -123,6 +129,11 @@ func (c *ColumnCursor) Close() {
 	c.closed = true
 	c.releasePage()
 	c.releaseHeaderTail()
+	c.cachedHeader, c.cachedHeaderLen = PageHeader{}, 0
+	if c.index != nil {
+		c.index.close()
+		c.index = nil
+	}
 	if c.dictionary != nil {
 		c.dictionary.Release()
 		c.dictionary = nil
@@ -167,6 +178,11 @@ func (c *ColumnCursor) readRange(ctx context.Context, offset, length int64, tag 
 }
 
 func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, error) {
+	if c.cachedHeaderLen > 0 && c.cachedHeaderAt == c.offset {
+		return c.cachedHeader, c.cachedHeaderLen, nil
+	}
+	c.cachedHeader = PageHeader{}
+	c.cachedHeaderLen = 0
 	remaining := c.end - c.offset
 	if remaining <= 0 {
 		return PageHeader{}, 0, io.EOF
@@ -175,7 +191,7 @@ func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, err
 		h, used, err := DecodePageHeader(c.headerTail.Bytes()[:c.headerSize])
 		c.headerSize = 0
 		if err == nil && used > 0 && used <= int(remaining) {
-			return h, used, nil
+			return c.cachePageHeader(h, used)
 		}
 	}
 	probe := initialPageHeaderProbe
@@ -191,12 +207,15 @@ func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, err
 			return PageHeader{}, 0, err
 		}
 		h, used, decodeErr := DecodePageHeader(b.Bytes())
+		if decodeErr == nil {
+			h = ownPageStatistics(h)
+		}
 		b.Release()
 		if decodeErr == nil {
 			if used <= 0 || int64(used) > probe {
 				return PageHeader{}, 0, errors.New("parquet: invalid decoded page header length")
 			}
-			return h, used, nil
+			return c.cacheOwnedPageHeader(h, used)
 		}
 		lastErr = decodeErr
 		if probe >= remaining || probe >= maxPageHeaderProbe {
@@ -217,60 +236,83 @@ func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, err
 }
 
 func (c *ColumnCursor) loadPage(ctx context.Context) error {
+	_, err := c.loadPageSkipping(ctx, 0)
+	return err
+}
+
+// loadPageSkipping can advance complete scalar data pages from their headers.
+// The first partially needed page retains the normal decoder and validation.
+func (c *ColumnCursor) loadPageSkipping(ctx context.Context, rows int64) (int64, error) {
 	c.releasePage()
-	for c.consumed < c.meta.NumValues {
-		if c.offset >= c.end {
-			return io.ErrUnexpectedEOF
-		}
-		header, headerLen, err := c.readPageHeader(ctx)
+	skipped := int64(0)
+	if rows > 0 {
+		var err error
+		skipped, err = c.skipIndexedRows(ctx, rows)
 		if err != nil {
-			return err
+			return skipped, err
+		}
+		rows -= skipped
+		if rows == 0 {
+			return skipped, nil
+		}
+	}
+	for c.consumed < c.meta.NumValues {
+		if err := c.prepareIndexedRead(ctx); err != nil {
+			return skipped, err
+		}
+		header, headerLen, err := c.nextDataPageHeader(ctx)
+		if err != nil {
+			return skipped, err
+		}
+		count, _, err := c.scalarPageInfo(header)
+		if err != nil {
+			return skipped, err
+		}
+		if err := c.validateIndexedHeader(header, headerLen, count); err != nil {
+			return skipped, err
 		}
 		bodyOffset := c.offset + int64(headerLen)
 		bodyLen := int64(header.CompressedPageSize)
-		if bodyOffset < c.offset || bodyLen < 0 || bodyOffset > c.end || bodyLen > c.end-bodyOffset {
-			return errors.New("parquet: page body exceeds column chunk bounds")
+		if c.leaf.MaxRep == 0 && count > 0 && count <= rows {
+			c.advanceSkippedPage(headerLen, bodyLen, count)
+			rows -= count
+			skipped += count
+			if rows == 0 {
+				return skipped, nil
+			}
+			continue
 		}
 		body, err := c.readPageBody(ctx, bodyOffset, bodyLen)
 		if err != nil {
-			return err
+			return skipped, err
 		}
 		c.offset = bodyOffset + bodyLen
 		c.metrics.PagesRead++
+		c.metrics.UsefulBytes += int64(headerLen) + bodyLen
 
 		switch header.Type {
-		case PageDictionary:
-			if err := c.loadDictionary(header, body); err != nil {
-				body.Release()
-				return err
-			}
-			body.Release()
-			continue
-		case PageIndex:
-			body.Release()
-			continue
 		case PageData:
 			state, err := c.loadDataV1(header, body)
 			body.Release()
 			if err != nil {
-				return err
+				return skipped, err
 			}
 			c.page = state
-			return nil
+			return skipped, nil
 		case PageDataV2:
 			state, err := c.loadDataV2(header, body)
 			if err != nil {
 				body.Release()
-				return err
+				return skipped, err
 			}
 			c.page = state
-			return nil
+			return skipped, nil
 		default:
 			body.Release()
-			return fmt.Errorf("parquet: unsupported page type %d", header.Type)
+			return skipped, fmt.Errorf("parquet: unsupported page type %d", header.Type)
 		}
 	}
-	return io.EOF
+	return skipped, io.EOF
 }
 
 func (c *ColumnCursor) loadDictionary(header PageHeader, body *memory.Buffer) error {
@@ -507,29 +549,8 @@ func (c *ColumnCursor) ReadScalar(ctx context.Context, rows int) (*vector.Vector
 			out.Release()
 		}
 	}()
-	for i := 0; i < rows; {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		n, err := c.readScalarBatch(ctx, out, i, rows-i)
-		if err != nil {
-			return nil, err
-		}
-		if n > 0 {
-			i += n
-			continue
-		}
-		entry, err := c.NextInto(ctx, out, i)
-		if err != nil {
-			return nil, err
-		}
-		if entry.Repetition != 0 {
-			return nil, ErrRepeatedColumnRequiresLevelReader
-		}
-		if !entry.HasValue {
-			out.SetNull(i)
-		}
-		i++
+	if err := c.readScalarInto(ctx, out, 0, rows); err != nil {
+		return nil, err
 	}
 	keep = true
 	return out, nil

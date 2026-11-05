@@ -34,25 +34,34 @@ func (v *Vector) NewStringBatchWriter() (*StringBatchWriter, error) {
 }
 
 func (w *StringBatchWriter) Append(row int, src []byte) error {
+	return w.AppendParts(row, src, nil)
+}
+
+// AppendParts copies two byte slices directly into the owned destination,
+// avoiding an intermediate concatenation allocation.
+func (w *StringBatchWriter) AppendParts(row int, left, right []byte) error {
 	if w == nil || w.heap == nil {
 		return errors.New("string batch writer is closed")
 	}
 	if row < 0 || row >= w.count {
 		return errors.New("string batch row out of bounds")
 	}
-	if uint64(len(src)) > math.MaxUint32 {
+	size := uint64(len(left)) + uint64(len(right))
+	if size > math.MaxUint32 || size > uint64(int(^uint(0)>>1)) {
 		return errors.New("string batch value exceeds uint32 length")
 	}
+	length := int(size)
 	var ref StringRef
-	ref.Length = uint32(len(src))
-	if len(src) <= len(ref.Inline) {
-		copy(ref.Inline[:], src)
+	ref.Length = uint32(length)
+	if length <= len(ref.Inline) {
+		copy(ref.Inline[:], left)
+		copy(ref.Inline[len(left):], right)
 	} else {
 		const maxInt = int(^uint(0) >> 1)
-		if len(src) > maxInt-w.used {
+		if length > maxInt-w.used {
 			return errors.New("string batch heap size overflow")
 		}
-		need := w.used + len(src)
+		need := w.used + length
 		if need > len(w.heapData) {
 			next := len(w.heapData) * 2
 			if next < need {
@@ -63,7 +72,8 @@ func (w *StringBatchWriter) Append(row int, src []byte) error {
 			}
 			w.heapData = w.heap.buf.Bytes()
 		}
-		copy(w.heapData[w.used:need], src)
+		copy(w.heapData[w.used:need], left)
+		copy(w.heapData[w.used+len(left):need], right)
 		ref.Offset = uint64(w.used)
 		ref.External = true
 		w.used = need

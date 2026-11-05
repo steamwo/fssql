@@ -2,6 +2,7 @@ package expression
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
@@ -27,6 +28,16 @@ func (e *Executor) executeSQLBooleanBinary(expr *binder.BoundExpression, chunk *
 	out, err := vector.NewFlat(e.Scope, e.Buffers, types.LogicalType{ID: types.Boolean}, chunk.Cardinality)
 	if err != nil {
 		return nil, err
+	}
+	switch expr.Op {
+	case "AND":
+		if booleanBatch(And, left, right, out, chunk.Cardinality) {
+			return out, nil
+		}
+	case "OR":
+		if booleanBatch(Or, left, right, out, chunk.Cardinality) {
+			return out, nil
+		}
 	}
 	for row := 0; row < chunk.Cardinality; row++ {
 		x, xok := left.Bool(row)
@@ -113,6 +124,16 @@ func (e *Executor) executeSQLBigIntBinary(expr *binder.BoundExpression, chunk *v
 			value, err = semantics.SubInt64(x, y)
 		case "*":
 			value, err = semantics.MulInt64(x, y)
+		case "%":
+			if y == 0 {
+				out.Release()
+				return nil, fmt.Errorf("SQL expression executor: BIGINT modulo by zero")
+			}
+			if x == math.MinInt64 && y == -1 {
+				out.Release()
+				return nil, fmt.Errorf("SQL expression executor: BIGINT modulo overflow")
+			}
+			value = x % y
 		default:
 			out.Release()
 			return nil, fmt.Errorf("SQL expression executor: unsupported BIGINT operator %q", expr.Op)

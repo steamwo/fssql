@@ -74,6 +74,7 @@ type loweredStage struct {
 	transforms   []pipeline.TransformOperator
 	relationID   string
 	dependencies []*pipeline.Pipeline
+	ordered      bool
 }
 
 // Build 构造 PhysicalPlan -> Push Pipeline DAG。
@@ -108,7 +109,7 @@ func containsPhysicalJoin(plan *planner.PhysicalPlan) bool {
 	if plan == nil {
 		return false
 	}
-	if plan.Kind == planner.PhysicalHashJoin || plan.Kind == planner.PhysicalCrossJoin {
+	if plan.Kind == planner.PhysicalHashJoin || plan.Kind == planner.PhysicalCrossJoin || plan.Kind == planner.PhysicalUnionAll {
 		return true
 	}
 	for _, child := range plan.Children {
@@ -122,11 +123,12 @@ func containsPhysicalJoin(plan *planner.PhysicalPlan) bool {
 // pipelineForStage 把已经完整 lowered 的单输入 stage 组装为 Pipeline。
 func (b *Builder) pipelineForStage(stage loweredStage, sink pipeline.Sink) *pipeline.Pipeline {
 	return &pipeline.Pipeline{
-		ID:           "sql:" + stage.relationID,
-		Source:       stage.source,
-		Transforms:   stage.transforms,
-		Sink:         sink,
-		Dependencies: stage.dependencies,
+		ID:            "sql:" + stage.relationID,
+		Source:        stage.source,
+		Transforms:    stage.transforms,
+		Sink:          sink,
+		Dependencies:  stage.dependencies,
+		PreserveOrder: stage.ordered,
 	}
 }
 
@@ -180,7 +182,9 @@ func (b *Builder) lowerNode(ctx context.Context, plan *planner.PhysicalPlan) (lo
 	case planner.PhysicalDistinct:
 		return b.lowerDistinct(ctx, plan)
 	case planner.PhysicalSort:
-		return b.lowerSort(ctx, plan)
+		stage, err := b.lowerSort(ctx, plan)
+		stage.ordered = sortStageOrdered(plan.Sort)
+		return stage, err
 	case planner.PhysicalLimit:
 		limit, err := sqltransform.NewLimit(b.Executor, plan.Offset, plan.Limit, plan.Limit == planner.UnlimitedRows)
 		if err != nil {
@@ -213,6 +217,8 @@ func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan
 		return b.pipelineForStage(stage, sink), nil
 	}
 	switch plan.Kind {
+	case planner.PhysicalUnionAll:
+		return b.lowerUnion(ctx, plan, sink)
 	case planner.PhysicalFilter:
 		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
 		if err != nil {
@@ -252,15 +258,17 @@ func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan
 		if err != nil {
 			return nil, err
 		}
-		childRoot, err := b.buildJoinAware(ctx, plan.Children[0], bridge)
+		childRoot, err := b.buildJoinAware(ctx, plan.Children[0], materializerSink(operator, bridge))
 		if err != nil {
 			return nil, errors.Join(err, bridge.Close())
 		}
+		childRoot = materializerDependency(operator, bridge, childRoot)
 		return &pipeline.Pipeline{
-			ID:           childRoot.ID + ":" + suffix,
-			Source:       bridge,
-			Sink:         sink,
-			Dependencies: []*pipeline.Pipeline{childRoot},
+			ID:            childRoot.ID + ":" + suffix,
+			Source:        bridge,
+			Sink:          sink,
+			Dependencies:  []*pipeline.Pipeline{childRoot},
+			PreserveOrder: plan.Kind == planner.PhysicalSort && sortStageOrdered(plan.Sort),
 		}, nil
 	case planner.PhysicalHashJoin, planner.PhysicalCrossJoin:
 		return b.lowerJoinPipeline(ctx, plan, sink)
@@ -361,7 +369,9 @@ func (b *Builder) lowerJoinPipeline(ctx context.Context, plan *planner.PhysicalP
 	if err != nil {
 		return nil, errors.Join(err, pipeline.AbortUnstarted(buildRoot), closeBinaryRuntime(runtime))
 	}
-	probeRoot.Dependencies = append(probeRoot.Dependencies, buildRoot)
+	// A UNION probe can emit rows in its dependency stages. Finish the build
+	// before any probe dependency, rather than only before its root source.
+	probeRoot.Dependencies = append([]*pipeline.Pipeline{buildRoot}, probeRoot.Dependencies...)
 	probeRoot.Abort = combineAbort(probeRoot.Abort, func() error { return closeBinaryRuntime(runtime) })
 	return probeRoot, nil
 }
@@ -452,7 +462,8 @@ func (b *Builder) lowerBlockingStage(ctx context.Context, child *planner.Physica
 	if err != nil {
 		return loweredStage{}, errors.Join(err, bridge.Close())
 	}
-	childPipeline := b.pipelineForStage(childStage, bridge)
+	childPipeline := b.pipelineForStage(childStage, materializerSink(operator, bridge))
+	childPipeline = materializerDependency(operator, bridge, childPipeline)
 	return loweredStage{
 		source:       bridge,
 		relationID:   childStage.relationID + ":" + suffix,

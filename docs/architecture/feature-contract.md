@@ -43,7 +43,7 @@ Introspection：
 
 ## DEFERRED
 
-- Window Functions
+- Complete window-function coverage and general window frames
 - Recursive CTE
 - full correlated subquery decorrelation
 - UPDATE / DELETE / MERGE
@@ -55,3 +55,18 @@ Introspection：
 - remote spill
 - distributed execution
 - dynamic binary extension ABI
+
+## Implemented SQL extensions
+
+- TABLESAMPLE / USING SAMPLE with reservoir, Bernoulli and batch-based system sampling
+- random(), explicit numeric CAST and BIGINT modulo
+- FROM derived tables and non-correlated scalar subqueries combined with aggregates/HAVING
+- database/sql SELECT parameters and reusable parsed statements
+- Global aggregate SELECT without FROM, checked integer arithmetic and DECIMAL-to-integer CAST
+- IN lists/subqueries, BETWEEN, LIKE, EXISTS, UNION ALL, single-argument aggregate DISTINCT and JOIN USING
+- Equality fast paths and parameter-domain correlation for EXISTS/IN/scalars, non-equality predicates, constant per-parameter LIMIT/OFFSET, nested expression references and grouped outer outputs
+- Parameter propagation through derived tables/CTEs, UNION ALL and JOINs, subqueries in ON, and outer-owned aggregate calls
+- Explicit/implicit LATERAL derived SELECT inputs with INNER/CROSS/LEFT joins, and nested non-correlated scalar dependencies
+- Limited window functions: ROW_NUMBER, COUNT(*) and SUM; supported forms are validated explicitly by the parser
+
+These additions do not imply full DuckDB SQL compatibility. Dynamic table-function arguments, quantified ANY/ALL, general window frames and transactions remain unsupported. Correlation pushed through SAMPLE, non-constant correlated row limits and disallowed dependent join types are rejected as in DuckDB; see [subquery lowering](subquery-lowering.md) for the complete scope.

@@ -24,6 +24,8 @@ const (
 	BoundIsNull
 	BoundCast
 	BoundSubquery
+	// Runtime constants reserve kind 9 in runtime_constant.go.
+	BoundOuterColumn ExpressionKind = BoundRuntimeConstant + 1
 )
 
 // ColumnBinding 是输入 relation 中可解析列的控制面描述。
@@ -37,11 +39,13 @@ type ColumnBinding struct {
 
 // Scope 保存当前 expression binder 可见列；后续 query binder 负责构造 Scope。
 type Scope struct {
-	Columns []ColumnBinding // Columns 按 relation schema 顺序排列。
+	Columns []ColumnBinding // Visible columns retain their physical source indexes.
+	Aliases []ColumnBinding // Qualified bindings for merged USING keys.
 }
 
 // BoundExpression 是 parser AST 与 planner 之间的强类型逻辑表达式 IR。
 type BoundExpression struct {
+	Distinct     bool
 	Kind         ExpressionKind     // Kind 是 bound node 类别。
 	Span         ast.Span           // Span 保留源 SQL 位置用于诊断。
 	Type         types.LogicalType  // Type 是已解析结果类型；SQLNull=true 时暂为 Invalid。
@@ -54,6 +58,7 @@ type BoundExpression struct {
 	Literal      string             // Literal 保存已词法解码但未物化的常量文本。
 	Children     []*BoundExpression // Children 保存已绑定子表达式。
 	Subquery     *BoundQuery        // Subquery 仅对 BoundSubquery 有效；Planner 必须显式 lowering。
+	Depth        int                // Outer-column reference depth or aggregate owning-scope depth; zero is local.
 }
 
 // SubqueryBinder 是 expression Binder 与 query Binder 的窄桥；调用方负责保证不继承 outer relation Scope。
@@ -61,9 +66,10 @@ type SubqueryBinder func(*ast.SelectStmt) (*BoundQuery, error)
 
 // Binder 将 Own AST 绑定为强类型逻辑表达式，不创建 physical operator。
 type Binder struct {
-	Functions  *function.Catalog // Functions 是 generic FunctionCatalog。
-	Scope      Scope             // Scope 是当前 relation 可见列。
-	Subqueries SubqueryBinder    // Subqueries 仅由 QueryBinder 注入，用于 Stable non-correlated scalar subquery。
+	Functions   *function.Catalog // Functions 是 generic FunctionCatalog。
+	Scope       Scope             // Scope 是当前 relation 可见列。
+	Subqueries  SubqueryBinder    // Subqueries 仅由 QueryBinder 注入，用于 Stable non-correlated scalar subquery。
+	OuterScopes []Scope
 }
 
 // New 创建 expression Binder。
@@ -80,6 +86,21 @@ func (b *Binder) BindExpression(expr ast.Expr) (*BoundExpression, error) {
 		return nil, fmt.Errorf("binder: nil expression")
 	}
 	switch e := expr.(type) {
+	case *ast.InSubqueryExpr:
+		return b.bindInSubquery(e)
+	case *ast.ParameterExpr:
+		if e.Value == nil {
+			return nil, b.errorAt(e.Span, "unbound parameter")
+		}
+		value, err := b.BindExpression(e.Value)
+		if err != nil {
+			return nil, err
+		}
+		if literal, ok := e.Value.(*ast.LiteralExpr); ok && literal.Kind == ast.LiteralInteger {
+			value.Type = types.LogicalType{ID: types.BigInt}
+		}
+		value.Span = e.Span
+		return value, nil
 	case *ast.LiteralExpr:
 		return b.bindLiteral(e)
 	case *ast.NameExpr:
@@ -95,17 +116,44 @@ func (b *Binder) BindExpression(expr ast.Expr) (*BoundExpression, error) {
 		if err != nil {
 			return nil, err
 		}
+		if child.SQLNull {
+			child, err = b.coerce(child, types.LogicalType{ID: types.Varchar})
+			if err != nil {
+				return nil, err
+			}
+		}
 		return &BoundExpression{Kind: BoundIsNull, Span: e.Span, Type: types.LogicalType{ID: types.Boolean}, Nullable: false, Op: nullPredicateOp(e.Not), Children: []*BoundExpression{child}}, nil
 	case *ast.SubqueryExpr:
 		if b.Subqueries == nil {
 			return nil, fmt.Errorf("binder %d:%d: subquery requires query binder", e.Span.Start.Line, e.Span.Start.Column)
 		}
-		q, err := b.Subqueries(e.Query)
+		query := e.Query
+		if e.Exists && query != nil {
+			copyQuery := *query
+			copyQuery.Projection = append([]ast.SelectItem(nil), query.Projection...)
+			for i, item := range copyQuery.Projection {
+				if lit, ok := item.Expr.(*ast.LiteralExpr); ok && lit.Kind == ast.LiteralNull {
+					copyQuery.Projection[i].Expr = &ast.CallExpr{Span: lit.Span, Function: ast.QualifiedName{Parts: []ast.Identifier{{Name: "__fssql_cast_varchar"}}}, Args: []ast.Expr{lit}}
+				}
+			}
+			query = &copyQuery
+		}
+		q, err := b.Subqueries(query)
 		if err != nil {
 			return nil, err
 		}
-		if q == nil || len(q.Output) != 1 {
+		if q == nil || (!e.Exists && len(q.Output) != 1) {
 			return nil, b.errorAt(e.Span, "scalar subquery must return exactly one column")
+		}
+		for i, col := range q.Output {
+			if col.Type.ID == types.Invalid {
+				if err := resolveSubqueryNull(q, i, types.LogicalType{ID: types.Integer}, b); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if e.Exists {
+			return &BoundExpression{Kind: BoundSubquery, Span: e.Span, Type: types.LogicalType{ID: types.Boolean}, Op: "EXISTS", Subquery: q}, nil
 		}
 		return &BoundExpression{Kind: BoundSubquery, Span: e.Span, Type: cloneLogicalType(q.Output[0].Type), Nullable: true, Subquery: q}, nil
 	default:
@@ -159,6 +207,18 @@ func (b *Binder) bindLiteral(e *ast.LiteralExpr) (*BoundExpression, error) {
 func (b *Binder) bindName(e *ast.NameExpr) (*BoundExpression, error) {
 	c, err := b.Scope.Resolve(e.Name)
 	if err != nil {
+		if missing, ok := err.(*missingColumnError); !ok || missing == nil {
+			return nil, b.errorAt(e.Span, err.Error())
+		}
+		for depth, scope := range b.OuterScopes {
+			outer, outerErr := scope.Resolve(e.Name)
+			if outerErr == nil {
+				return &BoundExpression{Kind: BoundOuterColumn, Span: e.Span, Type: cloneLogicalType(outer.Type), Nullable: outer.Nullable, ColumnIndex: outer.Index, Depth: depth + 1}, nil
+			}
+			if _, missing := outerErr.(*missingColumnError); !missing {
+				return nil, b.errorAt(e.Span, outerErr.Error())
+			}
+		}
 		return nil, b.errorAt(e.Span, err.Error())
 	}
 	return &BoundExpression{Kind: BoundColumn, Span: e.Span, Type: cloneLogicalType(c.Type), Nullable: c.Nullable, ColumnIndex: c.Index}, nil
@@ -177,7 +237,11 @@ func (s Scope) Resolve(name ast.QualifiedName) (ColumnBinding, error) {
 	}
 	found := ColumnBinding{}
 	matches := 0
-	for _, c := range s.Columns {
+	candidates := s.Columns
+	if qualifier != nil {
+		candidates = append(append([]ColumnBinding(nil), s.Columns...), s.Aliases...)
+	}
+	for _, c := range candidates {
 		if !matchesIdentifier(c.Name, column) {
 			continue
 		}
@@ -188,7 +252,7 @@ func (s Scope) Resolve(name ast.QualifiedName) (ColumnBinding, error) {
 		matches++
 	}
 	if matches == 0 {
-		return ColumnBinding{}, fmt.Errorf("column %s not found", qualifiedText(name))
+		return ColumnBinding{}, &missingColumnError{name: qualifiedText(name)}
 	}
 	if matches > 1 {
 		return ColumnBinding{}, fmt.Errorf("column %s is ambiguous", qualifiedText(name))
@@ -320,7 +384,12 @@ func (b *Binder) bindCall(e *ast.CallExpr) (*BoundExpression, error) {
 			return nil, b.errorAt(e.Span, err.Error())
 		}
 	}
-	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: def.ID != function.CountID, FunctionID: def.ID, FunctionKind: def.Kind, Children: children}, nil
+	distinct := e.Distinct && def.ID != function.MinID && def.ID != function.MaxID
+	depth := 0
+	if def.Kind == function.Aggregate {
+		depth = aggregateArgumentDepth(children)
+	}
+	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: def.ID != function.CountID, FunctionID: def.ID, FunctionKind: def.Kind, Children: children, Distinct: distinct, Depth: depth}, nil
 }
 
 // coerceComparable 为比较运算找到共同类型；NULL 可隐式转换到任意目标类型。
@@ -435,6 +504,15 @@ func commonNumericType(a, b types.LogicalType) (types.LogicalType, error) {
 		}
 		return types.NewDecimal(38, scale)
 	}
+	if a.ID == types.HugeInt || b.ID == types.HugeInt {
+		return types.LogicalType{ID: types.HugeInt}, nil
+	}
+	if a.Unsigned != b.Unsigned {
+		if (a.IsUnsignedInteger() && a.ID == types.BigInt) || (b.IsUnsignedInteger() && b.ID == types.BigInt) {
+			return types.LogicalType{ID: types.HugeInt}, nil
+		}
+		return types.LogicalType{ID: types.BigInt}, nil
+	}
 	rank := numericIntegerRank
 	if rank(a.ID) >= rank(b.ID) {
 		return a, nil
@@ -458,6 +536,9 @@ func canImplicitCast(from, to types.LogicalType) bool {
 	}
 	if to.ID == types.Decimal {
 		return from.ID != types.Float && from.ID != types.Double
+	}
+	if from.Unsigned != to.Unsigned {
+		return from.IsUnsignedInteger() && !to.Unsigned && (to.ID == types.HugeInt || (to.ID == types.BigInt && from.ID != types.BigInt))
 	}
 	return numericIntegerRank(from.ID) > 0 && numericIntegerRank(to.ID) >= numericIntegerRank(from.ID)
 }
@@ -492,7 +573,7 @@ func isComparable(t types.LogicalType) bool {
 
 // sameType 比较 Binder 需要的 logical identity；复杂类型的深比较留给后续类型系统扩展。
 func sameType(a, b types.LogicalType) bool {
-	if a.ID != b.ID {
+	if a.ID != b.ID || a.Unsigned != b.Unsigned {
 		return false
 	}
 	if a.ID == types.Decimal {

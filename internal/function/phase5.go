@@ -17,6 +17,7 @@ const (
 
 func NewPhase5Catalog() *Catalog {
 	c := NewPhase4Catalog()
+ registerPredicates(c)
 	must := func(d Definition) { if err := c.Register(d); err != nil { panic(err) } }
 	must(Definition{ID: WindowRowNumberID, Name: "__fssql_window_row_number", Kind: Scalar, MinArgs: 1, MaxArgs: -1, Bind: bindWindowRowNumber})
 	must(Definition{ID: WindowCountID, Name: "__fssql_window_count", Kind: Scalar, MinArgs: 1, MaxArgs: -1, Bind: bindWindowCount})

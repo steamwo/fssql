@@ -50,22 +50,29 @@ const (
 	RelationTableFunction
 	RelationCTE
 	RelationJoin
+	RelationSample
+	RelationUnion
+	RelationProject
 )
 
 // BoundRelation 是 Planner 之前的 relation binding；不包含 runtime reader/operator。
 type BoundRelation struct {
+	Lateral     bool                     // CTEQuery adds a sibling-input scope boundary.
+	Dependent   bool                     // JOIN right input captures its left input.
 	Kind        BoundRelationKind        // Kind 是 relation 来源类别。
 	ID          string                   // ID 是 relation identity。
 	Alias       string                   // Alias 是列限定符。
 	Columns     []RelationColumn         // Columns 是该 relation 输出 schema。
 	Scope       Scope                    // Scope 保存表达式 Binder 使用的列序号/限定符。
-	Children    []*BoundRelation         // Children 仅 Join 使用。
+	Children    []*BoundRelation         // Children 保存 join/union/sample/project 的输入。
 	Join        ast.JoinType             // Join 仅 RelationJoin 使用。
 	Condition   *BoundExpression         // Condition 是已绑定 ON 条件。
 	FunctionID  function.ID              // FunctionID 仅 table function 使用。
 	Source      string                   // Source 仅当前 Stable reader table function 使用。
 	Fingerprint stats.DatasetFingerprint // Fingerprint 绑定真实 source snapshot。
 	CTEQuery    *BoundQuery              // CTEQuery 仅 RelationCTE 使用，保存已绑定 non-recursive CTE executable provenance。
+	Projection  []*BoundExpression
+	Materialize bool
 }
 
 // BoundSelectItem 保存 SELECT projection 的强类型结果。
@@ -99,12 +106,15 @@ type BoundQuery struct {
 
 // QueryBinder 绑定 SELECT/CTE/relation/table-function schema，不创建 Logical/Physical operator。
 type QueryBinder struct {
-	Functions      *function.Catalog     // Functions 是统一 FunctionCatalog。
-	Relations      RelationResolver      // Relations 解析 Catalog relation/view。
-	TableFunctions TableFunctionResolver // TableFunctions 调用真实 TableFunction.Bind schema path。
-	SourceSQL      string                // SourceSQL 仅用于无 alias projection 的稳定输出标签。
-	ctes           []boundCTE            // ctes 仅在当前 statement Query Binder 内可见。
-	blockedCTEs    []ast.Identifier      // blockedCTEs 阻止 self/forward CTE 被错误回退到 Catalog relation。
+	lateralScope        Scope
+	Functions           *function.Catalog     // Functions 是统一 FunctionCatalog。
+	Relations           RelationResolver      // Relations 解析 Catalog relation/view。
+	TableFunctions      TableFunctionResolver // TableFunctions 调用真实 TableFunction.Bind schema path。
+	SourceSQL           string                // SourceSQL 仅用于无 alias projection 的稳定输出标签。
+	ctes                []boundCTE            // ctes 仅在当前 statement Query Binder 内可见。
+	blockedCTEs         []ast.Identifier      // blockedCTEs 阻止 self/forward CTE 被错误回退到 Catalog relation。
+	allowNullProjection bool
+	outerScopes         []Scope
 }
 
 type boundCTE struct {
@@ -162,6 +172,9 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 		}
 	}
 
+	if stmt.UnionLeft != nil {
+		return local.bindUnionSelect(ctx, stmt)
+	}
 	var source *BoundRelation
 	var scope Scope
 	if stmt.From != nil {
@@ -180,8 +193,8 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 			if source == nil || len(scope.Columns) == 0 {
 				return nil, local.errorAt(item.Span, "SELECT * requires a FROM relation")
 			}
-			for j, col := range scope.Columns {
-				schemaCol := source.Columns[j]
+			for _, col := range scope.Columns {
+				schemaCol := source.Columns[col.Index]
 				e := &BoundExpression{Kind: BoundColumn, Span: item.Span, Type: cloneLogicalType(col.Type), Nullable: schemaCol.Nullable, ColumnIndex: col.Index}
 				o := RelationColumn{Name: schemaCol.Name, Type: cloneLogicalType(schemaCol.Type), Nullable: schemaCol.Nullable}
 				out.Projection = append(out.Projection, BoundSelectItem{Expression: e, Output: o})
@@ -194,7 +207,15 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 			return nil, err
 		}
 		if e.SQLNull {
-			return nil, local.errorAt(item.Span, "bare NULL projection requires a resolved logical type")
+			if _, parameter := item.Expr.(*ast.ParameterExpr); !parameter && !local.allowNullProjection {
+				return nil, local.errorAt(item.Span, "bare NULL projection requires a resolved logical type")
+			}
+			if !local.allowNullProjection {
+				e, err = exprs.coerce(e, types.LogicalType{ID: types.Varchar})
+				if err != nil {
+					return nil, err
+				}
+			}
 		}
 		name := local.projectionName(item, i)
 		o := RelationColumn{Name: name, Type: cloneLogicalType(e.Type), Nullable: e.Nullable}
@@ -270,9 +291,12 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 // newExpressionBinder 为当前 query scope 创建 expression Binder，并注入不继承 outer Scope 的 scalar-subquery Binder。
 func (b *QueryBinder) newExpressionBinder(ctx context.Context, scope Scope) *Binder {
 	exprs := New(b.Functions, scope)
+	exprs.OuterScopes = b.outerScopes
 	exprs.Subqueries = func(stmt *ast.SelectStmt) (*BoundQuery, error) {
 		child := *b
-		// QueryBinder 自身不保存 outer relation Scope；递归 BindSelect 只看到 subquery 自己的 FROM/CTE，因此 correlation 会解析失败。
+		child.allowNullProjection = true
+		child.outerScopes = append([]Scope{cloneScope(scope)}, b.outerScopes...)
+		// Local names shadow outer scopes; outer references retain their query depth for decorrelation.
 		return child.BindSelect(ctx, stmt)
 	}
 	return exprs
@@ -281,6 +305,14 @@ func (b *QueryBinder) newExpressionBinder(ctx context.Context, scope Scope) *Bin
 // bindTableExpr 将 FROM relation tree 绑定为 schema/scope；真实 I/O reader 仍未创建。
 func (b *QueryBinder) bindTableExpr(ctx context.Context, table ast.TableExpr) (*BoundRelation, error) {
 	switch t := table.(type) {
+	case *ast.DerivedTable:
+		return b.bindDerivedTable(ctx, t)
+	case *ast.SampleTableExpr:
+		input, err := b.bindTableExpr(ctx, t.Input)
+		if err != nil {
+			return nil, err
+		}
+		return &BoundRelation{Kind: RelationSample, ID: t.Spec, Columns: cloneRelationColumns(input.Columns), Scope: input.Scope, Children: []*BoundRelation{input}}, nil
 	case *ast.TableName:
 		return b.bindTableName(ctx, t)
 	case *ast.TableFunction:
@@ -364,20 +396,36 @@ func (b *QueryBinder) bindTableFunction(ctx context.Context, t *ast.TableFunctio
 	return &BoundRelation{Kind: RelationTableFunction, ID: r.ID, Alias: alias, Columns: cols, Scope: makeScope(alias, cols), FunctionID: def.ID, Source: source, Fingerprint: r.Fingerprint}, nil
 }
 
-// bindJoin 绑定左右 relation 与 ON predicate；USING 的列合并语义留给独立可验证子任务，当前显式拒绝而非错误降级。
+// bindJoin binds ON predicates and delegates USING key coalescing to its own binder.
 func (b *QueryBinder) bindJoin(ctx context.Context, j *ast.JoinExpr) (*BoundRelation, error) {
-	if len(j.Using) != 0 {
-		return nil, b.errorAt(j.Span, "JOIN USING binding is not implemented; use ON in current remediation")
-	}
 	left, err := b.bindTableExpr(ctx, j.Left)
 	if err != nil {
 		return nil, err
 	}
-	right, err := b.bindTableExpr(ctx, j.Right)
+	rightBinder := *b
+	rightBinder.lateralScope = cloneScope(left.Scope)
+	var right *BoundRelation
+	if group, ok := j.Right.(*ast.JoinExpr); ok {
+		right, err = rightBinder.bindJoinedInput(ctx, group)
+	} else {
+		right, err = rightBinder.bindTableExpr(ctx, j.Right)
+	}
 	if err != nil {
 		return nil, err
 	}
-	input := combineScopes(left.Scope, right.Scope)
+	dependent := relationHasLateralInput(right)
+	if dependent && j.Type != ast.JoinInner && j.Type != ast.JoinCross && j.Type != ast.JoinLeft {
+		return nil, b.errorAt(j.Span, "the combining JOIN type must be INNER or LEFT for a LATERAL reference")
+	}
+	if len(j.Using) != 0 {
+		joined, err := b.bindUsingJoin(j, left, right)
+		if err != nil {
+			return nil, err
+		}
+		markDependentJoin(joined, dependent)
+		return joined, nil
+	}
+	input := combineRelationScopes(left, right)
 	var condition *BoundExpression
 	if j.Type != ast.JoinCross {
 		if j.Condition == nil {
@@ -409,30 +457,21 @@ func (b *QueryBinder) bindJoin(ctx context.Context, j *ast.JoinExpr) (*BoundRela
 		}
 		input = makeJoinOutputScope(left, right, cols)
 	}
-	return &BoundRelation{Kind: RelationJoin, ID: "join", Columns: cols, Scope: input, Children: []*BoundRelation{left, right}, Join: j.Type, Condition: condition}, nil
+	return &BoundRelation{Kind: RelationJoin, ID: "join", Columns: cols, Scope: input, Children: []*BoundRelation{left, right}, Join: j.Type, Condition: condition, Dependent: dependent}, nil
 }
 
 // makeJoinOutputScope 保留左右 qualifier，同时把 outer-join nullability 写入 expression Scope。
 func makeJoinOutputScope(left, right *BoundRelation, cols []RelationColumn) Scope {
-	out := Scope{Columns: make([]ColumnBinding, 0, len(cols))}
-	for i, c := range left.Scope.Columns {
-		schema := cols[i]
-		c.Index = len(out.Columns)
-		c.Type = cloneLogicalType(schema.Type)
-		c.Nullable = schema.Nullable
-		out.Columns = append(out.Columns, c)
-	}
-	for i, c := range right.Scope.Columns {
-		idx := len(left.Columns) + i
-		if idx >= len(cols) {
-			break
+	out := combineRelationScopes(left, right)
+	update := func(bindings []ColumnBinding) {
+		for i := range bindings {
+			column := cols[bindings[i].Index]
+			bindings[i].Type = cloneLogicalType(column.Type)
+			bindings[i].Nullable = column.Nullable
 		}
-		schema := cols[idx]
-		c.Index = len(out.Columns)
-		c.Type = cloneLogicalType(schema.Type)
-		c.Nullable = schema.Nullable
-		out.Columns = append(out.Columns, c)
 	}
+	update(out.Columns)
+	update(out.Aliases)
 	return out
 }
 
@@ -543,19 +582,7 @@ func (b *QueryBinder) validateAggregateSemantics(q *BoundQuery) error {
 }
 
 func validateNoNestedAggregate(e *BoundExpression, insideAggregate bool) error {
-	if e == nil {
-		return nil
-	}
-	isAggregate := e.Kind == BoundFunction && e.FunctionKind == function.Aggregate
-	if isAggregate && insideAggregate {
-		return fmt.Errorf("nested aggregate is not allowed")
-	}
-	for _, child := range e.Children {
-		if err := validateNoNestedAggregate(child, insideAggregate || isAggregate); err != nil {
-			return err
-		}
-	}
-	return nil
+	return walkOwnedAggregates(e, insideAggregate, nil)
 }
 
 func validateGroupedExpression(e *BoundExpression, groups []*BoundExpression) error {
@@ -588,7 +615,7 @@ func boundExpressionEqual(a, b *BoundExpression) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.Kind != b.Kind || !sameType(a.Type, b.Type) || a.ColumnIndex != b.ColumnIndex || a.Op != b.Op || a.FunctionID != b.FunctionID || a.Literal != b.Literal || len(a.Children) != len(b.Children) {
+	if a.Kind != b.Kind || a.Distinct != b.Distinct || !sameType(a.Type, b.Type) || a.ColumnIndex != b.ColumnIndex || a.Op != b.Op || a.FunctionID != b.FunctionID || a.Literal != b.Literal || len(a.Children) != len(b.Children) {
 		return false
 	}
 	for i := range a.Children {
@@ -653,7 +680,7 @@ func combineScopes(left, right Scope) Scope {
 }
 
 func cloneScope(in Scope) Scope {
-	out := Scope{Columns: make([]ColumnBinding, len(in.Columns))}
+	out := Scope{Columns: make([]ColumnBinding, len(in.Columns)), Aliases: append([]ColumnBinding(nil), in.Aliases...)}
 	for i, c := range in.Columns {
 		out.Columns[i] = c
 		out.Columns[i].Type = cloneLogicalType(c.Type)
@@ -686,18 +713,7 @@ func cloneLogicalType(t types.LogicalType) types.LogicalType {
 }
 
 func containsAggregate(e *BoundExpression) bool {
-	if e == nil {
-		return false
-	}
-	if e.Kind == BoundFunction && e.FunctionKind == function.Aggregate {
-		return true
-	}
-	for _, child := range e.Children {
-		if containsAggregate(child) {
-			return true
-		}
-	}
-	return false
+	return ExpressionHasLocalAggregate(e)
 }
 
 func containsColumn(e *BoundExpression) bool {

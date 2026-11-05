@@ -166,14 +166,15 @@ func TestDatabaseSQLNullConversionUsesDriverNil(t *testing.T) {
 	}
 }
 
-func TestDatabaseSQLRejectsUnsupportedParameters(t *testing.T) {
+func TestDatabaseSQLPositionalParameter(t *testing.T) {
 	db, err := OpenSQLDB(Config{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.QueryContext(context.Background(), "SELECT ?", 1); err == nil {
-		t.Fatal("expected Stable v1 parameter rejection")
+	var value int64
+	if err := db.QueryRowContext(context.Background(), "SELECT ?", 1).Scan(&value); err != nil || value != 1 {
+		t.Fatalf("parameter result=%d err=%v", value, err)
 	}
 }
 

@@ -4,6 +4,10 @@ import decimal
 import json
 import sys
 
+# Go sends JSON as UTF-8, independently of the host's console code page.
+sys.stdin.reconfigure(encoding="utf-8")
+sys.stdout.reconfigure(encoding="utf-8")
+
 try:
     import duckdb
 except Exception as exc:

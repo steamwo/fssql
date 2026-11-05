@@ -57,11 +57,11 @@ func TestCountStarAndSQLNull(t *testing.T) {
 	}
 }
 
-// TestAggregateDistinctRejectedInStableV1 防止 COUNT(DISTINCT x) 被 Binder 丢失标志后静默按普通 aggregate 执行。
-func TestAggregateDistinctRejectedInStableV1(t *testing.T) {
+// Supported aggregate DISTINCT calls still reject invalid argument counts.
+func TestUnsupportedAggregateDistinctRejected(t *testing.T) {
 	c := NewBuiltinCatalog()
-	if _, _, err := c.BindCall("count", Aggregate, BindInput{
-		Arguments: []ArgumentType{{Type: types.LogicalType{ID: types.BigInt}}},
+	if _, _, err := c.BindCall("sum", Aggregate, BindInput{
+		Arguments: []ArgumentType{{Type: types.LogicalType{ID: types.BigInt}}, {Type: types.LogicalType{ID: types.BigInt}}},
 		Distinct:  true,
 	}); err == nil {
 		t.Fatal("expected aggregate DISTINCT rejection")

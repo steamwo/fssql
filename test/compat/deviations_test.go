@@ -105,7 +105,7 @@ func TestDuckDBReferenceMatchesDeviationRegistry(t *testing.T) {
 	}
 	registry := loadDeviationRegistry(t)
 	validateDeviationRegistry(t, registry, loadCorpus(t))
-	output, err := exec.Command("python3", "-c", "import duckdb; print(duckdb.__version__)").CombinedOutput()
+	output, err := exec.Command(duckDBPython(), "-c", "import duckdb; print(duckdb.__version__)").CombinedOutput()
 	if err != nil {
 		t.Fatalf("read DuckDB version: %v: %s", err, output)
 	}
@@ -113,6 +113,13 @@ func TestDuckDBReferenceMatchesDeviationRegistry(t *testing.T) {
 	if actual != registry.Reference.Version {
 		t.Fatalf("DuckDB reference version=%q registry=%q", actual, registry.Reference.Version)
 	}
+}
+
+func duckDBPython() string {
+	if executable := os.Getenv("FSSQL_PYTHON"); executable != "" {
+		return executable
+	}
+	return "python3"
 }
 
 func formatDifferentialMismatch(record sltRecord, ours []string, oursErr error, duck duckDBResult) string {

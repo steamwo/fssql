@@ -92,14 +92,14 @@ func TestStableSQLEngineScalarSubqueryMoreThanOneRowFails(t *testing.T) {
 	}
 }
 
-// TestStableSQLEngineCorrelatedScalarSubqueryRejected 验证 child Binder 不继承 outer Scope，correlation 不会被误当 non-correlated 执行。
-func TestStableSQLEngineCorrelatedScalarSubqueryRejected(t *testing.T) {
+// Correlated no-FROM projections are planned through the parameter domain.
+func TestStableSQLEngineCorrelatedScalarSubqueryPlanned(t *testing.T) {
 	manager := memory.NewManager(1 << 20)
 	buffers := memory.NewBufferManager(nil)
 	q := queryForScalarTest(context.Background(), manager)
 	engine := newSQLTestEngine(t, buffers)
-	if _, err := engine.Prepare(context.Background(), q, "SELECT id, (SELECT id) FROM read_csv('mem://rows.csv')"); err == nil {
-		t.Fatal("expected correlated scalar subquery rejection")
+	if _, err := engine.Prepare(context.Background(), q, "SELECT id, (SELECT id) FROM read_csv('mem://rows.csv')"); err != nil {
+		t.Fatal(err)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)

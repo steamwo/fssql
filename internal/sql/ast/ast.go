@@ -34,6 +34,17 @@ type TableExpr interface {
 	tableExprNode()
 }
 
+// SampleTableExpr samples its input without changing column qualifiers.
+type SampleTableExpr struct {
+	Span  Span
+	Input TableExpr
+	Spec  string
+	Using bool
+}
+
+func (*SampleTableExpr) tableExprNode()   {}
+func (s *SampleTableExpr) NodeSpan() Span { return s.Span }
+
 // Identifier 保存标识符原文与规范化名称。
 type Identifier struct {
 	Span   Span   // Span 是标识符源位置。
@@ -56,6 +67,8 @@ func (n QualifiedName) NodeSpan() Span { return n.Span }
 
 // SelectStmt 表示 v1 Stable SELECT 查询骨架。
 type SelectStmt struct {
+	UnionLeft  *SelectStmt
+	UnionRight *SelectStmt
 	Span       Span         // Span 覆盖完整 SELECT statement。
 	With       *WithClause  // With 是可选 non-recursive CTE。
 	Distinct   bool         // Distinct 表示 SELECT DISTINCT。
@@ -115,6 +128,18 @@ type OrderTerm struct {
 
 // NodeSpan 返回排序项的源位置。
 func (o OrderTerm) NodeSpan() Span { return o.Span }
+
+// DerivedTable keeps a FROM subquery in place for left-to-right name binding.
+type DerivedTable struct {
+	Span    Span
+	Query   *SelectStmt
+	Alias   Identifier
+	Columns []Identifier
+	Lateral bool
+}
+
+func (*DerivedTable) tableExprNode()   {}
+func (t *DerivedTable) NodeSpan() Span { return t.Span }
 
 // TableName 表示普通表引用。
 type TableName struct {
@@ -186,6 +211,17 @@ type LiteralExpr struct {
 	Value string      // Value 是去引号/规范化后的文本值。
 }
 
+// ParameterExpr is a prepared-statement value slot. Value is populated by
+// binding an immutable statement template, never by parsing parameter text.
+type ParameterExpr struct {
+	Span  Span
+	Slot  int
+	Value Expr
+}
+
+func (*ParameterExpr) exprNode()        {}
+func (e *ParameterExpr) NodeSpan() Span { return e.Span }
+
 func (*LiteralExpr) exprNode() {}
 
 // NodeSpan 返回字面量的源位置。
@@ -255,9 +291,20 @@ func (e *IsNullExpr) NodeSpan() Span { return e.Span }
 
 // SubqueryExpr 表示表达式位置上的非相关子查询语法节点；相关性由 Binder 判定。
 type SubqueryExpr struct {
-	Span  Span        // Span 包含左右括号。
-	Query *SelectStmt // Query 是子查询 statement。
+	Exists bool
+	Span   Span        // Span 包含左右括号。
+	Query  *SelectStmt // Query 是子查询 statement。
 }
+
+type InSubqueryExpr struct {
+	Span  Span
+	Value Expr
+	Query *SelectStmt
+	Not   bool
+}
+
+func (*InSubqueryExpr) exprNode()        {}
+func (e *InSubqueryExpr) NodeSpan() Span { return e.Span }
 
 func (*SubqueryExpr) exprNode() {}
 

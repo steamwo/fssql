@@ -18,7 +18,7 @@ func phase5RequiresSerialExecution(plan *planner.PhysicalPlan) bool {
 	}
 	if plan.Kind == planner.PhysicalProject {
 		for _, expr := range plan.Projection {
-			if expr != nil && expr.Kind == binder.BoundFunction && function.IsWindowID(expr.FunctionID) {
+			if expr != nil && expr.Kind == binder.BoundFunction && (function.IsWindowID(expr.FunctionID) || expr.FunctionID == function.DistinctValueID) {
 				return true
 			}
 		}
