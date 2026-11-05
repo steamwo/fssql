@@ -99,12 +99,33 @@ func parseCSVColumns(spec string) ([]types.StructField, error) {
 	for _, part := range parts {
 		text := strings.TrimSpace(part)
 		split := strings.IndexAny(text, " \t\r\n")
+		name := ""
+		quotedName := strings.HasPrefix(text, "\"")
+		if quotedName {
+			var b strings.Builder
+			split = 0
+			for i := 1; i < len(text); i++ {
+				if text[i] == '"' {
+					if i+1 < len(text) && text[i+1] == '"' {
+						b.WriteByte('"')
+						i++
+						continue
+					}
+					split = i + 1
+					break
+				}
+				b.WriteByte(text[i])
+			}
+			name = b.String()
+		}
 		if split <= 0 {
 			return nil, fmt.Errorf("csv: columns entry %q requires name and type", text)
 		}
-		name := strings.TrimSpace(text[:split])
+		if !quotedName {
+			name = strings.TrimSpace(text[:split])
+		}
 		typeText := strings.TrimSpace(text[split:])
-		if name == "" || typeText == "" {
+		if name == "" || typeText == "" || (quotedName && (split >= len(text) || !strings.ContainsRune(" \t\r\n", rune(text[split])))) {
 			return nil, fmt.Errorf("csv: invalid columns entry %q", text)
 		}
 		key := strings.ToLower(name)
@@ -124,7 +145,15 @@ func parseCSVColumns(spec string) ([]types.StructField, error) {
 func splitCSVSchemaFields(spec string) ([]string, error) {
 	var out []string
 	start, depth := 0, 0
+	quoted := false
 	for i, r := range spec {
+		if r == '"' {
+			quoted = !quoted
+			continue
+		}
+		if quoted {
+			continue
+		}
 		switch r {
 		case '(':
 			depth++
@@ -140,7 +169,7 @@ func splitCSVSchemaFields(spec string) ([]string, error) {
 			}
 		}
 	}
-	if depth != 0 {
+	if depth != 0 || quoted {
 		return nil, fmt.Errorf("csv: invalid columns schema")
 	}
 	out = append(out, spec[start:])

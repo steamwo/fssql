@@ -88,8 +88,14 @@ func applyCreateView(ctx context.Context, statement *Statement, value *binder.Bo
 		SQL:     value.SQL,
 		Columns: catalogColumns(value.Columns),
 	}
-	if err := tx.CreateView(ctx, view); err != nil {
-		return err
+	var createErr error
+	if value.Replace {
+		replacer, ok := tx.(interface{ ReplaceView(context.Context, catalog.View) error })
+		if !ok { return fmt.Errorf("session: catalog does not support atomic view replacement") }
+		createErr = replacer.ReplaceView(ctx,view)
+	} else { createErr = tx.CreateView(ctx,view) }
+	if createErr != nil {
+		return createErr
 	}
 	return statement.CommitCatalog(ctx)
 }

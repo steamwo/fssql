@@ -12,7 +12,7 @@ import (
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
-const maxScanOpenAdapters = 32
+const maxScanOpenAdapters = 33
 const internalScanFunctionPrefix = "__fssql_"
 
 // ScanOpenFunc 是 Engine composition root 注入的 runtime scan callback。

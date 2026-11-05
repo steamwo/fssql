@@ -14,6 +14,8 @@ import (
 )
 
 type CSVWriteOptions struct {
+	ForceQuote bool
+	DuckDBCompatible bool
 	Delimiter  byte
 	Quote      byte
 	Newline    string
@@ -47,12 +49,13 @@ func(w *CSVWriter)ensureStarted(ctx context.Context)error{if w.started{return ni
 
 func(w *CSVWriter)writeField(ctx context.Context,vec *vector.Vector,typ types.LogicalType,row int)error{
 	if !vec.IsValid(row){return w.out.WriteString(ctx,w.opts.NullString)}
+	if w.opts.DuckDBCompatible && typ.IsBlob(){return w.writeDuckDBBlob(ctx,vec,row)}
 	if typ.IsBlob(){b,_:=vec.Bytes(row);return w.writeBlobField(ctx,b)}
 	if typ.ID==types.Varchar{b,_:=vec.Bytes(row);return w.writeStringField(ctx,string(b),w.opts.NullString==""&&len(b)==0)}
 	if typ.ID==types.List||typ.ID==types.Struct{if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};quoted:=csvQuotedOutput{out:w.out,quote:w.opts.Quote};if err:=writeDuckDBTextValue(ctx,&quoted,vec,typ,row);err!=nil{return err};return w.out.WriteContextByte(ctx,w.opts.Quote)}
-	return writeCSVScalar(ctx,w.out,vec,typ,row)
+	return w.writeScalarField(ctx,vec,typ,row)
 }
-func(w *CSVWriter)writeStringField(ctx context.Context,value string,forceQuote bool)error{needsQuote:=forceQuote||strings.IndexByte(value,w.opts.Delimiter)>=0||strings.IndexByte(value,w.opts.Quote)>=0||strings.ContainsAny(value,"\r\n")||value==w.opts.NullString;if !needsQuote{return w.out.WriteString(ctx,value)};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};for start:=0;;{i:=strings.IndexByte(value[start:],w.opts.Quote);if i<0{if err:=w.out.WriteString(ctx,value[start:]);err!=nil{return err};break};i+=start;if err:=w.out.WriteString(ctx,value[start:i]);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};start=i+1};return w.out.WriteContextByte(ctx,w.opts.Quote)}
+func(w *CSVWriter)writeStringField(ctx context.Context,value string,forceQuote bool)error{needsQuote:=forceQuote||w.opts.ForceQuote||strings.IndexByte(value,w.opts.Delimiter)>=0||strings.IndexByte(value,w.opts.Quote)>=0||strings.ContainsAny(value,"\r\n")||value==w.opts.NullString;if !needsQuote{return w.out.WriteString(ctx,value)};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};for start:=0;;{i:=strings.IndexByte(value[start:],w.opts.Quote);if i<0{if err:=w.out.WriteString(ctx,value[start:]);err!=nil{return err};break};i+=start;if err:=w.out.WriteString(ctx,value[start:i]);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};start=i+1};return w.out.WriteContextByte(ctx,w.opts.Quote)}
 
 func writeCSVScalar(ctx context.Context,out valueOutput,vec *vector.Vector,typ types.LogicalType,row int)error{
 	var tmp [96]byte

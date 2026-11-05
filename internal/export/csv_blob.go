@@ -8,7 +8,7 @@ func (w *CSVWriter) writeBlobField(ctx context.Context, data []byte) error {
 		return w.writeStringField(ctx, "", w.opts.NullString == "")
 	}
 	const digits = "0123456789ABCDEF"
-	quote := false
+	quote := w.opts.ForceQuote
 	matchesNull := len(w.opts.NullString)/2 == len(data) && len(w.opts.NullString)%2 == 0
 	for i, b := range data {
 		hi, lo := digits[b>>4], digits[b&15]

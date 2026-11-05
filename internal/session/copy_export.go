@@ -34,6 +34,8 @@ type ExportCopyExecutorConfig struct {
 type ExportCopyExecutor struct{ config ExportCopyExecutorConfig }
 
 type CopyRequest struct {
+	ForceQuote          bool
+	DuckDBCompatible    bool
 	Destination         string
 	Format              string
 	Compression         string
@@ -253,7 +255,7 @@ func copyWriterConfig(options binder.BoundCopyOptions, schema []exportpkg.Column
 	switch options.Format {
 	case binder.CopyCSV:
 		config.Format = exportpkg.FormatCSV
-		config.CSV = exportpkg.CSVWriteOptions{Header: options.Header, Delimiter: options.Delimiter, Quote: options.Quote}
+		config.CSV = exportpkg.CSVWriteOptions{Header: options.Header, Delimiter: options.Delimiter, Quote: options.Quote, ForceQuote: options.ForceQuote}
 	case binder.CopyJSON:
 		config.Format = exportpkg.FormatJSON
 	case binder.CopyNDJSON:
@@ -276,6 +278,9 @@ func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (ex
 		compression = "identity"
 	}
 	config := exportpkg.FileWriterConfig{Schema: schema, Compression: compression}
+	if (request.ForceQuote || request.DuckDBCompatible) && format != "csv" {
+		return config, errors.New("session: CSV text options require CSV format")
+	}
 	switch format {
 	case "csv":
 		config.Format = exportpkg.FormatCSV
@@ -289,7 +294,7 @@ func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (ex
 		if delimiter == quote {
 			return exportpkg.FileWriterConfig{}, errors.New("session: CSV delimiter and quote must differ")
 		}
-		config.CSV = exportpkg.CSVWriteOptions{Header: request.Header, Delimiter: delimiter, Quote: quote}
+		config.CSV = exportpkg.CSVWriteOptions{Header: request.Header, Delimiter: delimiter, Quote: quote, ForceQuote: request.ForceQuote, DuckDBCompatible: request.DuckDBCompatible}
 	case "json":
 		config.Format = exportpkg.FormatJSON
 	case "ndjson":

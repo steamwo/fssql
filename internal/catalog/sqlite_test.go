@@ -72,6 +72,22 @@ func (c *fakeCatalogConn) ExecContext(ctx context.Context, query string, args []
 	if strings.HasPrefix(strings.TrimSpace(query), "CREATE TABLE") {
 		return driver.RowsAffected(0), nil
 	}
+	if strings.HasPrefix(strings.TrimSpace(query), "UPDATE fssql_catalog_objects") {
+		if c.active == nil || len(args) != 4 {
+			return nil, errors.New("invalid transactional update")
+		}
+		row := fakeCatalogRow{kind: args[0].Value.(int64), payload: args[1].Value.(string), schema: args[2].Value.(string), name: args[3].Value.(string)}
+		key := row.schema + "\x00" + row.name
+		if _, exists := c.visibleRow(key); !exists {
+			return driver.RowsAffected(0), nil
+		}
+		if c.active.replaced == nil {
+			c.active.replaced = make(map[string]bool)
+		}
+		c.active.replaced[key] = true
+		c.active.pending[key] = row
+		return driver.RowsAffected(1), nil
+	}
 	if strings.HasPrefix(strings.TrimSpace(query), "INSERT INTO") {
 		if c.active == nil {
 			return nil, errors.New("insert outside transaction")
@@ -175,8 +191,9 @@ func (c *fakeCatalogConn) visibleRows(schema string) []fakeCatalogRow {
 
 // fakeCatalogTx 模拟 transaction 的 commit/rollback ownership。
 type fakeCatalogTx struct {
-	conn    *fakeCatalogConn
-	pending map[string]fakeCatalogRow
+	replaced map[string]bool
+	conn     *fakeCatalogConn
+	pending  map[string]fakeCatalogRow
 }
 
 func (t *fakeCatalogTx) Commit() error {
@@ -186,7 +203,7 @@ func (t *fakeCatalogTx) Commit() error {
 	t.conn.store.mu.Lock()
 	defer t.conn.store.mu.Unlock()
 	for k := range t.pending {
-		if _, exists := t.conn.store.rows[k]; exists {
+		if _, exists := t.conn.store.rows[k]; exists && !t.replaced[k] {
 			return errors.New("UNIQUE constraint failed")
 		}
 	}

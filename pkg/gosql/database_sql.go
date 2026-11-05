@@ -16,6 +16,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
+	"github.com/steamwo/fssql/internal/execution/result"
 	"github.com/steamwo/fssql/internal/query"
 	"github.com/steamwo/fssql/internal/session"
 	"github.com/steamwo/fssql/internal/sql/parser"
@@ -32,6 +33,9 @@ func OpenSQLDB(config Config) (*sql.DB, error) {
 }
 
 type sqlConnector struct{ db *DB }
+
+// database/sql closes an io.Closer connector when its pool is closed.
+func (c *sqlConnector) Close() error { return c.db.Close() }
 
 func (c *sqlConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	if c == nil || c.db == nil || c.db.closed.Load() {
@@ -132,9 +136,16 @@ func (c *sqlConn) queryTemplate(ctx context.Context, sqlText string, template *p
 	if err != nil {
 		return nil, err
 	}
+	typeNames := make([]string, len(columns))
+	for i, column := range prepared.Output() {
+		typeNames[i], err = result.DuckDBTypeName(column.Type)
+		if err != nil {
+			return nil, errors.Join(err, q.Close())
+		}
+	}
 	streamCtx, cancel := context.WithCancel(q.Context())
 	sink := &sqlChunkSink{ctx: streamCtx, chunks: make(chan *vector.DataChunk, 1)}
-	rows := &sqlRows{columns: columns, q: q, cancel: cancel, sink: sink, done: make(chan struct{})}
+	rows := &sqlRows{columns: columns, typeNames: typeNames, q: q, cancel: cancel, sink: sink, done: make(chan struct{})}
 	go rows.run(prepared)
 	return rows, nil
 }
@@ -188,11 +199,12 @@ func (*sqlChunkSink) TakesChunkOwnership() bool      { return true }
 var _ pipeline.OwnershipTakingSink = (*sqlChunkSink)(nil)
 
 type sqlRows struct {
-	columns []Column
-	q       *query.Context
-	cancel  context.CancelFunc
-	sink    *sqlChunkSink
-	done    chan struct{}
+	columns   []Column
+	typeNames []string
+	q         *query.Context
+	cancel    context.CancelFunc
+	sink      *sqlChunkSink
+	done      chan struct{}
 
 	current     *vector.DataChunk
 	row         int
@@ -283,7 +295,7 @@ func (r *sqlRows) ColumnTypeDatabaseTypeName(index int) string {
 	if index < 0 || index >= len(r.columns) {
 		return ""
 	}
-	return r.columns[index].Type.ID
+	return r.typeNames[index]
 }
 func (r *sqlRows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	if index < 0 || index >= len(r.columns) {

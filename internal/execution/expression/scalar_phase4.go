@@ -136,7 +136,7 @@ func writeScalarValue(dst *vector.Vector,row int,t types.LogicalType,value Scala
 }
 
 func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []ScalarValue)(ScalarValue,error){
- if id==function.InListID||id==function.BetweenID||id==function.LikeID||id==function.MembershipMarkID||id==function.ScalarCardinalityID{return evalPredicate(id,args)}
+ if id==function.NotDistinctID||id==function.InListID||id==function.BetweenID||id==function.LikeID||id==function.MembershipMarkID||id==function.ScalarCardinalityID{return evalPredicate(id,args)}
 	propagate:=func()bool{for _,a:=range args{if !a.Valid{return true}};return false}
 	if id!=function.LeastID&&id!=function.GreatestID&&id!=function.NullIfID&&propagate(){return ScalarValue{Type:resultType,Valid:false},nil}
 	out:=ScalarValue{Type:resultType,Valid:true}
@@ -241,7 +241,7 @@ func phase4ConvertTimestampUnit(raw int64,from,to types.TimestampUnit)(int64,err
 func phase4DateToTimestamp(days int64,unit types.TimestampUnit)(int64,error){u,err:=phase4TimestampUnitsPerSecond(unit);if err!=nil{return 0,err};return phase4CheckedMulScale(days,86400*u)}
 func phase4TimestampToDate(raw int64,unit types.TimestampUnit)(int64,error){u,err:=phase4TimestampUnitsPerSecond(unit);if err!=nil{return 0,err};return phase4FloorDiv(raw,86400*u),nil}
 
-func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:return temporalTime(v).Format("2006-01-02 15:04:05.999999999"),nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
+func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:text:=temporalTime(v).Format("2006-01-02 15:04:05.999999999");if v.Type.IsTimestampTZ(){text+="+00"};return text,nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
 func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
 	out:=ScalarValue{Type:t,Valid:true};text:=strings.TrimSpace(s);var err error
 	if t.IsUnsignedInteger(){bits:=0;switch t.ID{case types.TinyInt:bits=8;case types.SmallInt:bits=16;case types.Integer:bits=32;case types.BigInt:bits=64};out.Uint64,err=strconv.ParseUint(text,10,bits);return out,err}

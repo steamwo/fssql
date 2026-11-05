@@ -68,11 +68,13 @@ type Config struct {
 }
 
 type DB struct {
-	memory    *memory.Manager
-	buffers   *memory.BufferManager
-	temporary *storagetemp.TemporaryStorageManager
-	engine    *session.StableStatementEngine
-	closed    atomic.Bool
+	memory            *memory.Manager
+	buffers           *memory.BufferManager
+	temporary         *storagetemp.TemporaryStorageManager
+	engine            *session.StableStatementEngine
+	closed            atomic.Bool
+	materialized      *materializedRegistry
+	spillMemoryBudget int64
 }
 
 func Open(config Config) (*DB, error) {
@@ -111,6 +113,11 @@ func Open(config Config) (*DB, error) {
 		return nil, err
 	}
 	functions := function.NewPhase5Catalog()
+	materialized := &materializedRegistry{items: make(map[string]*Materialized), limit: config.CatalogMaxEntries}
+	functions, err = functions.With(function.Definition{ID: materializedFunctionID, Name: materializedFunctionName, Kind: function.Table, MinArgs: 1, MaxArgs: 1})
+	if err != nil {
+		return nil, err
+	}
 	functions, registeredTables, err := registerTableFunctions(functions, config.TableFunctions)
 	if err != nil {
 		return nil, err
@@ -154,16 +161,24 @@ func Open(config Config) (*DB, error) {
 		joinBudget = 4096
 	}
 	var sources session.QuerySourceFactory = baseSources
-	if extensions := typedSourceExtensions(registeredTables, buffers, spillBudget); extensions != nil {
+	{
+		extensions := typedSourceExtensions(registeredTables, buffers, spillBudget)
 		sources = session.QuerySourceFactoryFunc(func(q *query.Context) ([]session.TableBindAdapter, *session.RuntimeScanSourceFactory, error) {
 			bindings, scans, err := baseSources.NewQuerySources(q)
 			if err != nil {
 				return nil, nil, err
 			}
-			extraBindings, extraScans, err := extensions(q)
-			if err != nil {
-				return nil, nil, err
+			var extraBindings []session.TableBindAdapter
+			var extraScans []session.ScanOpenAdapter
+			if extensions != nil {
+				extraBindings, extraScans, err = extensions(q)
+				if err != nil {
+					return nil, nil, err
+				}
 			}
+			binding, scan := materialized.adapters(q)
+			extraBindings = append(extraBindings, binding)
+			extraScans = append(extraScans, scan)
 			scans, err = scans.WithAdapters(extraScans)
 			if err != nil {
 				return nil, nil, err
@@ -221,7 +236,21 @@ func Open(config Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &DB{memory: manager, buffers: buffers, temporary: temporary, engine: statements}, nil
+	db := &DB{memory: manager, buffers: buffers, temporary: temporary, engine: statements, materialized: materialized, spillMemoryBudget: spillBudget}
+	statements.SetMaterializer(func(q *query.Context, prepared session.PreparedStatement) (catalog.ExternalTable, func() error, error) {
+		var columns []Column
+		var definitions []catalog.ColumnDefinition
+		for _, c := range prepared.Output() {
+			columns = append(columns, Column{Name: c.Name, Type: publicType(c.Type), Nullable: c.Nullable})
+			definitions = append(definitions, catalog.ColumnDefinition{Name: c.Name, Type: c.Type, Nullable: c.Nullable})
+		}
+		m, err := db.materializePrepared(q.Context(), q, prepared, columns)
+		if err != nil {
+			return catalog.ExternalTable{}, nil, err
+		}
+		return catalog.ExternalTable{Columns: definitions, TableFunction: materializedFunctionName, Source: m.token}, m.Close, nil
+	})
+	return db, nil
 }
 
 func publicS3Driver(config S3Config) (vfs.Driver, error) {
@@ -249,6 +278,9 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.closed.Store(true)
+	if db.materialized != nil {
+		return db.materialized.close()
+	}
 	return nil
 }
 

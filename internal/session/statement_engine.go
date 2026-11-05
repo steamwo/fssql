@@ -25,9 +25,10 @@ type PreparedStatement interface {
 
 // StableStatementEngine 在 StableSQLEngine 之上增加已冻结 control/DESCRIBE/COPY statement composition。
 type StableStatementEngine struct {
-	selects *StableSQLEngine   // selects 是 SELECT/Query 唯一 production execution path。
-	control *SQLControlAdapter // control 是 Catalog/Secret 副作用唯一 adapter。
-	copy    CopyExecutor       // copy 仅适配既有 Export/VFS，不复制 SQL/Query 执行链。
+	materialize MaterializeExecutor
+	selects     *StableSQLEngine   // selects 是 SELECT/Query 唯一 production execution path。
+	control     *SQLControlAdapter // control 是 Catalog/Secret 副作用唯一 adapter。
+	copy        CopyExecutor       // copy 仅适配既有 Export/VFS，不复制 SQL/Query 执行链。
 }
 
 // NewStableStatementEngine 创建不含 COPY adapter 的 statement composition root。
@@ -73,6 +74,9 @@ func (e *StableStatementEngine) PrepareParsed(ctx context.Context, q *query.Cont
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if stmt, ok := parsed.(*ast.CreateTableAsStmt); ok {
+		return e.prepareCreateTableAs(ctx, q, sql, stmt)
 	}
 	if selectQuery, ok := parsed.(*ast.SelectStmt); ok {
 		return e.selects.prepareSelect(ctx, q, sql, selectQuery)

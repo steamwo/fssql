@@ -9,6 +9,16 @@ import (
 )
 
 func evalPredicate(id function.ID, args []ScalarValue) (ScalarValue, error) {
+	if id == function.NotDistinctID {
+		out := ScalarValue{Type: types.LogicalType{ID: types.Boolean}, Valid: true}
+		if !args[0].Valid || !args[1].Valid {
+			out.Bool = !args[0].Valid && !args[1].Valid
+			return out, nil
+		}
+		cmp, err := predicateCompare(args[0], args[1])
+		out.Bool = cmp == 0
+		return out, err
+	}
 	out := ScalarValue{Type: types.LogicalType{ID: types.Boolean}, Valid: true}
 	if id == function.MembershipMarkID {
 		if args[1].Valid {

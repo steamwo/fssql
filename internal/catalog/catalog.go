@@ -104,11 +104,12 @@ func (c *MemoryCatalog) Begin(ctx context.Context) (Transaction, error) {
 
 // memoryTx 是 MemoryCatalog 的 optimistic metadata transaction。
 type memoryTx struct {
-	catalog     *MemoryCatalog   // catalog 是 commit target。
-	baseVersion uint64           // baseVersion 是 Begin 时的 committed 版本。
-	snapshot    map[string]Entry // snapshot 是 repeatable-read 基线。
-	writes      map[string]Entry // writes 保存本事务新增对象。
-	closed      bool             // closed 防止 Commit/Rollback 后继续使用。
+	replacements map[string]bool
+	catalog      *MemoryCatalog   // catalog 是 commit target。
+	baseVersion  uint64           // baseVersion 是 Begin 时的 committed 版本。
+	snapshot     map[string]Entry // snapshot 是 repeatable-read 基线。
+	writes       map[string]Entry // writes 保存本事务新增对象。
+	closed       bool             // closed 防止 Commit/Rollback 后继续使用。
 }
 
 // Get 从事务 overlay/snapshot 读取对象。
@@ -175,6 +176,35 @@ func (t *memoryTx) CreateView(ctx context.Context, view View) error {
 	return t.create(view.Name, Entry{Kind: ObjectView, View: &view})
 }
 
+// ReplaceView atomically replaces a view, or creates it if absent.
+func (t *memoryTx) ReplaceView(ctx context.Context, view View) error {
+	if err := t.check(ctx); err != nil {
+		return err
+	}
+	view.Name.Schema = normalizeSchema(view.Name.Schema)
+	if err := validateView(view); err != nil {
+		return err
+	}
+	entry, exists, err := t.Get(ctx, view.Name)
+	if err != nil {
+		return err
+	}
+	if exists && entry.Kind != ObjectView {
+		return fmt.Errorf("catalog replacement target is not a view")
+	}
+	key, err := objectKey(view.Name)
+	if err != nil {
+		return err
+	}
+	if t.replacements == nil {
+		t.replacements = make(map[string]bool)
+	}
+	_, inSnapshot := t.snapshot[key]
+	t.replacements[key] = inSnapshot
+	t.writes[key] = cloneEntry(Entry{Kind: ObjectView, View: &view})
+	return nil
+}
+
 // create 将对象加入 transaction write set，并拒绝 snapshot/overlay 中重复名称。
 func (t *memoryTx) create(name ObjectName, entry Entry) error {
 	key, err := objectKey(name)
@@ -203,11 +233,16 @@ func (t *memoryTx) Commit(ctx context.Context) error {
 		return fmt.Errorf("catalog transaction conflict: base=%d current=%d", t.baseVersion, c.version)
 	}
 	newCount := len(c.entries) + len(t.writes)
+	for k := range t.writes {
+		if t.replacements[k] {
+			newCount--
+		}
+	}
 	if newCount > c.maxEntries {
 		return fmt.Errorf("memory catalog capacity exceeded: %d > %d", newCount, c.maxEntries)
 	}
 	for k, v := range t.writes {
-		if _, exists := c.entries[k]; exists {
+		if _, exists := c.entries[k]; exists && !t.replacements[k] {
 			return fmt.Errorf("catalog object %s already exists", k)
 		}
 		c.entries[k] = cloneEntry(v)
@@ -251,7 +286,7 @@ func (t *memoryTx) checkOpen() error {
 }
 
 // release 主动释放 transaction map 引用，避免长生命周期控制面对象持有 metadata。
-func (t *memoryTx) release() { t.snapshot = nil; t.writes = nil }
+func (t *memoryTx) release() { t.snapshot = nil; t.writes = nil; t.replacements = nil }
 
 // objectKey 构造不会歧义的 schema/object 内部 key。
 func objectKey(name ObjectName) (string, error) {

@@ -2,13 +2,26 @@ package ast
 
 // CreateViewStmt 表示 CREATE VIEW <name> AS <select>。
 type CreateViewStmt struct {
-	Span  Span          // Span 覆盖完整 CREATE VIEW statement。
-	Name  QualifiedName // Name 是 catalog relation 名称。
-	Query *SelectStmt   // Query 是使用普通 query Binder 绑定的查询体。
+	Replace   bool
+	Temporary bool
+	Span      Span          // Span 覆盖完整 CREATE VIEW statement。
+	Name      QualifiedName // Name 是 catalog relation 名称。
+	Query     *SelectStmt   // Query 是使用普通 query Binder 绑定的查询体。
 }
 
 func (*CreateViewStmt) statementNode()   {}
 func (s *CreateViewStmt) NodeSpan() Span { return s.Span }
+
+// CreateTableAsStmt creates a DB-lifetime typed snapshot, not a writable table.
+type CreateTableAsStmt struct {
+	Span      Span
+	Name      QualifiedName
+	Query     *SelectStmt
+	Temporary bool
+}
+
+func (*CreateTableAsStmt) statementNode()   {}
+func (s *CreateTableAsStmt) NodeSpan() Span { return s.Span }
 
 // CreateExternalTableStmt 表示 AD-045 冻结的 external-table DDL。
 type CreateExternalTableStmt struct {

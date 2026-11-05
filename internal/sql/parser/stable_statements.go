@@ -31,9 +31,34 @@ func (p *Parser) parseCreateStatement() (ast.Statement, bool, error) {
 	if !p.acceptWord("create") {
 		return nil, false, nil
 	}
+	replace := false
+	if p.accept(lexer.KeywordOr) {
+		if !p.acceptWord("replace") {
+			return nil, true, p.errorf("expected REPLACE")
+		}
+		replace = true
+	}
+	temporary := p.acceptWord("temp") || p.acceptWord("temporary")
 	if p.acceptWord("view") {
 		s, err := p.parseCreateView(start)
+		if s != nil {
+			s.Replace = replace
+			s.Temporary = temporary
+		}
 		return s, true, err
+	}
+	if p.acceptWord("table") {
+		if replace {
+			return nil, true, p.errorf("OR REPLACE TABLE is not supported")
+		}
+		s, err := p.parseCreateView(start)
+		if err != nil {
+			return nil, true, err
+		}
+		return &ast.CreateTableAsStmt{Span: s.Span, Name: s.Name, Query: s.Query, Temporary: temporary}, true, nil
+	}
+	if replace || temporary {
+		return nil, true, p.errorf("expected VIEW or TABLE")
 	}
 	if p.acceptWord("external") {
 		if !p.acceptWord("table") {
@@ -253,6 +278,9 @@ func (p *Parser) parseCopyOption() (ast.CopyOption, error) {
 func (p *Parser) parseCopyScalar() (ast.Expr, error) {
 	t := p.peek()
 	switch t.Kind {
+	case lexer.Star:
+		p.pos++
+		return &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralString, Value: "*"}, nil
 	case lexer.String:
 		p.pos++
 		return &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralString, Value: t.Text}, nil

@@ -12,7 +12,7 @@ import (
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
-const maxTableBindAdapters = 32
+const maxTableBindAdapters = 33 // five readers, 27 public functions, one materialized source
 
 // TableBindFunc 是 Engine composition root 注入的真实 TableFunction.Bind adapter。
 // callback 必须完成 FileSetPlanner/Schema Resolution，并返回 immutable fingerprint；不得仅靠文件扩展名伪造 schema。

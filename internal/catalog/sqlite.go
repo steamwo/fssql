@@ -151,6 +151,35 @@ func (t *sqliteTx) CreateView(ctx context.Context, view View) error {
 	return t.insert(ctx, view.Name, Entry{Kind: ObjectView, View: &view})
 }
 
+func (t *sqliteTx) ReplaceView(ctx context.Context, view View) error {
+	if err := t.check(ctx); err != nil {
+		return err
+	}
+	view.Name.Schema = normalizeSchema(view.Name.Schema)
+	if err := validateView(view); err != nil {
+		return err
+	}
+	entry, exists, err := t.Get(ctx, view.Name)
+	if err != nil {
+		return err
+	}
+	if exists && entry.Kind != ObjectView {
+		return fmt.Errorf("catalog replacement target is not a view")
+	}
+	if !exists {
+		return t.CreateView(ctx, view)
+	}
+	payload, err := json.Marshal(cloneEntry(Entry{Kind: ObjectView, View: &view}))
+	if err != nil {
+		return err
+	}
+	if len(payload) > maxSQLiteCatalogPayloadBytes {
+		return fmt.Errorf("sqlite catalog payload exceeds limit")
+	}
+	_, err = t.tx.ExecContext(ctx, `UPDATE fssql_catalog_objects SET kind=?, payload=? WHERE schema_name=? AND object_name=?`, ObjectView, string(payload), view.Name.Schema, view.Name.Name)
+	return err
+}
+
 // insert 编码不可变 metadata 并依赖 SQLite 主键约束拒绝重复对象。
 func (t *sqliteTx) insert(ctx context.Context, name ObjectName, entry Entry) error {
 	payload, err := json.Marshal(cloneEntry(entry))

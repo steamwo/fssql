@@ -36,6 +36,11 @@ type ParquetEncryptionOptions struct {
 type CopyOptions struct {
 	Format      CopyFormat
 	Compression string
+	// ForceQuote quotes every non-NULL CSV field, including column names.
+	ForceQuote bool
+	// DuckDBCompatible uses DuckDB BLOB and UTC timestamp text in CSV output.
+	// The default preserves the original native CSV representation.
+	DuckDBCompatible bool
 	// Header defaults to true for CSV, matching SQL COPY.
 	Header     *bool
 	Delimiter  byte
@@ -62,12 +67,14 @@ func (db *DB) CopyTo(ctx context.Context, querySQL, destination string, options 
 		header = *options.Header
 	}
 	request := session.CopyRequest{
-		Destination: destination,
-		Format:      string(options.Format),
-		Compression: options.Compression,
-		Header:      header,
-		Delimiter:   options.Delimiter,
-		Quote:       options.Quote,
+		Destination:      destination,
+		Format:           string(options.Format),
+		Compression:      options.Compression,
+		Header:           header,
+		Delimiter:        options.Delimiter,
+		Quote:            options.Quote,
+		ForceQuote:       options.ForceQuote,
+		DuckDBCompatible: options.DuckDBCompatible,
 	}
 	if options.Encryption != nil {
 		request.EncryptionAlgorithm = options.Encryption.Algorithm

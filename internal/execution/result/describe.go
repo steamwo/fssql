@@ -147,6 +147,13 @@ func appendTypeName(b *strings.Builder, t types.LogicalType, depth int) error {
 		b.WriteString(s)
 		return nil
 	}
+	if t.IsUnsignedInteger() {
+		names := map[types.LogicalTypeID]string{types.TinyInt: "UTINYINT", types.SmallInt: "USMALLINT", types.Integer: "UINTEGER", types.BigInt: "UBIGINT"}
+		return write(names[t.ID])
+	}
+	if t.IsBlob() {
+		return write("BLOB")
+	}
 	switch t.ID {
 	case types.Boolean:
 		return write("BOOLEAN")
@@ -174,6 +181,15 @@ func appendTypeName(b *strings.Builder, t types.LogicalType, depth int) error {
 	case types.DateType:
 		return write("DATE")
 	case types.TimestampType:
+		if t.IsTimestampTZ() {
+			return write("TIMESTAMP WITH TIME ZONE")
+		}
+		if t.IsTimestampNS() {
+			return write("TIMESTAMP_NS")
+		}
+		if t.Timestamp.Unit == types.TimestampMillis {
+			return write("TIMESTAMP_MS")
+		}
 		return write("TIMESTAMP")
 	case types.List:
 		if t.Child == nil {

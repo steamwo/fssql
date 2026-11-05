@@ -273,7 +273,7 @@ func (b *Binder) bindUnary(e *ast.UnaryExpr) (*BoundExpression, error) {
 		if err != nil {
 			return nil, b.errorAt(e.Span, err.Error())
 		}
-		return &BoundExpression{Kind: BoundUnary, Span: e.Span, Type: types.LogicalType{ID: types.Boolean}, Nullable: true, Op: op, Children: []*BoundExpression{child}}, nil
+		return &BoundExpression{Kind: BoundUnary, Span: e.Span, Type: types.LogicalType{ID: types.Boolean}, Nullable: child.Nullable, Op: op, Children: []*BoundExpression{child}}, nil
 	case "+", "-":
 		if child.SQLNull {
 			return nil, b.errorAt(e.Span, "cannot infer numeric type for NULL")
@@ -389,7 +389,7 @@ func (b *Binder) bindCall(e *ast.CallExpr) (*BoundExpression, error) {
 	if def.Kind == function.Aggregate {
 		depth = aggregateArgumentDepth(children)
 	}
-	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: def.ID != function.CountID, FunctionID: def.ID, FunctionKind: def.Kind, Children: children, Distinct: distinct, Depth: depth}, nil
+	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: def.ID != function.CountID && def.ID != function.NotDistinctID, FunctionID: def.ID, FunctionKind: def.Kind, Children: children, Distinct: distinct, Depth: depth}, nil
 }
 
 // coerceComparable 为比较运算找到共同类型；NULL 可隐式转换到任意目标类型。

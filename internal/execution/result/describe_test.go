@@ -25,6 +25,15 @@ func TestDuckDBTypeName(t *testing.T) {
 		{types.LogicalType{ID: types.Boolean}, "BOOLEAN"},
 		{types.LogicalType{ID: types.HugeInt}, "HUGEINT"},
 		{decimal, "DECIMAL(18,3)"},
+		{types.BlobType(), "BLOB"},
+		{types.UTinyIntType(), "UTINYINT"},
+		{types.USmallIntType(), "USMALLINT"},
+		{types.UIntegerType(), "UINTEGER"},
+		{types.UBigIntType(), "UBIGINT"},
+		{types.TimestampNSType(), "TIMESTAMP_NS"},
+		{types.TimestampTZType(), "TIMESTAMP WITH TIME ZONE"},
+		{types.NewList(types.BlobType()), "BLOB[]"},
+		{types.NewStruct(types.StructField{Name: "instant", Type: types.TimestampTZType()}), "STRUCT(instant TIMESTAMP WITH TIME ZONE)"},
 		{nested, `STRUCT(id BIGINT, "x space" DECIMAL(18,3))[]`},
 	}
 	for _, tc := range cases {

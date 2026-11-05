@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "plan": "docs/edge-agent-go-duckdb-migration-tasks.md",
+  "contract": "docs/contracts/duckdb-migration.md",
+  "references": [
+    {"version": "2.0.0", "fixture": "test/corpus/edge-agent-migration-reference.json", "purpose": "project SQL baseline"},
+    {"version": "1.5.5", "fixture": "test/corpus/edge-agent-caller-reference.json", "purpose": "edge-agent-go caller baseline; binding/commit/extension hash included"}
+  ],
+  "production_cgo": false,
+  "requirements": [
+    {"original_item": 1, "id": "EDGE.CONFIG.001", "implementation": "Config mapping and UTC defaults documented", "verification": "PASS", "evidence": ["docs/contracts/duckdb-migration.md", "pkg/gosql/phase4_test.go"]},
+    {"original_item": 2, "id": "EDGE.DDL.001", "implementation": "CTAS, OR REPLACE VIEW, DB-lifetime TEMP syntax", "verification": "PASS", "limitations": ["No connection-private TEMP namespace or main/temp name shadowing"], "evidence": ["pkg/gosql/migration_sql_test.go", "internal/catalog/view_replace_test.go"]},
+    {"original_item": 3, "id": "EDGE.SNAPSHOT.001", "implementation": "Materialize/SQL/Close with bounded native spill and reader leases", "verification": "PASS", "evidence": ["pkg/gosql/materialized_test.go"]},
+    {"original_item": 4, "id": "EDGE.COPY.001", "implementation": "ForceQuote API and SQL, CopyTo encryption boundary, atomic commit preserved", "verification": "PASS", "limitations": ["External encrypted-Parquet interoperability deferred by user", "USE_TMP_FILE false is not emulated"], "evidence": ["pkg/gosql/edge_migration_test.go", "pkg/gosql/migration_sql_test.go"]},
+    {"original_item": 5, "id": "EDGE.NULL_SAFE.001", "implementation": "Single-evaluation IS [NOT] DISTINCT FROM", "verification": "PASS", "evidence": ["pkg/gosql/migration_sql_test.go", "pkg/gosql/materialized_test.go"]},
+    {"original_item": 6, "id": "EDGE.READERS.001", "implementation": "CSV/JSON compatibility aliases, literal columns struct and parameterized string schema", "verification": "PASS", "limitations": ["JSON alias supports newline_delimited or the existing JSON reader, not every DuckDB option"], "evidence": ["pkg/gosql/migration_sql_test.go"]},
+    {"original_item": 7, "id": "EDGE.SCANNERS.001", "implementation": "UNSUPPORTED", "verification": "PASS", "evidence": ["pkg/gosql/migration_sql_test.go: TestMigrationUnsupportedScanners"]},
+    {"original_item": 8, "id": "EDGE.DESCRIBE.001", "implementation": "Preserve binary, unsigned, timestamp and nested modifiers", "verification": "PASS", "evidence": ["internal/execution/result/describe_test.go", "pkg/gosql/edge_migration_test.go"]},
+    {"original_item": 9, "id": "EDGE.SQL_METADATA.001", "implementation": "Shared full type-name formatter; native Type.ID preserved", "verification": "PASS", "evidence": ["pkg/gosql/edge_migration_test.go"]},
+    {"original_item": 10, "id": "EDGE.CSV_TEXT.001", "implementation": "Opt-in DuckDB CSV text and corrected UTC timestamp CAST suffix", "verification": "PASS", "evidence": ["pkg/gosql/edge_migration_test.go"]},
+    {"original_item": 11, "id": "EDGE.SAMPLING.001", "implementation": "PARTIAL", "verification": "NOT_RUN", "verified_subset": "Bernoulli/system: PCG, 8193 rows, seeds 0/42/999, aligned batches, DuckDB 1.5.5 and 2.0.0", "limitations": ["Reservoir retains native algorithm and random stream; exact DuckDB compatibility is unfinished", "System sampling depends on physical input batches", "MD5 family caller-plan differential validation has not been run"], "evidence": ["pkg/gosql/sample_reference_test.go"]},
+    {"original_item": 12, "id": "EDGE.PARQUET_CODEC.001", "implementation": "Explicit snappy in CopyTo and SQL COPY; native default identity preserved", "verification": "PASS", "evidence": ["pkg/gosql/edge_migration_test.go"]},
+    {"original_item": 13, "id": "EDGE.LOCAL_FILES.001", "implementation": "FileURI/RootDir/unique uncreated destination contract documented and exercised", "verification": "PASS", "evidence": ["docs/contracts/duckdb-migration.md", "pkg/gosql/edge_migration_test.go", "pkg/gosql/composition_test.go"]}
+  ],
+  "encrypted_copy_sql": {"task": "F6c", "implementation": "NOT_IMPLEMENTED", "verification": "NOT_RUN", "required_syntax": "FORMAT ENCRYPTED_PARQUET, ENCRYPTION_CONFIG {footer_key_value: from_base64(...), master_key_id: ...}"},
+  "native_encryption_profile": {"task": "F6d", "implementation": "SOURCE_REVIEW_MATCHES_REQUESTED_PROFILE", "verification": "NOT_RUN", "key": "same raw AES key for every column and footer", "modules": ["serialized Page Header", "compressed Page Data", "serialized FileMetaData"], "nonce": "independent random 12 bytes per module", "aad": "standard Parquet module AAD; random 8-byte file unique ID; correct module and ordinal fields", "plaintext": "FileCryptoMetaData with algorithm, file unique AAD, KeyID metadata; no raw key", "limitation": "Source review and shared-helper unit tests do not replace independent full-file conformance tests"},
+  "external_encryption_interop": {"implementation": "UNCHANGED", "verification": "NOT_RUN", "disposition": "DEFERRED_BY_USER"},
+  "edge_agent_end_to_end": "NOT_RUN",
+  "completion_rule": "PASS applies only to the specified implementation and test scope. PARTIAL, NOT_RUN and listed limitations do not establish complete DuckDB replacement."
+}

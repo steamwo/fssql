@@ -12,10 +12,12 @@ const (
 	DistinctValueID
 	MembershipMarkID
 	ScalarCardinalityID
+	NotDistinctID
 )
 
 func registerPredicates(c *Catalog) {
 	for _, d := range []Definition{
+		{ID: NotDistinctID, Name: "__fssql_not_distinct", Kind: Scalar, MinArgs: 2, MaxArgs: 2, Bind: bindPredicateComparable},
 		{ID: InListID, Name: "__fssql_in", Kind: Scalar, MinArgs: 2, MaxArgs: -1, Bind: bindPredicateComparable},
 		{ID: BetweenID, Name: "__fssql_between", Kind: Scalar, MinArgs: 3, MaxArgs: 3, Bind: bindPredicateComparable},
 		{ID: LikeID, Name: "__fssql_like", Kind: Scalar, MinArgs: 2, MaxArgs: 3, Bind: func(in BindInput) (BindResult, error) {

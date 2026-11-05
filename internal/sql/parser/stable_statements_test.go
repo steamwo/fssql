@@ -77,7 +77,6 @@ func TestParseDescribeRelationAndQuery(t *testing.T) {
 
 func TestStableStatementRejectsUnfrozenExtensions(t *testing.T) {
 	for _, sql := range []string{
-		"CREATE OR REPLACE VIEW v AS SELECT 1",
 		"CREATE EXTERNAL TABLE t USING read_csv(path)",
 		"CREATE PERSISTENT SECRET x (TYPE s3, SUBJECT '*')",
 		"COPY t FROM 'x.csv'",

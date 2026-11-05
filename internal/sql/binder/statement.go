@@ -45,10 +45,12 @@ func (*BoundQueryStatement) StatementKind() StatementKind { return StatementQuer
 
 // BoundCreateView 是 CREATE VIEW 的副作用前控制面结果。
 type BoundCreateView struct {
-	Name    ObjectName       // Name 是目标 Catalog 对象。
-	Query   *BoundQuery      // Query 是实际 QueryBinder 的结果。
-	Columns []RelationColumn // Columns 是 view 创建时冻结的输出 schema。
-	SQL     string           // SQL 是 query 子句原文，不包含 CREATE VIEW 前缀。
+	Replace   bool
+	Temporary bool
+	Name      ObjectName       // Name 是目标 Catalog 对象。
+	Query     *BoundQuery      // Query 是实际 QueryBinder 的结果。
+	Columns   []RelationColumn // Columns 是 view 创建时冻结的输出 schema。
+	SQL       string           // SQL 是 query 子句原文，不包含 CREATE VIEW 前缀。
 }
 
 func (*BoundCreateView) StatementKind() StatementKind { return StatementCreateView }
@@ -110,6 +112,7 @@ const (
 
 // BoundCopyOptions 是能够无损映射到现有 Export FileWriterConfig 的 Stable SQL 子集。
 type BoundCopyOptions struct {
+	ForceQuote  bool
 	Format      CopyFormat // Format 是最终目标格式。
 	Compression string     // Compression 是 identity/gzip/zstd。
 	Header      bool       // Header 仅 CSV 有效；CSV 默认 true 以匹配 DuckDB COPY TO。
@@ -198,7 +201,7 @@ func (b *StatementBinder) bindCreateView(ctx context.Context, stmt *ast.CreateVi
 	if err != nil {
 		return nil, b.errorAt(stmt.Query.NodeSpan(), err.Error())
 	}
-	return &BoundCreateView{Name: name, Query: q, Columns: cloneRelationColumns(q.Output), SQL: querySQL}, nil
+	return &BoundCreateView{Name: name, Query: q, Columns: cloneRelationColumns(q.Output), SQL: querySQL, Replace: stmt.Replace, Temporary: stmt.Temporary}, nil
 }
 
 // bindCreateExternalTable 强制通过 FunctionCatalog + real TableFunctionResolver 获取 schema。
@@ -316,9 +319,9 @@ func (b *StatementBinder) bindCopy(ctx context.Context, stmt *ast.CopyStmt) (*Bo
 	case stmt.Query == nil && stmt.Relation != nil:
 		table := &ast.TableName{Span: stmt.Relation.Span, Name: *stmt.Relation}
 		synthetic := &ast.SelectStmt{
-			Span: stmt.Relation.Span,
+			Span:       stmt.Relation.Span,
 			Projection: []ast.SelectItem{{Span: stmt.Relation.Span, Star: true}},
-			From: table,
+			From:       table,
 		}
 		query, err = qb.BindSelect(ctx, synthetic)
 	default:
@@ -402,6 +405,13 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 		}
 		seen[name] = struct{}{}
 		switch name {
+		case "force_quote":
+			value, err := copyStringLike(option.Value)
+			if err != nil || value != "*" {
+				return BoundCopyOptions{}, fmt.Errorf("FORCE_QUOTE requires *")
+			}
+			out.ForceQuote = true
+			csvSpecific = true
 		case "format":
 			value, err := copyStringLike(option.Value)
 			if err != nil {
@@ -428,7 +438,7 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 			if value == "none" || value == "" {
 				value = "identity"
 			}
-			if value != "identity" && value != "gzip" && value != "zstd" {
+			if value != "identity" && value != "gzip" && value != "zstd" && value != "snappy" {
 				return BoundCopyOptions{}, fmt.Errorf("unsupported COPY COMPRESSION %q", value)
 			}
 			out.Compression = value
@@ -460,8 +470,11 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 	if out.Compression == "" {
 		out.Compression = "identity"
 	}
-	if out.Format == CopyParquet && out.Compression != "identity" {
+	if out.Format == CopyParquet && out.Compression != "identity" && out.Compression != "snappy" {
 		return BoundCopyOptions{}, fmt.Errorf("Parquet whole-file compression %q is unsupported", out.Compression)
+	}
+	if out.Format != CopyParquet && out.Compression == "snappy" {
+		return BoundCopyOptions{}, fmt.Errorf("snappy is only valid for Parquet")
 	}
 	if csvSpecific && out.Format != CopyCSV {
 		return BoundCopyOptions{}, fmt.Errorf("HEADER/DELIMITER/QUOTE are only valid for CSV output")

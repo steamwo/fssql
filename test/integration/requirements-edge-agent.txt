@@ -1,0 +1,2 @@
+# Caller-specific reference; isolate from the project's DuckDB 2.0.0 baseline.
+duckdb==1.5.5

@@ -199,7 +199,7 @@ func (p *Parser) parseTablePrimary() (ast.TableExpr, error) {
 		if p.accept(lexer.LParen) {
 			call := &ast.CallExpr{Function: name}
 			if !p.accept(lexer.RParen) {
-				for { e, err := p.parseExpr(0); if err != nil { return nil, err }; call.Args = append(call.Args, e); if !p.accept(lexer.Comma) { break } }
+				for { e, err := p.parseTableArgument(); if err != nil { return nil, err }; call.Args = append(call.Args, e); if !p.accept(lexer.Comma) { break } }
 				if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
 			}
 			call.Span = ast.Span{Start: start, End: p.previous().Span.End}; if !expressionHasParameter(call) { if err := foldStaticTableArguments(call); err != nil { return nil, err } }
@@ -235,11 +235,7 @@ func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 				if err := p.expect(lexer.KeywordFrom, "FROM"); err != nil { return nil, err }
 				right, err := p.parseExpr(31); if err != nil { return nil, err }
 				span := ast.Span{Start: start, End: right.NodeSpan().End}
-				eq := &ast.BinaryExpr{Span: span, Left: left, Op: "=", Right: right}
-				falseLit := &ast.LiteralExpr{Span: span, Kind: ast.LiteralBool, Value: "FALSE"}
-				eqSafe := phase4Call("coalesce", span, eq, falseLit)
-				bothNull := &ast.BinaryExpr{Span: span, Left: &ast.IsNullExpr{Span: span, Expr: left}, Op: "AND", Right: &ast.IsNullExpr{Span: span, Expr: right}}
-				value := ast.Expr(&ast.BinaryExpr{Span: span, Left: eqSafe, Op: "OR", Right: bothNull})
+				value := ast.Expr(phase4Call("__fssql_not_distinct", span, left, right))
 				if !not { value = &ast.UnaryExpr{Span: span, Op: "NOT", Expr: value} }
 				left = value; continue
 			}
@@ -282,7 +278,7 @@ func (p *Parser) parsePrefix() (ast.Expr, error) {
 		if p.accept(lexer.Star) { call.Star = true
 		} else if p.accept(lexer.RParen) { closed = true
 		} else {
-			for { e, err := p.parseExpr(0); if err != nil { return nil, err }; call.Args = append(call.Args, e); if !p.accept(lexer.Comma) { break } }
+			for { e, err := p.parseTableArgument(); if err != nil { return nil, err }; call.Args = append(call.Args, e); if !p.accept(lexer.Comma) { break } }
 		}
 		if !closed { if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err } }
 		call.Span = ast.Span{Start: name.Span.Start, End: p.previous().Span.End}

@@ -64,6 +64,9 @@ const (
 	Concat // appended to preserve existing token numeric identities
 	Parameter
 	KeywordUnion
+	LBrace
+	RBrace
+	Colon
 )
 
 type Token struct {
