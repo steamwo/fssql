@@ -1,6 +1,6 @@
 # fssql v1 Public API
 
-Status: Phase 6 Feature Freeze / v1 release documentation.
+Status: implemented API reference for the current branch. The frozen v1 baseline and later extensions are distinguished in the [feature contract](architecture/feature-contract.md). Implementation coverage does not imply complete release or large-data performance acceptance.
 
 This document describes the implemented public Go API and the internal HTTP adapter's wire contract. Internal package types and constructors are not part of the public Go API. The architecture feature contract describes the engine as a whole; it does not imply that every internal adapter is configurable through `gosql.Config`.
 
@@ -10,8 +10,11 @@ For a complete runnable example of both Go query APIs, see [quickstart](../examp
 
 | Capability | Available to an external Go module today |
 | --- | --- |
-| Native queries and statements | `Open`, `DB.QueryChunks`, `DB.Exec`, `DB.Close`, `DB.MemoryUsed`. |
-| `database/sql` | `OpenSQLDB`; query and execute through the same engine. |
+| Native queries and statements | `Open`, `DB.QueryChunks`, `DB.Exec`, `DB.CopyTo`, `DB.Close`, `DB.MemoryUsed`. Native QueryChunks/Exec accept SQL text; SELECT value parameters use database/sql. |
+| `database/sql` | `OpenSQLDB`; SELECT parameters, prepared syntax and queries/statements through the same engine. Transactions remain unsupported. |
+| Custom sources | `Config.TableFunctions`, `TableFunction`, `BatchReader`, `BatchWriter`; fixed-schema, zero-argument sources. |
+| Custom scalar functions | `Config.ScalarFunctions`, `ScalarFunction`, `ScalarValue`, NULL policies and `NewHMACSHA256ScalarFunction`. |
+| Structured export | `DB.CopyTo`, `CopyOptions`, `ExportResult`, `Config.ParquetKeys` and `ParquetKeyResolver`. |
 | Catalog | `Open` constructs a MemoryCatalog shared within that DB instance. SQLiteCatalog exists internally, but Config has no catalog injection or persistence option. |
 | Data sources and COPY destinations | `Config.LocalFiles` and `Config.S3` register explicitly configured local and S3 drivers. Unconfigured schemes fail explicitly. TempDir/ManifestDir configure spill and recovery state. |
 | Other protocol adapters | SFTP, FTP and WebDAV implementations are internal; Config has no public driver registration option. |
@@ -47,12 +50,39 @@ defer db.Close()
 | `SpillBlockBytes` | 64 KiB |
 | `CatalogMaxEntries` | 4096 |
 | `ParquetMetadataEntries` | 256 |
+| `Workers` | 1 |
+| `BlockingQueue` | 1 |
 | `TempDir` | `filepath.Join(os.TempDir(), "fssql-spill")` |
 | `ManifestDir` | `filepath.Join(os.TempDir(), "fssql-copy-manifests")` |
+| `LocalFiles`, `S3` | nil; no local/S3 data driver registered |
+| `TableFunctions`, `ScalarFunctions` | empty; built-ins only |
+| `ParquetKeys` | nil; no application-provided export key resolver |
 
 MemoryUsed and MemoryLimitBytes describe engine-managed memory, not total process RSS. Configuring local spill or manifest paths does not enable reading or exporting local data files; configure `LocalFiles.RootDir` explicitly for local data access.
 
+`SpillMemoryBudgetBytes` is an operator policy, not a separate memory allowance; hash joins use an effective minimum budget of 4096 bytes. All managed allocations still share the DB memory limit. CROSS build inputs remain resident, and some stateful window/sampling plans execute serially even when `Workers` is higher. Caller allocations inside source/UDF callbacks are outside managed-memory accounting.
+
 `DB.Close` prevents new work. Query calls already in progress retain their own query-scoped context/ownership and finish or cancel through the supplied context.
+
+### Local files
+
+`LocalFileConfig.RootDir` must be an absolute directory. Use `FileURI` for platform paths rather than constructing `file://` strings, especially on Windows. Configuring a root does not make paths outside that root accessible.
+
+```go
+root, err := filepath.Abs("data") // an existing application data directory
+if err != nil { return err }
+db, err := gosql.Open(gosql.Config{
+    LocalFiles: &gosql.LocalFileConfig{RootDir: root},
+})
+if err != nil { return err }
+defer db.Close()
+uri, err := gosql.FileURI(filepath.Join(root, "input.parquet"))
+if err != nil { return err }
+// Use SQL quoting for native SQL text, or bind uri through database/sql:
+_ = uri
+```
+
+With an `OpenSQLDB` instance configured for the same root, use `QueryContext(ctx, "SELECT * FROM read_parquet(?)", uri)`. Parameters supply values; table names, column identifiers and SQL fragments cannot be parameters.
 
 ### Native chunk query API
 
@@ -80,12 +110,20 @@ Result schema is returned as `[]gosql.Column`. Public logical type metadata uses
 - `RowCount()` and `ColumnCount()`;
 - `Type(column)` and `IsNull(row, column)`;
 - exact integer/date/timestamp/narrow-DECIMAL access through `Int64`;
+- unsigned integers through `Uint64`;
 - FLOAT/DOUBLE through `Float64`;
 - BOOLEAN through `Bool`;
 - VARCHAR through `String`;
+- BLOB through `Bytes`, which returns a copy that can outlive the callback;
 - HUGEINT and DECIMAL width > 18 through lossless `Int128`.
 
 `gosql.Int128` is the public two-limb signed 128-bit representation. Its `String` method returns exact base-10 text.
+
+Cell accessors use zero-based `(row, column)` indexes and return `(value, valid, error)`. `valid == false` with no error means SQL NULL; the zero value is not a substitute for checking validity. Type/index mismatches return errors. `Type(column)` describes the logical type; DECIMAL uses `Width`/`Scale`, LIST uses `Child`, and STRUCT uses `Fields`.
+
+Native DECIMAL integers are unscaled storage values: DECIMAL(10,2) value 12.34 reads as 1234. `Int128.String()` also formats the unscaled integer; apply the declared scale when formatting a wide DECIMAL. DATE uses days since the Unix epoch; timestamp integer units follow the source logical timestamp type. Cast explicitly to `TIMESTAMP_NS` when callers require a fixed native unit instead of inferring it from `TIMESTAMPTZ` alone.
+
+Public constructors include `UTinyIntType`, `USmallIntType`, `UIntegerType`, `UBigIntType`, `BlobType`, `TimestampNSType` and `TimestampTZType`. Other scalar types can be described with `Type{ID: "BIGINT"}` or `Type{ID: "DECIMAL", Width: 10, Scale: 2}`.
 
 Nested LIST/STRUCT logical metadata is public through `Type.Child`/`Type.Fields`. The current public Chunk has no LIST/STRUCT element-value accessors, so callers cannot traverse nested values through this API. The database/sql adapter also rejects these values instead of coercing them into `driver.Value`.
 
@@ -96,6 +134,93 @@ err := db.Exec(ctx, "COPY (SELECT 1) TO 's3://bucket/out.parquet'")
 ```
 
 `Exec` runs a Stable statement and discards any produced result chunks. It is intended for DDL/control/COPY statements. SELECT callers should use `QueryChunks` or `database/sql`.
+
+### Structured export
+
+```go
+result, err := db.CopyTo(ctx, "SELECT 1 AS id", destination, gosql.CopyOptions{
+    Format: gosql.CopyFormatParquet,
+    Compression: "snappy",
+})
+if err != nil { return err }
+// result.Rows, result.Bytes and result.Columns describe committed output.
+```
+
+`destination` must use an enabled local/S3 driver. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity`, `gzip` or `zstd`; Parquet uses page compression `identity` or `snappy`. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
+
+For encrypted Parquet export, set `CopyOptions.Encryption` to `ParquetEncryptionOptions{Algorithm: gosql.ParquetAES256GCM, KeyID: keyID}` and provide `Config.ParquetKeys`. The resolver receives `(context.Context, keyID, algorithm)` and must return 16 bytes for `ParquetAES128GCM` or 32 bytes for `ParquetAES256GCM`. SQL/options/manifests carry the key identity, not key bytes. This is an export API; it does not expose a general encrypted-file read key provider.
+
+### Go table and scalar functions
+
+Register definitions through `Config.TableFunctions` / `Config.ScalarFunctions` when opening either API. Registration is DB-scoped; names must be valid function identifiers and cannot collide with existing functions.
+
+| API | Contract |
+| --- | --- |
+| `TableFunction{Name, Columns, Open}` | Fixed nonempty schema, zero SQL arguments; up to 27 registered definitions. Open is lazy and at most once per query for that registered source. |
+| `BatchReader.Next(ctx, writer)` | Fill at most `writer.Capacity()` rows and return the row count. `(0, io.EOF)` ends the source; `(n > 0, io.EOF)` publishes the last batch. Return errors to abort. |
+| `BatchReader.Close()` | Release caller-owned source resources when the query finishes, fails or closes early. |
+| `BatchWriter` | Valid only during Next; setters copy into engine-owned storage. Use `SetNull` explicitly for NULL cells and do not retain the writer. |
+| `ScalarFunction` | Declare `Name`, fixed `Arguments`, `Result`, `NullHandling`, `Deterministic` metadata and `Eval`. Eval returns a `ScalarValue` or an error that aborts the query. |
+| `ScalarNullPropagate` | Default: any NULL input produces NULL without invoking Eval. |
+| `ScalarNullCall` | Eval receives NULL inputs as `ScalarValue{Valid: false}` and decides the result. |
+
+BatchWriter provides `SetBool`, `SetInt64`, `SetUint64`, `SetFloat64`, `SetDecimal`, `SetString`, `SetBytes`, `SetDate`, `SetTimestamp` and `SetTimestampNS`. `SetDecimal` accepts exact decimal text. ScalarValue uses the corresponding typed field (`Int128` for HUGEINT, `Decimal` text for DECIMAL, `Time` for temporal values); `Valid: false` returns NULL. Variable-width UDF inputs/results are copied at the boundary. Callbacks should honor cancellation where available and synchronize shared mutable state if workers can invoke them concurrently; `Deterministic` is metadata, not a promise about invocation counts.
+
+For a bounded source returning IDs 1, 2 and 3, the reader and registration can be implemented as follows (imports: context, io and gosql):
+
+```go
+type idReader struct { next int64 }
+
+func (r *idReader) Next(ctx context.Context, w gosql.BatchWriter) (int, error) {
+    if err := ctx.Err(); err != nil { return 0, err }
+    if r.next == 3 { return 0, io.EOF }
+    n := min(w.Capacity(), int(3-r.next))
+    for row := 0; row < n; row++ {
+        if err := w.SetInt64(row, 0, r.next+int64(row)+1); err != nil {
+            return 0, err
+        }
+    }
+    r.next += int64(n)
+    return n, nil
+}
+func (*idReader) Close() error { return nil }
+
+func appSource() gosql.TableFunction {
+    return gosql.TableFunction{
+        Name: "app_rows",
+        Columns: []gosql.Column{{Name: "id", Type: gosql.Type{ID: "BIGINT"}}},
+        Open: func(context.Context) (gosql.BatchReader, error) {
+            return &idReader{}, nil
+        },
+    }
+}
+```
+
+Open with `gosql.Config{TableFunctions: []gosql.TableFunction{appSource()}}`, then query `SELECT sum(id) FROM app_rows()`; its result is 6. `Config.TableFunctions` is also supported by `OpenSQLDB`.
+
+For example, a typed VARCHAR UDF can be registered as follows:
+
+```go
+upper := gosql.ScalarFunction{
+    Name: "app_upper",
+    Arguments: []gosql.Type{{ID: "VARCHAR"}},
+    Result: gosql.Type{ID: "VARCHAR"},
+    NullHandling: gosql.ScalarNullPropagate,
+    Deterministic: true,
+    Eval: func(args []gosql.ScalarValue) (gosql.ScalarValue, error) {
+        return gosql.ScalarValue{
+            Type: gosql.Type{ID: "VARCHAR"}, Valid: true,
+            String: strings.ToUpper(args[0].String),
+        }, nil
+    },
+}
+// gosql.OpenSQLDB(gosql.Config{ScalarFunctions: []gosql.ScalarFunction{upper}})
+// SELECT app_upper('hello') returns HELLO; app_upper(NULL) returns NULL.
+```
+
+`NewHMACSHA256ScalarFunction(key)` returns the deterministic VARCHAR function `data_plane_hmac_sha256`, with lowercase hexadecimal output and NULL propagation. An empty key is rejected; the helper copies key bytes into the DB-scoped function definition. Register the returned definition in `Config.ScalarFunctions`.
+
+Runnable source/UDF usage and lifecycle cases are covered by [table function tests](../pkg/gosql/table_function_test.go), [UDF tests](../pkg/gosql/phase4_udf_test.go) and [HMAC tests](../pkg/gosql/phase4_test.go).
 
 ### Managed-memory observation
 
@@ -128,6 +253,23 @@ Current boundary rules:
 - LIST/STRUCT values are rejected by the row adapter; the current public native Chunk exposes their type metadata but has no nested value accessors.
 - DECIMAL/HUGEINT cross `database/sql` as exact base-10 text. Use an explicit CAST for decimal/wide-integer input, for example `SELECT CAST(? AS DECIMAL(38,2))` with a decimal string.
 - `LastInsertId` is not applicable.
+- `RowsAffected()` currently returns zero; use `CopyTo` when export row/byte counts are required. `ColumnTypes` exposes database type names and nullability; precision/scale and Go scan-type metadata are not supplied by adapter-specific interfaces.
+
+### Row value representation
+
+| SQL result | Native Chunk | database/sql driver value |
+| --- | --- | --- |
+| Signed integers | `Int64` | int64 |
+| UTINYINT / USMALLINT / UINTEGER | `Uint64` | int64 |
+| UBIGINT | `Uint64` | exact decimal string |
+| HUGEINT | `Int128` | exact decimal string |
+| DECIMAL | `Int64` or `Int128`, unscaled | scaled decimal string |
+| FLOAT / DOUBLE | `Float64` | float64 |
+| BOOLEAN | `Bool` | bool |
+| VARCHAR / BLOB | `String` / `Bytes` | string / copied []byte |
+| DATE / timestamps | `Int64` raw temporal values | time.Time in UTC |
+| NULL | accessor validity is false | nil; use sql.Null* or nullable destinations |
+| LIST / STRUCT | type metadata only | explicit error for non-NULL values |
 
 ```go
 stmt, err := sqlDB.PrepareContext(ctx, "SELECT CAST($amount AS DECIMAL(38,2))")

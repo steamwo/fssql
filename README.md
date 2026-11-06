@@ -61,19 +61,24 @@ database/sql: 42
 | 能力 | 当前入口与边界 |
 | --- | --- |
 | 原生查询 | `Open` → `QueryChunks`；Chunk 仅在回调期间有效，结果列信息通过 `[]Column` 返回。 |
-| 行式查询 | `OpenSQLDB` 返回 `*sql.DB`；使用 `QueryContext`、`QueryRowContext`、`ExecContext`。 |
-| 控制语句与导出 | `DB.Exec` 执行 DDL、控制语句和 COPY；COPY 目标必须由已配置的 VFS driver 支持。 |
-| 数据源 | 配置 `Config.S3` 后注册 S3；可使用 `read_parquet`、`read_csv`、`read_json`、`read_ndjson` 等表函数。零配置示例使用不需要数据源的常量查询。 |
+| 行式查询 | `OpenSQLDB` 返回 `*sql.DB`；支持 SELECT 参数、`PrepareContext` 及上下文取消。 |
+| 控制语句与导出 | `DB.Exec` 执行 DDL、控制语句和 COPY；`DB.CopyTo` 提供结构化选项及导出统计。目标由已配置的 VFS driver 支持。 |
+| 数据源 | `Config.LocalFiles` 开启受根目录限制的本地文件访问，`Config.S3` 开启 S3；内建读取函数支持 Parquet、CSV、JSON、NDJSON。 |
+| Go 扩展 | `Config.TableFunctions` 注册固定 schema 的零参数批量表函数；`Config.ScalarFunctions` 注册标量函数，另有 HMAC-SHA256 辅助构造器。 |
 | Catalog | `Open` 当前使用 MemoryCatalog；其元数据保存在当前 DB 实例内。 |
 | 资源控制 | `Config` 配置内存、临时存储、spill、worker 和队列限制；`MemoryUsed` 统计引擎受管内存。 |
 
 当前 `Config` 没有 SQLiteCatalog、自定义 VFS、SFTP、FTP 或 WebDAV 的注入入口，也没有公共 HTTP 服务构造器。内部模块的实现范围与外部项目可直接使用的范围，请以[公共 API 文档](docs/public-api.md)为准。
 
-`database/sql` 当前不支持查询参数、事务和预编译语句；DECIMAL/HUGEINT 以精确十进制文本返回。LIST/STRUCT 公开类型元数据，但当前 `Chunk` 没有读取嵌套元素值的方法。
+SELECT 参数支持 `?`、`$1` 或 `$name`，预编译语句缓存解析结果；每次执行重新绑定参数并取得语句快照。事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回。LIST/STRUCT 公开类型元数据，但当前 `Chunk` 没有读取嵌套元素值的方法。
+
+SQL 已实现非递归 CTE、集合谓词、嵌套标量子查询、参数域去相关，以及显式/隐式 LATERAL 派生表关联。具体支持范围、拒绝边界和验证入口见[能力文档](docs/architecture/feature-contract.md)，不代表完整 DuckDB SQL 兼容或全部性能验收完成。
 
 ## 文档与开发
 
 - [公共 API、资源默认值与使用边界](docs/public-api.md)
+- [SQL、数据源和执行能力矩阵](docs/architecture/feature-contract.md)
+- [相关子查询与 LATERAL 的实现和支持范围](docs/architecture/subquery-lowering.md)
 - [架构约束](ARCHITECTURE.md)
 - [项目测试规范与 DuckDB 对标方案](docs/testing-standard.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
