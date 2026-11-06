@@ -38,7 +38,7 @@ func TestParquetEarlyFilterAcrossBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := db.CopyTo(context.Background(), fmt.Sprintf("SELECT id, payload, CASE WHEN flag = '' THEN NULL ELSE flag END AS flag FROM read_csv('%s', HEADER=true)", csvURI), parquetURI, CopyOptions{Format: CopyFormatParquet}); err != nil {
+	if _, err := db.CopyTo(context.Background(), fmt.Sprintf("SELECT id, payload, CASE WHEN flag = '' THEN NULL ELSE flag END AS flag FROM read_csv('%s', HEADER=true, columns={'id':'BIGINT','payload':'VARCHAR','flag':'VARCHAR'})", csvURI), parquetURI, CopyOptions{Format: CopyFormatParquet}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {

@@ -30,6 +30,7 @@ const (
 
 // ColumnBinding 是输入 relation 中可解析列的控制面描述。
 type ColumnBinding struct {
+	TableColumnIndex int // TableColumnIndex 保留限定关系中的原始列顺序
 	Table    string            // Table 是表名或 alias；空字符串表示无 qualifier。
 	Name     string            // Name 是规范化列名。
 	Type     types.LogicalType // Type 是列的逻辑类型。

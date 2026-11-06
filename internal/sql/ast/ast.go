@@ -112,6 +112,7 @@ type SelectItem struct {
 	Span  Span        // Span 覆盖表达式/星号及 alias。
 	Expr  Expr        // Expr 是普通投影表达式；Star=true 时为空。
 	Star  bool        // Star 表示 SELECT * 投影项。
+	StarQualifier *Identifier // StarQualifier 是限定星号的关系名称，为空时展开所有可见列
 	Alias *Identifier // Alias 是可选输出别名。
 }
 

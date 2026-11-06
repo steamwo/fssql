@@ -193,7 +193,9 @@ func (b *QueryBinder) BindSelect(ctx context.Context, stmt *ast.SelectStmt) (*Bo
 			if source == nil || len(scope.Columns) == 0 {
 				return nil, local.errorAt(item.Span, "SELECT * requires a FROM relation")
 			}
-			for _, col := range scope.Columns {
+			columns, err := qualifiedStarColumns(scope, item.StarQualifier)
+			if err != nil { return nil, local.errorAt(item.Span, err.Error()) }
+			for _, col := range columns {
 				schemaCol := source.Columns[col.Index]
 				e := &BoundExpression{Kind: BoundColumn, Span: item.Span, Type: cloneLogicalType(col.Type), Nullable: schemaCol.Nullable, ColumnIndex: col.Index}
 				o := RelationColumn{Name: schemaCol.Name, Type: cloneLogicalType(schemaCol.Type), Nullable: schemaCol.Nullable}
@@ -661,7 +663,7 @@ func relationAlias(name ast.QualifiedName, alias *ast.Identifier) string {
 func makeScope(alias string, cols []RelationColumn) Scope {
 	s := Scope{Columns: make([]ColumnBinding, len(cols))}
 	for i, c := range cols {
-		s.Columns[i] = ColumnBinding{Table: alias, Name: c.Name, Type: cloneLogicalType(c.Type), Nullable: c.Nullable, Index: i}
+		s.Columns[i] = ColumnBinding{Table: alias, Name: c.Name, Type: cloneLogicalType(c.Type), Nullable: c.Nullable, Index: i, TableColumnIndex: i}
 	}
 	return s
 }

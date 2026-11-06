@@ -206,12 +206,39 @@ func rewriteWindowProject(project *LogicalPlan)(*LogicalPlan,error){
 		valueOffset:=1;if w.FunctionID==function.WindowSumID{valueOffset=2}
 		need:=spec.partition+spec.order
 		if len(w.Children)<valueOffset+need{return nil,fmt.Errorf("planner: incomplete window arguments")}
-		keys:=make([]SortKey,0,need)
-		for k:=0;k<need;k++{expr:=w.Children[valueOffset+k];if expr==nil||expr.Kind!=binder.BoundColumn{return nil,fmt.Errorf("planner: window partition/order expressions must be materialized columns")};key:=SortKey{Expr:expr};if k>=spec.partition{oi:=k-spec.partition;key.Descending=spec.desc[oi]=='1';nf:=spec.nulls[oi]=='f';key.NullsFirst=&nf};keys=append(keys,key)}
+		stageWindow := *w
+		stageWindow.Children = append([]*binder.BoundExpression(nil), w.Children...)
+		projection := passThrough(child.Output)
+		materializedOut := clonePlannerColumns(child.Output)
+		keys := make([]SortKey, 0, need)
+		for k := 0; k < need; k++ {
+			expr := w.Children[valueOffset+k]
+			if expr == nil {
+				return nil, fmt.Errorf("planner: incomplete window key")
+			}
+			if expr.Kind != binder.BoundColumn {
+				index := len(materializedOut)
+				projection = append(projection, expr)
+				materializedOut = append(materializedOut, Column{Name: fmt.Sprintf("__fssql_window_key_%d", index), Type: expr.Type, Nullable: expr.Nullable})
+				expr = &binder.BoundExpression{Kind: binder.BoundColumn, Type: expr.Type, Nullable: expr.Nullable, ColumnIndex: index}
+				stageWindow.Children[valueOffset+k] = expr
+			}
+			key := SortKey{Expr: expr}
+			if k >= spec.partition {
+				oi := k - spec.partition
+				key.Descending = spec.desc[oi] == '1'
+				nf := spec.nulls[oi] == 'f'
+				key.NullsFirst = &nf
+			}
+			keys = append(keys, key)
+		}
+		if len(materializedOut) != len(child.Output) {
+			child = &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{child}, Output: materializedOut, Projection: projection}
+		}
 		if len(keys)>0{child=&LogicalPlan{Kind:LogicalSort,Children:[]*LogicalPlan{child},Output:clonePlannerColumns(child.Output),Sort:keys}}
 		base:=len(child.Output)
 		stageProjection:=passThrough(child.Output)
-		stageProjection=append(stageProjection,w)
+		stageProjection=append(stageProjection,&stageWindow)
 		stageOut:=clonePlannerColumns(child.Output)
 		column:=windowColumn(w,base)
 		stageOut=append(stageOut,column)

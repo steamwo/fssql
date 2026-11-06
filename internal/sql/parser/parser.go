@@ -119,7 +119,15 @@ func (p *Parser) parseSelectList() ([]ast.SelectItem, error) {
 	var out []ast.SelectItem
 	for {
 		start := p.peek().Span.Start; item := ast.SelectItem{}
-		if p.accept(lexer.Star) { item.Star = true } else { e, err := p.parseExpr(0); if err != nil { return nil, err }; item.Expr = e }
+		if p.accept(lexer.Star) {
+			item.Star = true
+		} else if p.pos+2 < len(p.tokens) && (p.peek().Kind == lexer.Identifier || p.peek().Kind == lexer.QuotedIdentifier) && p.tokens[p.pos+1].Kind == lexer.Dot && p.tokens[p.pos+2].Kind == lexer.Star {
+			id, err := p.parseIdentifier()
+			if err != nil { return nil, err }
+			p.pos += 2
+			item.Star = true
+			item.StarQualifier = &id
+		} else { e, err := p.parseExpr(0); if err != nil { return nil, err }; item.Expr = e }
 		if p.accept(lexer.KeywordAs) { id, err := p.parseIdentifier(); if err != nil { return nil, err }; item.Alias = &id
 		} else if p.peek().Kind == lexer.Identifier || p.peek().Kind == lexer.QuotedIdentifier { id, _ := p.parseIdentifier(); item.Alias = &id }
 		item.Span = ast.Span{Start: start, End: p.previous().Span.End}; out = append(out, item)

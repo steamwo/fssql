@@ -10,6 +10,7 @@ import (
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/sql/ast"
 	"github.com/steamwo/fssql/internal/sql/parser"
+	"github.com/steamwo/fssql/internal/tablefunc"
 )
 
 type fakeRelationResolver struct {
@@ -97,7 +98,11 @@ func TestQueryBinderUsesRealTableFunctionResolverBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if q.Source.Kind != RelationTableFunction || q.Source.FunctionID != function.ReadCSVID || q.Source.Fingerprint == "" || q.Source.Source != "s3://bucket/a.csv" {
+	source, options, encoded, err := tablefunc.Decode(q.Source.Source)
+	if err != nil || !encoded || source != "s3://bucket/a.csv" || options["allow_quoted_nulls"] != "true" {
+		t.Fatalf("source=%s options=%v encoded=%v err=%v", source, options, encoded, err)
+	}
+	if q.Source.Kind != RelationTableFunction || q.Source.FunctionID != function.ReadCSVID || q.Source.Fingerprint == "" {
 		t.Fatalf("source=%+v", q.Source)
 	}
 }

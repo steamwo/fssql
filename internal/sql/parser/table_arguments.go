@@ -74,8 +74,9 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 		call.Args = []ast.Expr{first}
 		return nil
 	}
-	if len(opts) == 0 {
-		return nil
+	// SQL CSV 默认将空字段（包括引号空字段）识别为 NULL
+	if _, specified := opts["allow_quoted_nulls"]; !specified {
+		opts["allow_quoted_nulls"] = "true"
 	}
 	token := tablefunc.Encode(first.Value, opts)
 	call.Args = []ast.Expr{&ast.LiteralExpr{Span: call.Span, Kind: ast.LiteralString, Value: token}}
