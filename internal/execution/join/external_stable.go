@@ -200,6 +200,7 @@ type stableExternalProbeSink struct {
 	downstream pipeline.Sink
 }
 
+// Consume 保持 outer/semi/anti 语义，并让 INNER 复用已验证的整数直接索引。
 func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	j := s.join
 	core := j.core
@@ -227,19 +228,9 @@ func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.Dat
 	}
 	core.mu.Unlock()
 
-	var hashes [vector.DefaultVectorSize]uint64
-	if err := exechash.HashChunk(chunk, core.probeKeys, hashes[:chunk.Cardinality]); err != nil {
-		core.recordProbeFailure(err)
-		return err
-	}
-	comparer, err := exechash.NewChunkKeyComparer(chunk, core.probeKeys)
-	if err != nil {
-		core.recordProbeFailure(err)
-		return err
-	}
 	emitter := newBatchEmitter(core.config.Type, core.config.Scope, core.config.Buffers, core.config.LeftTypes, core.config.RightTypes, core.buildSide, core.buildLayout, s.downstream)
 	emitter.required = core.config.RequiredOutput
-	if err := core.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], comparer, emitter, j); err != nil {
+	if err := core.probeChunk(ctx, chunk, &emitter, j); err != nil {
 		emitter.abort()
 		core.recordProbeFailure(err)
 		return err

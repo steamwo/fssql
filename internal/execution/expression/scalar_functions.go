@@ -162,7 +162,12 @@ func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []Scalar
 	return out,nil
 }
 
-func substrRunes(s string,start int64,length *int64)string{r:=[]rune(s);n:=int64(len(r));var i int64;if start>0{i=start-1}else if start<0{i=n+start}else{i=0};if i<0{i=0};if i>n{i=n};j:=n;if length!=nil{if *length<=0{return ""};j=i+*length;if j>n{j=n}};return string(r[i:j])}
+// substrRunes 按 DuckDB 的 1-based 起点语义切片。
+//
+// 起点 0 表示第一个字符之前：substr('abc',0,2) = "a"；负起点从末尾倒数，
+// 越过开头的长度会被自然截短，例如 substr('abc',-4,2) = "a"。省略长度时
+// 起点 0 和越界负值都钳到第一个字符。
+func substrRunes(s string,start int64,length *int64)string{r:=[]rune(s);n:=int64(len(r));var begin int64;if start>0{begin=start-1}else if start<0{begin=n+start}else{begin=-1};if length==nil{if begin<0{begin=0};if begin>n{begin=n};return string(r[begin:])};if *length<=0{return ""};end:=begin+*length;if begin<0{begin=0};if end<0{end=0};if begin>n{begin=n};if end>n{end=n};if end<=begin{return ""};return string(r[begin:end])}
 func strposRunes(s,needle string)int{if needle==""{return 1};sr,nr:=[]rune(s),[]rune(needle);for i:=0;i+len(nr)<=len(sr);i++{ok:=true;for j:=range nr{if sr[i+j]!=nr[j]{ok=false;break}};if ok{return i+1}};return 0}
 
 func floorScalar(t types.LogicalType,a ScalarValue)(ScalarValue,error){out:=a;out.Type=t;switch t.ID{case types.Float,types.Double:out.Float64=math.Floor(a.Float64);case types.Decimal:scale:=t.Decimal.Scale;if scale==0{return out,nil};pow:=new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(scale)),nil);n:=types.Int128Big(a.Int128);q,r:=new(big.Int),new(big.Int);q.QuoRem(n,pow,r);if n.Sign()<0&&r.Sign()!=0{q.Sub(q,big.NewInt(1))};q.Mul(q,pow);v,ok:=types.Int128FromBig(q);if !ok{return ScalarValue{},fmt.Errorf("floor DECIMAL overflow")};out.Int128=v};return out,nil}
@@ -194,17 +199,23 @@ func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
 	}
 	if v.Type.ID==types.Decimal{
 		if target.ID==types.Double||target.ID==types.Float{f,_:=new(big.Rat).SetFrac(types.Int128Big(v.Int128),new(big.Int).Exp(big.NewInt(10),big.NewInt(int64(v.Type.Decimal.Scale)),nil)).Float64();out.Float64=f;return out,nil}
+		if target.ID==types.Boolean{out.Bool=v.Int128.Lo!=0||v.Int128.Hi!=0;return out,nil}
 		return ScalarValue{},fmt.Errorf("unsupported DECIMAL CAST")
 	}
 	if target.IsUnsignedInteger(){
 		var x uint64;var err error
-		switch{case v.Type.IsUnsignedInteger():x=v.Uint64;case castSignedIntegerType(v.Type):if v.Int64<0{return ScalarValue{},fmt.Errorf("negative value cannot CAST to unsigned")};x=uint64(v.Int64);case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=castFloatToUnsigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> unsigned",v.Type.ID)}
+		switch{case v.Type.ID==types.Boolean:if v.Bool{x=1};case v.Type.IsUnsignedInteger():x=v.Uint64;case castSignedIntegerType(v.Type):if v.Int64<0{return ScalarValue{},fmt.Errorf("negative value cannot CAST to unsigned")};x=uint64(v.Int64);case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=castFloatToUnsigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> unsigned",v.Type.ID)}
 		if err!=nil{return ScalarValue{},err};if x>castUnsignedMax(target.ID){return ScalarValue{},fmt.Errorf("CAST integer overflow")};out.Uint64=x;return out,nil
 	}
 	if castSignedIntegerID(target.ID){
 		var x int64;var err error
-		switch{case v.Type.IsUnsignedInteger():if v.Uint64>uint64(math.MaxInt64){return ScalarValue{},fmt.Errorf("CAST integer overflow")};x=int64(v.Uint64);case castSignedIntegerType(v.Type):x=v.Int64;case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=castFloatToSigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> integer",v.Type.ID)}
+		switch{case v.Type.ID==types.Boolean:if v.Bool{x=1};case v.Type.IsUnsignedInteger():if v.Uint64>uint64(math.MaxInt64){return ScalarValue{},fmt.Errorf("CAST integer overflow")};x=int64(v.Uint64);case castSignedIntegerType(v.Type):x=v.Int64;case v.Type.ID==types.Float||v.Type.ID==types.Double:x,err=castFloatToSigned(v.Float64,target.ID);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> integer",v.Type.ID)}
 		if err!=nil{return ScalarValue{},err};if !castSignedFits(target.ID,x){return ScalarValue{},fmt.Errorf("CAST integer overflow")};out.Int64=x;return out,nil
+	}
+	// BOOLEAN 目标按 DuckDB 语义：0 为 false，非 0 为 true；NULL 已在函数入口传播。
+	if target.ID==types.Boolean{
+		switch{case v.Type.IsUnsignedInteger():out.Bool=v.Uint64!=0;case castSignedIntegerType(v.Type):out.Bool=v.Int64!=0;case v.Type.ID==types.Float||v.Type.ID==types.Double:out.Bool=v.Float64!=0;default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> BOOLEAN",v.Type.ID)}
+		return out,nil
 	}
 	switch target.ID{
 	case types.Float,types.Double:
@@ -241,7 +252,8 @@ func convertTimestampUnit(raw int64,from,to types.TimestampUnit)(int64,error){fu
 func dateToTimestamp(days int64,unit types.TimestampUnit)(int64,error){u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return checkedMulScale(days,86400*u)}
 func timestampToDate(raw int64,unit types.TimestampUnit)(int64,error){u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return floorDiv(raw,86400*u),nil}
 
-func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:text:=temporalTime(v).Format("2006-01-02 15:04:05.999999999");if v.Type.IsTimestampTZ(){text+="+00"};return text,nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
+// scalarText 格式化标量值；BLOB 使用可逆的文本转义表示。
+func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:if v.Type.Binary{return encodeBlobLiteral(v.Bytes),nil};return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:text:=temporalTime(v).Format("2006-01-02 15:04:05.999999999");if v.Type.IsTimestampTZ(){text+="+00"};return text,nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
 func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
 	out:=ScalarValue{Type:t,Valid:true};text:=strings.TrimSpace(s);var err error
 	if t.IsUnsignedInteger(){bits:=0;switch t.ID{case types.TinyInt:bits=8;case types.SmallInt:bits=16;case types.Integer:bits=32;case types.BigInt:bits=64};out.Uint64,err=strconv.ParseUint(text,10,bits);return out,err}
@@ -253,10 +265,70 @@ func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
 	case types.BigInt:out.Int64,err=strconv.ParseInt(text,10,64)
 	case types.Float,types.Double:out.Float64,err=strconv.ParseFloat(text,64)
 	case types.Decimal:out.Int128,err=types.ParseDecimalText(s,t.Decimal.Width,t.Decimal.Scale)
-	case types.Varchar:out.Bytes=[]byte(s)
+	case types.Varchar:
+		if t.Binary {
+			decoded, err := decodeBlobLiteral(s)
+			if err != nil { return ScalarValue{}, err }
+			out.Bytes = decoded
+		} else {
+			out.Bytes = []byte(s)
+		}
 	case types.DateType:var tm time.Time;tm,err=time.Parse("2006-01-02",text);if err==nil{out.Int64=tm.Unix()/86400}
 	case types.TimestampType:var tm time.Time;tm,err=time.ParseInLocation("2006-01-02 15:04:05.999999999",text,time.UTC);if err==nil{switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()}}
 	default:err=fmt.Errorf("CAST target type %d unsupported",t.ID)
 	}
 	return out,err
+}
+
+// encodeBlobLiteral 按 DuckDB 的 BLOB -> VARCHAR 语义保留可打印 ASCII，
+// 将反斜杠、单双引号及其他字节编码为大写 \xHH，保证可无损解码。
+func encodeBlobLiteral(data []byte) string {
+	const digits = "0123456789ABCDEF" // digits 固定转义中的十六进制字母为大写。
+	var out strings.Builder
+	for _, b := range data {
+		if b >= 32 && b <= 126 && b != '\\' && b != '\'' && b != '"' {
+			out.WriteByte(b)
+		} else {
+			out.WriteString(`\x`)
+			out.WriteByte(digits[b>>4])
+			out.WriteByte(digits[b&15])
+		}
+	}
+	return out.String()
+}
+
+// decodeBlobLiteral 按 DuckDB 的 VARCHAR -> BLOB 语义解码 \xHH 转义。
+// 其他反斜杠序列（包括裸反斜杠和 \n）是错误，而不是原样保留。
+func decodeBlobLiteral(s string) ([]byte, error) {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' {
+			out = append(out, s[i])
+			continue
+		}
+		if i+3 >= len(s) || s[i+1] != 'x' {
+			return nil, fmt.Errorf("invalid hex escape code encountered in string -> blob conversion")
+		}
+		high, okHigh := blobHexDigit(s[i+2])
+		low, okLow := blobHexDigit(s[i+3])
+		if !okHigh || !okLow {
+			return nil, fmt.Errorf("invalid hex escape code encountered in string -> blob conversion")
+		}
+		out = append(out, high<<4|low)
+		i += 3
+	}
+	return out, nil
+}
+
+func blobHexDigit(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', true
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, true
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }

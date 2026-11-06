@@ -213,11 +213,13 @@ func NewExternalAggregate(cfg ExternalConfig) (*ExternalAggregate, error) {
 	e.resetShardsToLocal()
 	return e, nil
 }
+// resetLocal 重建本地状态，并将至多 1/16 的算子预算用于可选分组缓存。
 func (e *ExternalAggregate) resetLocal() error {
 	a, err := NewHashAggregate(e.cfg.Scope, e.cfg.Buffers, e.cfg.InputTypes, e.cfg.GroupColumns, e.cfg.Specs, max(e.cfg.EstimatedGroups, 8))
 	if err != nil {
 		return err
 	}
+	a.groupCacheBudget = e.cfg.MemoryBudget / 16
 	e.local = a
 	return nil
 }

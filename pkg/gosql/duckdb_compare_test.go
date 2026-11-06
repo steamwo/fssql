@@ -179,6 +179,9 @@ func TestDuckDBCompareCase(t *testing.T) {
 	resources := finish()
 	managedAfter := db.MemoryUsed()
 	tempAfter := minIOLargeTempBytes(config.TempDir)
+	// 使用精确配额补充目录采样，保持 spill 与回收指标跨平台一致。
+	resources.TempPeak = max(resources.TempPeak, db.temporary.Peak())
+	tempAfter = max(tempAfter, db.temporary.Used())
 	if managedAfter != 0 || tempAfter != 0 {
 		t.Fatalf("resource leak: managed=%d temp=%d", managedAfter, tempAfter)
 	}

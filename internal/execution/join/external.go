@@ -389,6 +389,7 @@ type hybridPartition struct {
 	spilled    bool
 }
 
+// ExternalHashJoin 管理可溢写的哈希分区和可选的唯一整数直接索引。
 type ExternalHashJoin struct {
 	mu      sync.Mutex
 	spillMu sync.Mutex
@@ -407,6 +408,7 @@ type ExternalHashJoin struct {
 	policy       exechash.RepartitionPolicy
 	store        *storagetemp.SpillablePageStore
 	partitions   []hybridPartition
+	dense        *denseIntegerIndex // dense 仅在整个构建端驻留且单整数键唯一时启用。
 	partitionRes *memory.Reservation
 	stats        ExternalStats
 	built        bool
@@ -517,8 +519,12 @@ func (j *ExternalHashJoin) spillTarget() int {
 	return perPartition
 }
 
+// residentBytes 统计驻留行、哈希表及可选直接索引，供预算与峰值检查共用。
 func (j *ExternalHashJoin) residentBytes() int64 {
 	var total int64
+	if j.dense != nil {
+		total += int64(len(j.dense.slots))
+	}
 	for i := range j.partitions {
 		p := &j.partitions[i]
 		if p.resident != nil {
@@ -622,7 +628,12 @@ func (j *ExternalHashJoin) enforceBuildBudget(ctx context.Context) error {
 	return nil
 }
 
+// releaseLocked 在所有 probe worker 退出后回收索引、驻留行及溢写资源。
 func (j *ExternalHashJoin) releaseLocked() {
+	if j.dense != nil {
+		j.dense.release()
+		j.dense = nil
+	}
 	for i := range j.partitions {
 		p := &j.partitions[i]
 		if p.index != nil {
@@ -714,6 +725,7 @@ func (s *externalBuildSink) Consume(ctx context.Context, chunk *vector.DataChunk
 	return nil
 }
 
+// Finalize 冻结构建分区，并在实际范围与唯一性验证通过时建立直接索引。
 func (s *externalBuildSink) Finalize(ctx context.Context) error {
 	j := s.join
 	j.mu.Lock()
@@ -778,6 +790,9 @@ func (s *externalBuildSink) Finalize(ctx context.Context) error {
 		p.index = index
 		j.stats.ResidentBuildPartitions++
 	}
+	if err := j.tryBuildDenseIntegerIndex(ctx); err != nil {
+		return j.failLocked(err)
+	}
 	j.residentBytes()
 	j.built = true
 	return nil
@@ -788,6 +803,7 @@ type externalProbeSink struct {
 	downstream pipeline.Sink
 }
 
+// Consume 在构建端冻结后并发探测，按已验证的键特征选择直接索引或哈希路径。
 func (s *externalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	j := s.join
 	j.mu.Lock()
@@ -814,19 +830,9 @@ func (s *externalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk
 	}
 	j.mu.Unlock()
 
-	var hashes [vector.DefaultVectorSize]uint64
-	if err := exechash.HashChunk(chunk, j.probeKeys, hashes[:chunk.Cardinality]); err != nil {
-		j.recordProbeFailure(err)
-		return err
-	}
-	comparer, err := exechash.NewChunkKeyComparer(chunk, j.probeKeys)
-	if err != nil {
-		j.recordProbeFailure(err)
-		return err
-	}
 	em := newBatchEmitter(Inner, j.config.Scope, j.config.Buffers, j.config.LeftTypes, j.config.RightTypes, j.buildSide, j.buildLayout, s.downstream)
 	em.required = j.config.RequiredOutput
-	if err := j.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], comparer, em, nil); err != nil {
+	if err := j.probeChunk(ctx, chunk, &em, nil); err != nil {
 		em.abort()
 		j.recordProbeFailure(err)
 		return err

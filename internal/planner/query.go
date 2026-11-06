@@ -130,18 +130,7 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		}
 		return &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{child}, Output: relationColumnsToPlanner(relation.Columns), Projection: relation.Projection}, nil
 	case binder.RelationUnion:
-		if len(relation.Children) != 2 {
-			return nil, fmt.Errorf("query planner: UNION ALL requires two inputs")
-		}
-		left, err := p.planRelation(ctx, relation.Children[0])
-		if err != nil {
-			return nil, err
-		}
-		right, err := p.planRelation(ctx, relation.Children[1])
-		if err != nil {
-			return nil, err
-		}
-		return &LogicalPlan{Kind: LogicalUnionAll, Children: []*LogicalPlan{left, right}, Output: relationColumnsToPlanner(relation.Columns)}, nil
+		return p.planUnionRelation(ctx, relation)
 	case binder.RelationSample:
 		if len(relation.Children) != 1 {
 			return nil, fmt.Errorf("query planner: sample requires one input")

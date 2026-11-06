@@ -365,6 +365,20 @@ FSSQL_REQUIRE_DUCKDB=1 go test -count=1 -v ./test/compat -run '^TestDuckDBDiffer
 
 当前 `stable.slt` runner 采用扁平文本比较，尚不满足本文完整类型/行边界/纳秒比较规范；必须扩展后才可覆盖全部新类型和函数。已有通过只对当前 corpus 和比较范围有效。
 
+深度差分入口（窗口、采样、连接、聚合、函数、类型转换、三值逻辑、子查询、跨 4097 行批次，以及 CSV/JSON/NDJSON/Parquet 双向互操作）：
+
+```sh
+FSSQL_REQUIRE_DUCKDB=1 FSSQL_PYTHON=python go test -count=1 -v ./test/compat -run 'TestDuckDB(DifferentialCorpus|DeepDifferential|FileInterop|ParquetTypeInterop)$'
+```
+
+真实 MinIO 入口需要注入 `FSSQL_MINIO_ENDPOINT`、`FSSQL_MINIO_BUCKET`、`FSSQL_MINIO_ACCESS_KEY`、`FSSQL_MINIO_SECRET_KEY`：
+
+```sh
+FSSQL_REQUIRE_DUCKDB=1 FSSQL_PYTHON=python go test -count=1 -v ./test/compat -run '^TestDuckDBMinIODifferential$'
+```
+
+`TestDuckDBDeepDifferential` 固定参考引擎线程数为 1、会话时区为 UTC；fssql 侧用 `batch_rows()` 表函数提供 4097 行，DuckDB 侧用等价的 `UNION ALL` 内联表，避免把解析器线性链性能计入跨批次语义比较。`TestDuckDBFileInterop` 同时验证 fssql 导出→DuckDB 读回、DuckDB 导出→fssql 读回，并把两侧结果与同一份 typed fixture 的规范值比较。`TestDuckDBParquetTypeInterop` 额外覆盖 `DECIMAL(18,2)`、`DECIMAL(38,6)`、`UBIGINT`、`TIMESTAMP_NS` 和 `BLOB` 的双向 Parquet 互读。`TestDuckDBMinIODifferential` 在真实 S3 兼容服务上验证双向 CSV/NDJSON/Parquet、多文件 glob、扫描/过滤/聚合/TopN 和缺失对象错误；测试对象位于唯一前缀并在结束后清理。
+
 ### 9.3 大文件及 microbenchmark
 
 以下大文件脚本依赖 `.cache/agent-verification/minio-test-env.json`、生成的 `large-manifest.json` 和已准备的专用 MinIO fixture。运行前检查 endpoint、bucket、版本及输入摘要。脚本含 Windows/WSL/Docker 环境假设，其他平台需先补同等服务采样适配，不能直接声称跨平台可用。

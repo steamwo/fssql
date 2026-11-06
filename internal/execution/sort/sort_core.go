@@ -114,7 +114,8 @@ func (s *ExternalSort) resetBuilder() error { b,err:=exechash.NewTupleDataCollec
 func (s *ExternalSort) builderBytes() int64 { if s.builder==nil{return 0};return int64(s.builder.AllocatedBytes()) }
 func (s *ExternalSort) updatePeak(){if n:=s.builderBytes();n>s.stats.PeakBuilderBytes{s.stats.PeakBuilderBytes=n}}
 func (s *ExternalSort) appendRun(r *run) error { if r==nil||r.rows==0{if r!=nil&&r.pages!=nil{r.pages.Release()};return nil};if err:=s.runMeta.Resize(int64((len(s.runs)+1)*64));err!=nil{return err};s.runs=append(s.runs,r);s.stats.RunsCreated++;s.stats.SpillPages+=r.pages.Count();return nil }
-func (s *ExternalSort) Consume(ctx context.Context,c *vector.DataChunk) error { if s.finalized{return errors.New("sort finalized")};if c==nil{return errors.New("nil chunk")};if len(c.Columns)!=len(s.cfg.InputTypes){return errors.New("sort input column count mismatch")};for i:=0;i<c.Cardinality;i++{if err:=ctx.Err();err!=nil{return err};if err:=s.builder.AppendChunkRow(c,i);err!=nil{return err}};s.updatePeak();if s.builderBytes()>s.cfg.MemoryBudget{return s.spillBuilder(ctx)};return nil }
+// Consume 按预算积累输入；可归一化键提前预留一半空间，吸收 builder 的倍增扩容和批次粒度。
+func (s *ExternalSort) Consume(ctx context.Context,c *vector.DataChunk) error { if s.finalized{return errors.New("sort finalized")};if c==nil{return errors.New("nil chunk")};if len(c.Columns)!=len(s.cfg.InputTypes){return errors.New("sort input column count mismatch")};for i:=0;i<c.Cardinality;i++{if err:=ctx.Err();err!=nil{return err};if err:=s.builder.AppendChunkRow(c,i);err!=nil{return err}};s.updatePeak();work:=s.normalizedSortBytes();budget:=s.cfg.MemoryBudget;if work>0{budget/=2};if s.builderBytes()+work>budget{return s.spillBuilder(ctx)};return nil }
 
 func compareRowsWith(layout exechash.RowLayout,keys []Key,a,b []byte)(int,error){for _,k:=range keys{ad,av,err:=layout.ColumnData(a,k.Column);if err!=nil{return 0,err};bd,bv,err:=layout.ColumnData(b,k.Column);if err!=nil{return 0,err};if !av||!bv{if !av&&!bv{continue};if !av{if k.NullsFirst{return -1,nil};return 1,nil};if k.NullsFirst{return 1,nil};return -1,nil};cmp,err:=compareEncoded(layout.Columns[k.Column].Type,ad,bd);if err!=nil{return 0,err};if cmp!=0{if k.Desc{cmp=-cmp};return cmp,nil}};return 0,nil}
 func (s *ExternalSort) compareRows(a,b []byte)(int,error){return comparePreparedRows(s.preparedKeys,a,b)}
@@ -156,6 +157,7 @@ func (m *managedIndices) release() {
 		m.data = nil
 	}
 }
+// sortedIndices 优先使用预算内的归一化键，其他类型保留完整 SQL 比较。
 func (s *ExternalSort) sortedIndices() (*managedIndices, error) {
 	n := s.builder.Count()
 	idx, err := newManagedIndices(s.cfg.Scope, s.cfg.Buffers, n)
@@ -166,6 +168,13 @@ func (s *ExternalSort) sortedIndices() (*managedIndices, error) {
 		return idx, nil
 	}
 	row := s.builder.BorrowRowReader()
+	if handled, err := s.sortNormalizedIndices(idx, row); handled {
+		if err != nil {
+			idx.release()
+			return nil, err
+		}
+		return idx, nil
+	}
 	compare := func(a, b int) (int, error) { return s.compareRows(row(a), row(b)) }
 	prefixes, err := s.newStringPrefixes(row, n)
 	if err != nil {

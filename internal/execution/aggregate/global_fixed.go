@@ -10,9 +10,11 @@ import (
 	"github.com/steamwo/fssql/internal/semantics"
 )
 
-// Keep the accumulator in registers for a complete batch. The input view
-// borrows the existing vector; no payload copy or new reservation is needed.
+// updateGlobalFixed 优先使用 flat 类型内核，其他表示通过批次借用视图归约。
 func (a *HashAggregate) updateGlobalFixed(ctx context.Context, st []byte, b BoundSpec, chunk *vector.DataChunk) (bool, error) {
+	if handled, err := a.updateGlobalFlatInteger(ctx, st, b, chunk); handled {
+		return true, err
+	}
 	if handled, err := a.updateGlobalFlatSum(ctx, st, b, chunk); handled {
 		return true, err
 	}

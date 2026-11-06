@@ -196,28 +196,31 @@ func (t *groupTable) Release() {
 	}
 }
 
+// HashAggregate 持有分组、聚合状态及计入同一预算的可选整数键缓存。
 type HashAggregate struct {
-	scope         *memory.Scope
-	bm            *memory.BufferManager
-	inputTypes    []types.LogicalType
-	groupColumns  []int
-	groupKeys     []int
-	groupTypes    []types.LogicalType
-	groupLayout   exechash.RowLayout
-	specs         []BoundSpec
-	layout        AggregateLayout
-	groups        *exechash.TupleDataCollection
-	table         *groupTable
-	states        *memory.Buffer
-	stateCapacity int
-	scratch       *memory.Buffer
-	scratchData   []byte
-	arena         *memory.Buffer
-	arenaUsed     int
-	countScratch  *memory.Buffer
-	countTouched  []int
-	groupRows     [][]byte
-	finalized     bool
+	scope            *memory.Scope
+	bm               *memory.BufferManager
+	inputTypes       []types.LogicalType
+	groupColumns     []int
+	groupKeys        []int
+	groupTypes       []types.LogicalType
+	groupLayout      exechash.RowLayout
+	specs            []BoundSpec
+	layout           AggregateLayout
+	groups           *exechash.TupleDataCollection
+	table            *groupTable
+	states           *memory.Buffer
+	stateCapacity    int
+	scratch          *memory.Buffer
+	scratchData      []byte
+	arena            *memory.Buffer
+	arenaUsed        int
+	countScratch     *memory.Buffer
+	countTouched     []int
+	groupRows        [][]byte
+	groupCache       *memory.Buffer // groupCache 保存单整数键的有界精确映射，计入聚合预算。
+	groupCacheBudget int64          // groupCacheBudget 由外排算子分配可选缓存额度；零值禁用。
+	finalized        bool
 }
 
 func NewHashAggregate(scope *memory.Scope, bm *memory.BufferManager, inputTypes []types.LogicalType, groupColumns []int, specs []Spec, estimatedGroups int) (*HashAggregate, error) {
@@ -297,6 +300,8 @@ func (a *HashAggregate) CountNonNullGroups() int {
 	}
 	return n
 }
+
+// ManagedBytes 统计聚合状态与可选分组缓存使用的全部受管存储。
 func (a *HashAggregate) ManagedBytes() int64 {
 	if a == nil {
 		return 0
@@ -319,6 +324,9 @@ func (a *HashAggregate) ManagedBytes() int64 {
 	}
 	if a.countScratch != nil {
 		n += int64(a.countScratch.Len())
+	}
+	if a.groupCache != nil {
+		n += int64(a.groupCache.Len())
 	}
 	return n
 }
@@ -1219,6 +1227,8 @@ func (a *HashAggregate) CombineStates(ctx context.Context, other *HashAggregate)
 func (a *HashAggregate) Merge(ctx context.Context, partial *vector.DataChunk) error {
 	return errors.New("Merge requires aggregate-state input; use CombineStates")
 }
+
+// Release 释放所有聚合状态与可选缓存；重复调用安全。
 func (a *HashAggregate) Release() {
 	if a.groups != nil {
 		a.groups.Release()
@@ -1247,4 +1257,8 @@ func (a *HashAggregate) Release() {
 	}
 	a.countTouched = nil
 	a.groupRows = nil
+	if a.groupCache != nil {
+		a.groupCache.Release()
+		a.groupCache = nil
+	}
 }

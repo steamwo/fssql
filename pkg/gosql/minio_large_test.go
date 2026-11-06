@@ -554,6 +554,9 @@ func minIOLargeRun(tb testing.TB, scene minIOLargeCase, manifest minIOLargeManif
 	result.LogicalCPUs = runtime.NumCPU()
 	result.ManagedPeak, result.ManagedAfter, result.MemoryLimit = db.memory.Peak(), db.MemoryUsed(), scene.MemoryLimit
 	result.TempAfter = minIOLargeTempBytes(config.TempDir)
+	// 目录元数据采样可能漏报尚未关闭的文件；配额计数精确覆盖实际写入和释放。
+	result.TempPeak = max(result.TempPeak, db.temporary.Peak())
+	result.TempAfter = max(result.TempAfter, db.temporary.Used())
 	result.Allocated, result.GCCycles = after.TotalAlloc-before.TotalAlloc, after.NumGC-before.NumGC
 	result.IORequests, result.IOBytes = meter.requests.Load(), meter.bytes.Load()
 	result.RangeCalls, result.FullGETs, result.BadRanges = meter.ranges.Load(), meter.full.Load(), meter.bad.Load()

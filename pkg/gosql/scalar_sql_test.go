@@ -43,3 +43,183 @@ func TestRandomEvaluatesPerRow(t *testing.T){fn:=TableFunction{Name:"random_rows
 func TestCSVExplicitSchemaAndQuotedNulls(t *testing.T){root:=t.TempDir();path:=filepath.Join(root,"typed.csv");data:="amount,day,ts,note,all_null\n12.34,2026-01-02,2026-01-02 03:04:05,,\n0.01,2026-01-03,2026-01-03 04:05:06,\"\",\n";if err:=os.WriteFile(path,[]byte(data),0600);err!=nil{t.Fatal(err)};uri,err:=FileURI(path);if err!=nil{t.Fatal(err)};db,err:=Open(Config{LocalFiles:&LocalFileConfig{RootDir:root},TempDir:t.TempDir(),ManifestDir:t.TempDir()});if err!=nil{t.Fatal(err)};defer db.Close();sqlText:=fmt.Sprintf("SELECT amount, day, ts, note, all_null FROM read_csv('%s', columns='amount DECIMAL(10,2), day DATE, ts TIMESTAMP, note VARCHAR, all_null BIGINT', auto_detect=false, header=true, allow_quoted_nulls=false)",strings.ReplaceAll(uri,"'","''"));rows:=0;_,err=db.QueryChunks(context.Background(),sqlText,func(c *Chunk)error{for row:=0;row<c.RowCount();row++{amount,ok,e:=c.Int64(row,0);if e!=nil||!ok{return fmt.Errorf("amount valid=%v err=%v",ok,e)};want:=int64(1234);if rows==1{want=1};if amount!=want{return fmt.Errorf("amount=%d want=%d",amount,want)};if null,e:=c.IsNull(row,4);e!=nil||!null{return fmt.Errorf("all_null=%v err=%v",null,e)};noteNull,e:=c.IsNull(row,3);if e!=nil{return e};if rows==0&&!noteNull{return errors.New("unquoted empty field should be NULL")};if rows==1{if noteNull{return errors.New("quoted empty field should remain empty string")};note,ok,e:=c.String(row,3);if e!=nil||!ok||note!=""{return fmt.Errorf("quoted empty=%q valid=%v err=%v",note,ok,e)}};rows++};return nil});if err!=nil{t.Fatal(err)};if rows!=2{t.Fatalf("rows=%d",rows)};if used:=db.MemoryUsed();used!=0{t.Fatalf("managed memory leaked: %d",used)}
 	quoted:=filepath.Join(root,"quoted.csv");if err:=os.WriteFile(quoted,[]byte("\"\"\n"),0600);err!=nil{t.Fatal(err)};quotedURI,_:=FileURI(quoted);sqlText=fmt.Sprintf("SELECT note FROM read_csv('%s', columns='note VARCHAR', auto_detect=false, allow_quoted_nulls=true)",quotedURI);_,err=db.QueryChunks(context.Background(),sqlText,func(c *Chunk)error{null,e:=c.IsNull(0,0);if e!=nil{return e};if !null{return errors.New("allow_quoted_nulls=true should map quoted null literal to NULL")};return nil});if err!=nil{t.Fatal(err)}
 }
+
+
+// TestSubstrDuckDBBoundaries 验证起点 0、负起点、越界长度与 Unicode 的
+// DuckDB 语义：起点 0 表示第一个字符之前，负起点从末尾倒数，越过开头的
+// 长度会被自然截短。
+func TestSubstrDuckDBBoundaries(t *testing.T) {
+	db, err := Open(Config{TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	query := `SELECT substr('abc',0,1), substr('abc',0,2), substr('abc',0,3), substr('abc',0,4),
+	                substr('abc',-1,2), substr('abc',-2,2), substr('abc',-4,2), substr('abc',-4,3),
+	                substr('abc',0), substr('abc',-1), substr('abc',-4),
+	                substr('abc',1,0), substr('abc',1,-1),
+	                substr('你好世界',0,2), substr('你好世界',-2,2)`
+	want := []string{"", "a", "ab", "abc", "c", "bc", "a", "ab", "abc", "c", "abc", "", "", "你", "世界"}
+	_, err = db.QueryChunks(context.Background(), query, func(chunk *Chunk) error {
+		for column, expected := range want {
+			got, valid, err := chunk.String(0, column)
+			if err != nil || !valid || got != expected {
+				return fmt.Errorf("column %d=%q valid=%v err=%v want %q", column, got, valid, err, expected)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used := db.MemoryUsed(); used != 0 {
+		t.Fatalf("managed memory leak: %d", used)
+	}
+}
+
+// TestBooleanNumericCastDuckDBSemantics 验证 BOOLEAN 与数值互转：
+// true=1、false=0；数值 0 为 false，非 0（含负数和浮点）为 true。
+func TestBooleanNumericCastDuckDBSemantics(t *testing.T) {
+	db, err := Open(Config{TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.QueryChunks(context.Background(),
+		"SELECT CAST(TRUE AS INTEGER), CAST(FALSE AS BIGINT), CAST(TRUE AS UTINYINT)",
+		func(chunk *Chunk) error {
+			for column, expected := range []int64{1, 0, 1} {
+				var got int64
+				var valid bool
+				var err error
+				if column == 2 {
+					var unsigned uint64
+					unsigned, valid, err = chunk.Uint64(0, column)
+					got = int64(unsigned)
+				} else {
+					got, valid, err = chunk.Int64(0, column)
+				}
+				if err != nil || !valid || got != expected {
+					return fmt.Errorf("column %d=%d valid=%v err=%v want %d", column, got, valid, err, expected)
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.QueryChunks(context.Background(),
+		"SELECT CAST(0 AS BOOLEAN), CAST(2 AS BOOLEAN), CAST(-3 AS BOOLEAN), CAST(0.5 AS BOOLEAN), CAST(0.0 AS BOOLEAN)",
+		func(chunk *Chunk) error {
+			for column, expected := range []bool{false, true, true, true, false} {
+				got, valid, err := chunk.Bool(0, column)
+				if err != nil || !valid || got != expected {
+					return fmt.Errorf("column %d=%v valid=%v err=%v want %v", column, got, valid, err, expected)
+				}
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if used := db.MemoryUsed(); used != 0 {
+		t.Fatalf("managed memory leak: %d", used)
+	}
+}
+
+// TestBlobLiteralDuckDBSemantics 验证 VARCHAR -> BLOB 只解码 \xHH，
+// 并拒绝裸反斜杠、\n 或不足两位的十六进制转义。
+func TestBlobLiteralDuckDBSemantics(t *testing.T) {
+	db, err := Open(Config{TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	_, err = db.QueryChunks(context.Background(),
+		`SELECT hex(CAST('A\x00\xFF' AS BLOB)), hex(CAST('' AS BLOB)), length(CAST('A\x00\xFF' AS BLOB))`,
+		func(chunk *Chunk) error {
+			for column, expected := range []string{"4100FF", ""} {
+				got, valid, err := chunk.String(0, column)
+				if err != nil || !valid || got != expected {
+					return fmt.Errorf("column %d=%q valid=%v err=%v want %q", column, got, valid, err, expected)
+				}
+			}
+			length, valid, err := chunk.Int64(0, 2)
+			if err != nil || !valid || length != 3 {
+				return fmt.Errorf("length=%d valid=%v err=%v want 3", length, valid, err)
+			}
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sqlText := range []string{
+		`SELECT CAST('A\x4' AS BLOB)`,
+		`SELECT CAST('A\B' AS BLOB)`,
+		`SELECT CAST('\n' AS BLOB)`,
+	} {
+		if _, err := db.QueryChunks(context.Background(), sqlText, func(*Chunk) error { return nil }); err == nil {
+			t.Fatalf("expected invalid BLOB escape error: %s", sqlText)
+		}
+	}
+	if used := db.MemoryUsed(); used != 0 {
+		t.Fatalf("managed memory leak: %d", used)
+	}
+}
+
+// TestBlobVarcharRoundTrip 验证 BLOB 文本转义符合 DuckDB 语义，且往返转换保留原始字节。
+func TestBlobVarcharRoundTrip(t *testing.T) {
+	db, err := Open(Config{TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, tc := range []struct {
+		name    string // name 标识转换边界。
+		literal string // literal 是 BLOB 输入的 SQL 字符串内容。
+		text    string // text 是预期的 VARCHAR 表示。
+		hex     string // hex 是往返转换后预期的字节十六进制。
+	}{
+		{name: "empty", literal: "", text: "", hex: ""},
+		{name: "printable", literal: " Hello, world!~", text: " Hello, world!~", hex: "2048656C6C6F2C20776F726C64217E"},
+		{name: "backslash", literal: `\x5C`, text: `\x5C`, hex: "5C"},
+		{name: "escape_like_bytes", literal: `\x5Cx41`, text: `\x5Cx41`, hex: "5C783431"},
+		{name: "quotes", literal: `\x22\x27`, text: `\x22\x27`, hex: "2227"},
+		{name: "binary", literal: `\x00\x09\x0A\x0D\x1F\x7F\x80\xFF`, text: `\x00\x09\x0A\x0D\x1F\x7F\x80\xFF`, hex: "00090A0D1F7F80FF"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := fmt.Sprintf(`SELECT CAST(payload AS VARCHAR),
+				hex(CAST(CAST(payload AS VARCHAR) AS BLOB)),
+				CAST(CAST(NULL AS BLOB) AS VARCHAR), CAST('\x41' AS VARCHAR)
+				FROM (SELECT CAST('%s' AS BLOB) AS payload) t`, tc.literal)
+			rows := 0
+			_, err := db.QueryChunks(context.Background(), query, func(chunk *Chunk) error {
+				for row := 0; row < chunk.RowCount(); row++ {
+					rows++
+					for column, want := range []string{tc.text, tc.hex} {
+						got, valid, err := chunk.String(row, column)
+						if err != nil || !valid || got != want {
+							return fmt.Errorf("column %d=%q valid=%v err=%v want %q", column, got, valid, err, want)
+						}
+					}
+					if null, err := chunk.IsNull(row, 2); err != nil || !null {
+						return fmt.Errorf("NULL conversion: null=%v err=%v", null, err)
+					}
+					if got, valid, err := chunk.String(row, 3); err != nil || !valid || got != `\x41` {
+						return fmt.Errorf("VARCHAR conversion=%q valid=%v err=%v", got, valid, err)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rows != 1 {
+				t.Fatalf("rows=%d want 1", rows)
+			}
+		})
+	}
+	if used := db.MemoryUsed(); used != 0 {
+		t.Fatalf("managed memory leak: %d", used)
+	}
+}

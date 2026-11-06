@@ -43,18 +43,13 @@ func main() {
 }
 ```
 
-运行 `go run .`，输出 `42`。在本仓库根目录运行以下命令，可同时体验两种 API，无需外部数据源或凭据：
+运行 `go run .`，输出 `42`。在本仓库根目录运行完整示例，无需外部数据源或凭据；示例会在临时目录生成并清理 CSV/JSON/NDJSON/Parquet 文件：
 
 ```sh
 go run ./examples/quickstart
 ```
 
-```text
-native: 42
-database/sql: 42
-```
-
-完整代码见 [quickstart](examples/quickstart/main.go)。
+示例按 8 个分节覆盖原生 Chunk、database/sql、SQL 查询能力、Go 表函数/UDF/HMAC/物化快照、本地文件与导出、Catalog 元数据、资源配置与错误边界。逐节说明与预期输出见 [quickstart README](examples/quickstart/README.md)，代码入口见 [main.go](examples/quickstart/main.go)。
 
 ## 当前公共 API 能力
 

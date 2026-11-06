@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/steamwo/fssql/internal/catalog"
 	"github.com/steamwo/fssql/internal/core/memory"
@@ -218,6 +219,7 @@ func decodeInformationSchemaSnapshot(encoded string, expected stats.DatasetFinge
 
 // informationSchemaColumnsSource 将 frozen metadata snapshot 按默认 chunk 大小物化到 managed Vectors。
 type informationSchemaColumnsSource struct {
+	mu      sync.Mutex // mu 保护多 worker 并发调用 Next 时的游标，与 globSource 一致。
 	scope   *memory.Scope
 	buffers *memory.BufferManager
 	rows    []informationSchemaColumnRow
@@ -237,6 +239,8 @@ func newInformationSchemaColumnsSource(scope *memory.Scope, buffers *memory.Buff
 func (s *informationSchemaColumnsSource) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
 	if s == nil || s.scope == nil || s.buffers == nil { return nil, false, fmt.Errorf("session: information_schema.columns source is uninitialized") }
 	if err := ctx.Err(); err != nil { return nil, false, err }
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.offset >= len(s.rows) { return nil, false, nil }
 	end := s.offset + vector.DefaultVectorSize; if end > len(s.rows) { end = len(s.rows) }
 	count := end - s.offset

@@ -9,9 +9,7 @@ import (
 	exechash "github.com/steamwo/fssql/internal/execution/hash"
 )
 
-// heads probes open-addressed slots in rounds across the entire selection.
-// Each active entry advances one slot per round, exposing independent table
-// reads instead of finishing one row's dependency chain before the next row.
+// heads 按候选轮次批量探测，使用与 Insert/Head 一致的槽位混合规则。
 func (h *rowHashTable) heads(hashes []uint64, rows []int, heads, pending []int) {
 	for i := range rows {
 		heads[i] = -1
@@ -22,7 +20,7 @@ func (h *rowHashTable) heads(hashes []uint64, rows []int, heads, pending []int) 
 		kept := 0
 		for _, candidate := range pending[:n] {
 			hash := hashes[rows[candidate]]
-			slot := h.slot((int(hash) + round) & (h.capacity - 1))
+			slot := h.slot((rowHashStart(hash, h.capacity) + round) & (h.capacity - 1))
 			if slot[0] == 0 {
 				continue
 			}
@@ -43,16 +41,15 @@ type residentProbeScratch struct {
 	matched                                   [vector.DefaultVectorSize]bool
 }
 
-// probeBatch groups resident probes by partition, then advances collision
-// chains in rounds with a compact active selection. Spill serialization stays
-// on the existing bounded writer path. All scratch and borrowed views are local
-// to this Consume call; partition storage remains immutable until Finalize.
+// probeBatch 按分区批量探测，取消检查以 256 行为界；分区存储在 Finalize 前保持不可变。
 func (j *ExternalHashJoin) probeBatch(ctx context.Context, chunk *vector.DataChunk, hashes []uint64, comparer *exechash.ChunkKeyComparer, emitter *batchEmitter, stable *StableExternalHashJoin) error {
 	var counts, starts [256]int
 	var partitionRows, partitions [vector.DefaultVectorSize]int
 	for row, hash := range hashes {
-		if err := ctx.Err(); err != nil {
-			return err
+		if row&255 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 		}
 		part, err := j.partitionFor(hash, 0)
 		if err != nil {

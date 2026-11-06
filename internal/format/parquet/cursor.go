@@ -63,8 +63,10 @@ func (p *columnPageState) release() {
 	}
 }
 
+// ColumnCursor 按列持有页面、字典与可选读取句柄，所有借用在 Close 时结束。
 type ColumnCursor struct {
 	driver   vfs.Driver
+	reader   vfs.RangeReader // reader 惰性复用支持该能力的驱动句柄，由游标关闭。
 	uri      vfs.URI
 	identity vfs.ObjectIdentity
 	meta     *ColumnMetaData
@@ -122,11 +124,16 @@ func NewColumnCursor(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectIdentity
 func (c *ColumnCursor) Metrics() ColumnCursorMetrics { return c.metrics }
 func (c *ColumnCursor) Consumed() int64              { return c.consumed }
 
+// Close 释放页面、字典与当前列持有的可选范围读取句柄。
 func (c *ColumnCursor) Close() {
 	if c == nil || c.closed {
 		return
 	}
 	c.closed = true
+	if c.reader != nil {
+		_ = c.reader.Close()
+		c.reader = nil
+	}
 	c.releasePage()
 	c.releaseHeaderTail()
 	c.cachedHeader, c.cachedHeaderLen = PageHeader{}, 0
@@ -148,6 +155,7 @@ func (c *ColumnCursor) releasePage() {
 	}
 }
 
+// readRange 使用精确受管范围读取；支持可选会话的驱动只在首个实际读请求打开句柄。
 func (c *ColumnCursor) readRange(ctx context.Context, offset, length int64, tag memory.Tag) (*memory.Buffer, error) {
 	if length < 0 || offset < 0 || offset > c.end || length > c.end-offset {
 		return nil, errors.New("parquet: column range exceeds chunk bounds")
@@ -160,7 +168,21 @@ func (c *ColumnCursor) readRange(ctx context.Context, offset, length int64, tag 
 		exp := c.identity
 		expected = &exp
 	}
-	result, err := c.driver.ReadRange(ctx, vfs.RangeRequest{URI: c.uri, Offset: offset, Length: length, Expected: expected, Tag: tag}, c.scope, c.bm)
+	if c.reader == nil {
+		if opener, ok := c.driver.(vfs.RangeReaderOpener); ok {
+			reader, err := opener.OpenRangeReader(ctx, c.uri, expected)
+			if err != nil {
+				return nil, err
+			}
+			c.reader = reader
+		}
+	}
+	request := vfs.RangeRequest{URI: c.uri, Offset: offset, Length: length, Expected: expected, Tag: tag}
+	read := c.driver.ReadRange
+	if c.reader != nil {
+		read = c.reader.ReadRange
+	}
+	result, err := read(ctx, request, c.scope, c.bm)
 	c.metrics.Requests++
 	c.metrics.PlannedBytes += length
 	if err != nil {

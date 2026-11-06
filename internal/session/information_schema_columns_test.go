@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/catalog"
@@ -99,6 +101,72 @@ func TestInformationSchemaColumnsVirtualScan(t *testing.T) {
 		t.Fatal("expected tampered information_schema snapshot rejection")
 	}
 	if err := scope2.Close(); err != nil { t.Fatal(err) }
+}
+
+// TestInformationSchemaColumnsSourceConcurrentNext 验证多 worker 并发调用 Next 时
+// 游标只前进一次，不会重复输出同一批或越界 panic（与 globSource 的并发契约一致）。
+func TestInformationSchemaColumnsSourceConcurrentNext(t *testing.T) {
+	ctx := context.Background()
+	manager := memory.NewManager(4 << 20)
+	scope := manager.NewScope()
+	buffers := memory.NewBufferManager(nil)
+	rows := make([]informationSchemaColumnRow, 5)
+	for i := range rows {
+		rows[i] = informationSchemaColumnRow{
+			TableName:  "events",
+			ColumnName: fmt.Sprintf("c%d", i),
+			TypeName:   "BIGINT",
+			Ordinal:    int32(i + 1),
+		}
+	}
+	source, err := newInformationSchemaColumnsSource(scope, buffers, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 8
+	start := make(chan struct{})
+	errs := make([]error, workers)
+	totals := make([]int, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			<-start
+			for {
+				chunk, ok, err := source.Next(ctx)
+				if err != nil {
+					errs[worker] = err
+					return
+				}
+				if !ok {
+					return
+				}
+				totals[worker] += chunk.Cardinality
+				chunk.Release()
+			}
+		}(worker)
+	}
+	close(start)
+	wg.Wait()
+
+	total := 0
+	for worker := 0; worker < workers; worker++ {
+		if errs[worker] != nil {
+			t.Fatalf("worker %d: %v", worker, errs[worker])
+		}
+		total += totals[worker]
+	}
+	if total != len(rows) {
+		t.Fatalf("并发输出总行数=%d，期望 %d（重复或丢失批次）", total, len(rows))
+	}
+	if err := scope.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if manager.Used() != 0 {
+		t.Fatalf("managed memory leak=%d", manager.Used())
+	}
 }
 
 // TestInformationSchemaColumnsIsNotTableFunction 验证 internal virtual source 不扩大 Stable FunctionCatalog surface。

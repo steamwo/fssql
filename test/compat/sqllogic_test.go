@@ -176,11 +176,15 @@ func TestStableSQLLogicCorpus(t *testing.T) {
 
 type duckDBRequest struct {
 	Queries []string `json:"queries"`
+	// Threads 非零时固定参考引擎线程数，供采样等顺序敏感用例使用。
+	Threads int `json:"threads,omitempty"`
 }
 
 type duckDBResult struct {
 	Values []string `json:"values"`
-	Error  string   `json:"error"`
+	// Columns 是结果列数，用于在值比较之外核对投影形状。
+	Columns int    `json:"columns"`
+	Error   string `json:"error"`
 }
 
 type duckDBResponse struct {
@@ -195,6 +199,7 @@ func TestDuckDBDifferentialCorpus(t *testing.T) {
 	}
 	records := loadCorpus(t)
 	registry := loadDeviationRegistry(t)
+	resetDiffEvidence(t)
 	stableDeviations := validateDeviationRegistry(t, registry, records)
 	request := duckDBRequest{Queries: make([]string, len(records))}
 	for i := range records {
@@ -227,14 +232,27 @@ func TestDuckDBDifferentialCorpus(t *testing.T) {
 	db := openCompatibilityDB(t)
 	defer db.Close()
 	for i, record := range records {
-		ours, oursErr := queryValues(context.Background(), db, record.sql)
+		ours, ourColumns, oursErr := queryValuesWithColumns(context.Background(), db, record.sql)
 		duck := reference.Results[i]
-		matches := oursErr == nil && duck.Error == "" && reflect.DeepEqual(ours, duck.Values)
+		matches := oursErr == nil && duck.Error == "" && ourColumns == duck.Columns && reflect.DeepEqual(ours, duck.Values)
+		recordDiffEvidence(t, diffEvidence{
+			Suite:         "stable-slt",
+			Case:          record.caseID(),
+			SQL:           record.sql,
+			FSSQLValues:   ours,
+			DuckDBValues:  duck.Values,
+			FSSQLColumns:  ourColumns,
+			DuckDBColumns: duck.Columns,
+			FSSQLError:    errorText(oursErr),
+			DuckDBError:   duck.Error,
+			Match:         matches,
+		})
 		deviation, classified := stableDeviations[record.caseID()]
 		if matches {
 			if classified {
 				t.Fatalf("%s: stale %s deviation %s; fssql now matches DuckDB %s", record.caseID(), deviation.Classification, deviation.ID, reference.DuckDBVersion)
 			}
+			logDiffValues(t, record.caseID(), ours, duck.Values)
 			continue
 		}
 

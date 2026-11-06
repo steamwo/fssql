@@ -31,6 +31,7 @@ type PackedTopN struct {
 	layout    exechash.RowLayout
 	prepared  []preparedSortKey
 	rows      *memory.Buffer
+	rowData   []byte // rowData 借用固定行区；生命周期内不扩容，Release 时清空。
 	heap      *managedIndices
 	scratch   *memory.Buffer
 	rowWidth  int
@@ -102,7 +103,7 @@ func NewPackedTopN(cfg PackedTopNConfig) (*PackedTopN, error) {
 	}
 	return &PackedTopN{
 		cfg: cfg, layout: layout, prepared: preparePackedKeys(layout, cfg.Keys),
-		rows: rows, heap: heap, scratch: scratch, rowWidth: layout.FixedWidth,
+		rows: rows, rowData: rows.Bytes(), heap: heap, scratch: scratch, rowWidth: layout.FixedWidth,
 	}, nil
 }
 
@@ -115,10 +116,10 @@ func preparePackedKeys(layout exechash.RowLayout, keys []Key) []preparedSortKey 
 	return prepared
 }
 
-// row 返回指定槽位的编码行。
+// row 返回指定槽位的编码行；固定行区借用避免每次堆比较获取 Buffer 锁。
 func (p *PackedTopN) row(slot int) []byte {
 	start := slot * p.rowWidth
-	return p.rows.Bytes()[start : start+p.rowWidth]
+	return p.rowData[start : start+p.rowWidth]
 }
 
 // worse 判断槽位 a 的行是否严格差于槽位 b，用于维护“堆顶最差”的最大堆。
@@ -328,6 +329,7 @@ func (p *PackedTopN) Release() {
 	if p.rows != nil {
 		p.rows.Release()
 		p.rows = nil
+		p.rowData = nil
 	}
 	if p.heap != nil {
 		p.heap.release()

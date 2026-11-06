@@ -174,6 +174,7 @@ func (d *Driver) List(ctx context.Context, u vfs.URI, opts vfs.ListOptions) (vfs
 	return page, nil
 }
 
+// ReadRange 独立读取一个精确范围；连续扫描可通过 OpenRangeReader 复用已验证的句柄。
 func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager) (vfs.RangeResult, error) {
 	if err := request.Validate(); err != nil {
 		return vfs.RangeResult{}, err
@@ -196,6 +197,23 @@ func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope 
 		return vfs.RangeResult{}, err
 	}
 	defer f.Close()
+	return readFileRange(ctx, request, scope, bm, f, p, nil)
+}
+
+// readFileRange 保留读前、读后及路径身份检查，避免句柄复用掩盖文件修改或替换。
+func readFileRange(ctx context.Context, request vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager, f *os.File, path string, snapshot *vfs.ObjectIdentity) (vfs.RangeResult, error) {
+	if err := request.Validate(); err != nil {
+		return vfs.RangeResult{}, err
+	}
+	if scope == nil || bm == nil {
+		return vfs.RangeResult{}, errors.New("local: managed memory required")
+	}
+	if request.Length > int64(int(^uint(0)>>1)) {
+		return vfs.RangeResult{}, fmt.Errorf("local: range length too large: %d", request.Length)
+	}
+	if err := ctx.Err(); err != nil {
+		return vfs.RangeResult{}, err
+	}
 	before, err := f.Stat()
 	if err != nil {
 		return vfs.RangeResult{}, err
@@ -204,6 +222,9 @@ func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope 
 		return vfs.RangeResult{}, fmt.Errorf("local: not a regular file: %s", request.URI.String())
 	}
 	identity := infoIdentity(before)
+	if snapshot != nil && !snapshot.Matches(identity) {
+		return vfs.RangeResult{}, vfs.ErrObjectChanged
+	}
 	if request.Expected != nil && !request.Expected.Matches(identity) {
 		return vfs.RangeResult{}, vfs.ErrObjectChanged
 	}
@@ -238,7 +259,7 @@ func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope 
 	}
 	// Also verify the pathname still names the same detectable version. On Unix an
 	// open descriptor otherwise continues reading a replaced inode without mixing bytes.
-	afterPath, err := os.Stat(p)
+	afterPath, err := os.Stat(path)
 	if err != nil {
 		return fail(vfs.ErrObjectChanged)
 	}

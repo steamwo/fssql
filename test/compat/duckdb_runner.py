@@ -38,14 +38,21 @@ def main():
     request = json.load(sys.stdin)
     queries = request.get("queries", [])
     con = duckdb.connect(database=":memory:")
+    # 语义基线固定为 UTC；主机本地时区不能让 timezone()/显示规则产生差异。
+    con.execute("SET TimeZone='UTC'")
+    threads = request.get("threads", 0)
+    if threads:
+        con.execute("SET threads=%d" % threads)
     results = []
     for sql in queries:
         try:
-            rows = con.execute(sql).fetchall()
+            cursor = con.execute(sql)
+            rows = cursor.fetchall()
             values = []
             for row in rows:
                 values.extend(canonical(value) for value in row)
-            results.append({"values": values})
+            columns = len(cursor.description) if cursor.description else 0
+            results.append({"values": values, "columns": columns})
         except Exception as exc:
             results.append({"error": str(exc)})
     json.dump({"duckdb_version": duckdb.__version__, "results": results}, sys.stdout)

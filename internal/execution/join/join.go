@@ -80,10 +80,18 @@ func newRowHashTable(scope *memory.Scope, bm *memory.BufferManager, rows int) (*
 func (h *rowHashTable) slot(i int) []byte {
 	return h.slotsData[i*rowHashSlotWidth : (i+1)*rowHashSlotWidth]
 }
+
+// rowHashStart 混入高位熵，避免分区固定的低位再次导致分区内槽位集中。
+func rowHashStart(hash uint64, capacity int) int {
+	return int(hash^(hash>>32)) & (capacity - 1)
+}
+
+// Insert 保留完整哈希与重复键链，槽位定位使用独立于 radix 低位的混合值。
 func (h *rowHashTable) Insert(hash uint64, row int) error {
 	mask := h.capacity - 1
+	start := rowHashStart(hash, h.capacity)
 	for probe := 0; probe < h.capacity; probe++ {
-		idx := (int(hash) + probe) & mask
+		idx := (start + probe) & mask
 		s := h.slot(idx)
 		if s[0] == 0 {
 			s[0] = 1
@@ -100,10 +108,13 @@ func (h *rowHashTable) Insert(hash uint64, row int) error {
 	}
 	return errors.New("join hash table full")
 }
+
+// Head 按插入时相同的槽位混合规则定位完整哈希的链头。
 func (h *rowHashTable) Head(hash uint64) (int, bool) {
 	mask := h.capacity - 1
+	start := rowHashStart(hash, h.capacity)
 	for probe := 0; probe < h.capacity; probe++ {
-		idx := (int(hash) + probe) & mask
+		idx := (start + probe) & mask
 		s := h.slot(idx)
 		if s[0] == 0 {
 			return 0, false

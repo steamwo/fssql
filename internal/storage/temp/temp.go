@@ -238,6 +238,12 @@ type TemporaryStorageManager struct {
 	backend Backend
 }
 
+// Used 返回当前存活临时文件的精确配额用量，不依赖目录元数据刷新。
+func (m *TemporaryStorageManager) Used() int64 { return m.quotas.GlobalUsed() }
+
+// Peak 返回该 manager 生命周期内实际写入临时文件的精确配额峰值。
+func (m *TemporaryStorageManager) Peak() int64 { return m.quotas.GlobalPeak() }
+
 func NewTemporaryStorageManager(root string, quotas *TemporaryMemoryManager) (*TemporaryStorageManager, error) {
 	return newTemporaryStorageManager(root, quotas, osBackend{})
 }

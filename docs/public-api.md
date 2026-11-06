@@ -4,7 +4,7 @@ Status: implemented API reference for the current branch. The frozen v1 baseline
 
 This document describes the implemented public Go API and the internal HTTP adapter's wire contract. Internal package types and constructors are not part of the public Go API. The architecture feature contract describes the engine as a whole; it does not imply that every internal adapter is configurable through `gosql.Config`.
 
-For a complete runnable example of both Go query APIs, see [quickstart](../examples/quickstart/main.go) and run `go run ./examples/quickstart` from the repository root.
+For a complete runnable example covering both Go query APIs and the other public features, see [quickstart](../examples/quickstart/README.md) and run `go run ./examples/quickstart` from the repository root.
 
 ## Availability through the public Go package
 

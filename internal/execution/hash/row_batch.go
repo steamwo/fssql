@@ -40,9 +40,7 @@ func (l RowLayout) MaterializeSelectedRow(row []byte, dst []*vector.Vector, dstR
 	return nil
 }
 
-// SelectEqual compares one collision-chain round column-by-column, compacting
-// surviving candidate indexes after each key. Probe and encoded rows are
-// borrowed and immutable. Selection has space for every candidate.
+// SelectEqual 逐列压缩匹配候选；固定宽度键只在批次入口验证 schema 和列偏移。
 func (c *ChunkKeyComparer) SelectEqual(probeRows []int, layout RowLayout, rows [][]byte, columns []int, nulls NullEquality, selection []int) (int, error) {
 	if !layout.relocatable || len(columns) != len(c.columns) || len(rows) != len(probeRows) || len(selection) < len(rows) {
 		return 0, errors.New("invalid batch key comparison shape")
@@ -57,6 +55,10 @@ func (c *ChunkKeyComparer) SelectEqual(probeRows []int, layout RowLayout, rows [
 	for key, column := range columns {
 		if column < 0 || column >= len(layout.Columns) || !c.chunk.Columns[c.columns[key]].Type.Same(layout.Columns[column].Type) {
 			return 0, errors.New("projected row key type mismatch")
+		}
+		col := layout.Columns[column]
+		if col.Offset < 0 || col.Width < 0 || col.Offset > layout.FixedWidth || col.Width > layout.FixedWidth-col.Offset {
+			return 0, errors.New("invalid encoded key column")
 		}
 		// Select the semantic kernel once per column, including canonical NaNs.
 		equal := bytes.Equal
@@ -79,9 +81,21 @@ func (c *ChunkKeyComparer) SelectEqual(probeRows []int, layout RowLayout, rows [
 			} else {
 				data, valid = c.byteViews[key].Value(probeRows[candidate])
 			}
-			encoded, encodedValid, err := layout.ColumnData(rows[candidate], column)
-			if err != nil {
-				return 0, err
+			var encoded []byte
+			var encodedValid bool
+			if !col.Variable {
+				row := rows[candidate]
+				if len(row) < layout.FixedWidth {
+					return 0, errors.New("short encoded key row")
+				}
+				encodedValid = row[column>>3]&(1<<uint(column&7)) == 0
+				encoded = row[col.Offset : col.Offset+col.Width]
+			} else {
+				var err error
+				encoded, encodedValid, err = layout.ColumnData(rows[candidate], column)
+				if err != nil {
+					return 0, err
+				}
 			}
 			if !valid || !encodedValid {
 				if valid || encodedValid || nulls != NullsEqual {
@@ -101,10 +115,10 @@ func (c *ChunkKeyComparer) SelectEqual(probeRows []int, layout RowLayout, rows [
 	return n, nil
 }
 
-// MaterializeSelectedRows preserves schema indexes and skips unneeded columns.
-// A nil mask means all columns; false entries may have nil destinations.
+// MaterializeSelectedRows 保持 schema 位置并跳过未读取的列；定宽列仅在批次入口验证偏移。
+// nil mask 表示读取全部列，false 位置可使用 nil 目标向量。
 func (l RowLayout) MaterializeSelectedRows(rows [][]byte, dst []*vector.Vector, needed []bool) error {
-	if !l.relocatable || len(dst) != len(l.Columns) || (needed != nil && len(needed) != len(dst)) {
+	if !l.relocatable || l.NullBytes < (len(l.Columns)+7)/8 || l.FixedWidth < l.NullBytes || len(dst) != len(l.Columns) || (needed != nil && len(needed) != len(dst)) {
 		return errors.New("invalid materialize shape")
 	}
 	for _, row := range rows {
@@ -122,19 +136,16 @@ func (l RowLayout) MaterializeSelectedRows(rows [][]byte, dst []*vector.Vector, 
 		}
 		if data, validity, ok := out.MutableFixedWidth(); ok {
 			width, _ := out.Type.FixedSize()
+			if col.Variable || col.Width != width || col.Offset < 0 || col.Offset > l.FixedWidth || width > l.FixedWidth-col.Offset {
+				return errors.New("invalid encoded materialize column")
+			}
 			for i, row := range rows {
-				if row == nil {
+				if row == nil || row[column>>3]&(1<<uint(column&7)) != 0 {
 					validity.SetValid(i, false)
 					continue
 				}
-				value, valid, err := l.ColumnData(row, column)
-				if err != nil {
-					return err
-				}
-				validity.SetValid(i, valid)
-				if valid {
-					copy(data[i*width:(i+1)*width], value)
-				}
+				validity.SetValid(i, true)
+				copy(data[i*width:(i+1)*width], row[col.Offset:col.Offset+width])
 			}
 			continue
 		}

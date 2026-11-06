@@ -13,9 +13,7 @@ import (
 	"github.com/steamwo/fssql/internal/semantics"
 )
 
-// findOrCreateGroups resolves every row in a batch against the hash table
-// before any aggregate state is touched. Existing groups never encode their
-// group key; only newly inserted groups pay the append/encoding cost.
+// findOrCreateGroups 批量解析分组；已知整数键优先查有界精确缓存，未命中仍走完整键比较。
 func (a *HashAggregate) findOrCreateGroups(ctx context.Context, projected *vector.DataChunk, hashes []uint64, groupIDs []int) error {
 	comparer, err := exechash.NewChunkKeyComparer(projected, a.groupKeys)
 	if err != nil {
@@ -25,16 +23,31 @@ func (a *HashAggregate) findOrCreateGroups(ctx context.Context, projected *vecto
 	if err != nil {
 		return err
 	}
+	cache, cacheView, keyWidth, err := a.integerGroupCache(projected)
+	if err != nil {
+		return err
+	}
 	for row := 0; row < projected.Cardinality; row++ {
 		if row&255 == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
+		hash := normalizeGroupHash(hashes[row])
+		var cacheSlot, key []byte
+		var valid bool
+		if cache != nil {
+			start := int(hash&(integerGroupCacheSlots-1)) * (5 + keyWidth)
+			cacheSlot = cache[start : start+5+keyWidth]
+			key, valid = cacheView.Value(row)
+			if group, ok := cachedIntegerGroup(cacheSlot, key, valid); ok {
+				groupIDs[row] = group
+				continue
+			}
+		}
 		if err := a.table.prepareInsert(); err != nil {
 			return err
 		}
-		hash := normalizeGroupHash(hashes[row])
 		mask := a.table.capacity - 1
 		resolved := false
 		for probe := 0; probe < a.table.capacity; probe++ {
@@ -82,6 +95,14 @@ func (a *HashAggregate) findOrCreateGroups(ctx context.Context, projected *vecto
 		}
 		if !resolved {
 			return errors.New("aggregate hash table full")
+		}
+		if cacheSlot != nil {
+			binary.LittleEndian.PutUint32(cacheSlot, uint32(groupIDs[row]+1))
+			cacheSlot[4] = 0
+			if valid {
+				cacheSlot[4] = 1
+				copy(cacheSlot[5:], key)
+			}
 		}
 	}
 	return nil

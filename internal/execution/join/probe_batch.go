@@ -11,9 +11,8 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 )
 
-// batchEmitter buffers probe row selections for one probe chunk and gathers the
-// output columns column-by-column on flush. Probe values are borrowed from the
-// input chunk; build values are encoded rows owned by the resident partition.
+// batchEmitter 按列收集一个 probe 批次的输出，固定选择数组由调用栈持有。
+// probe 值借用输入 chunk，build 值借用驻留分区，flush 后清除引用。
 type batchEmitter struct {
 	typ         Type
 	scope       *memory.Scope
@@ -27,17 +26,16 @@ type batchEmitter struct {
 	required   []bool
 	cols       []*vector.Vector
 	probeChunk *vector.DataChunk
-	probeRows  []int
-	buildRows  [][]byte
+	probeRows  [vector.DefaultVectorSize]int    // probeRows 保存当前批次的输入行号。
+	buildRows  [vector.DefaultVectorSize][]byte // buildRows 借用匹配的构建行。
 	count      int
 }
 
-func newBatchEmitter(typ Type, scope *memory.Scope, bm *memory.BufferManager, leftTypes, rightTypes []types.LogicalType, buildSide Side, buildLayout exechash.RowLayout, downstream pipeline.Sink) *batchEmitter {
-	return &batchEmitter{
+// newBatchEmitter 返回值对象，使每批约 64 KiB 的选择数组无需单独堆分配。
+func newBatchEmitter(typ Type, scope *memory.Scope, bm *memory.BufferManager, leftTypes, rightTypes []types.LogicalType, buildSide Side, buildLayout exechash.RowLayout, downstream pipeline.Sink) batchEmitter {
+	return batchEmitter{
 		typ: typ, scope: scope, bm: bm, leftTypes: leftTypes, rightTypes: rightTypes,
 		buildSide: buildSide, buildLayout: buildLayout, downstream: downstream,
-		probeRows: make([]int, vector.DefaultVectorSize),
-		buildRows: make([][]byte, vector.DefaultVectorSize),
 	}
 }
 
@@ -94,9 +92,12 @@ func (e *batchEmitter) beginChunk(ctx context.Context, chunk *vector.DataChunk) 
 	return nil
 }
 
+// appendPair 批量收集输出，最多每 256 行检查一次取消，避免逐行加锁读取 context。
 func (e *batchEmitter) appendPair(ctx context.Context, chunk *vector.DataChunk, probeRow int, buildRow []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if e.count&255 == 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if err := e.beginChunk(ctx, chunk); err != nil {
 		return err

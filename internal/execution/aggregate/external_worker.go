@@ -32,6 +32,7 @@ func (e *ExternalAggregate) resetShardsToLocal() {
 	e.totalBytes = bytes
 }
 
+// shardForWorker 为 worker 分配独立状态，缓存与状态一起纳入共享聚合预算。
 func (e *ExternalAggregate) shardForWorker(ctx context.Context) (int, *HashAggregate, error) {
 	worker, ok := pipeline.WorkerID(ctx)
 	if !ok || worker < 0 {
@@ -47,6 +48,7 @@ func (e *ExternalAggregate) shardForWorker(ctx context.Context) (int, *HashAggre
 		if err != nil {
 			return 0, nil, err
 		}
+		shard.groupCacheBudget = e.cfg.MemoryBudget / 16
 		bytes := shard.ManagedBytes()
 		e.shards = append(e.shards, shard)
 		e.shardBytes = append(e.shardBytes, bytes)

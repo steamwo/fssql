@@ -21,9 +21,8 @@ func (s *benchmarkJoinSink) Consume(_ context.Context, c *vector.DataChunk) erro
 }
 func (*benchmarkJoinSink) Finalize(context.Context) error { return nil }
 
-// Same prehashed chunk and resident table, with output gathered through the same
-// emitter. Scalar retains the previous Head/record/Equal loop. These are local
-// kernel diagnostics; they do not compare end-to-end SQL or another engine.
+// BenchmarkResidentProbeBatch 使用相同的预哈希输入和驻留表比较探测内核。
+// 两条路径共用输出收集器；结果仅用于内核诊断，不代表端到端 SQL 耗时。
 func BenchmarkResidentProbeBatch(b *testing.B) {
 	for _, keyMod := range []int{1000, 113} {
 		for _, payload := range []bool{false, true} {
@@ -77,7 +76,7 @@ func BenchmarkResidentProbeBatch(b *testing.B) {
 								emitter.required = []bool{false, false, false, false}
 							}
 							if batch {
-								if err := j.probeBatch(q.Context(), probe, hashes, comparer, emitter, nil); err != nil {
+								if err := j.probeBatch(q.Context(), probe, hashes, comparer, &emitter, nil); err != nil {
 									b.Fatal(err)
 								}
 							} else {

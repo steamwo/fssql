@@ -38,6 +38,7 @@ type Footer struct {
 	Metrics        FooterMetrics
 }
 
+// DiscoverFooter 复用可选文件句柄完成 trailer 与元数据读取；所有范围仍保持身份校验。
 func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64) (Footer, error) {
 	var out Footer
 	if driver == nil || scope == nil || bm == nil {
@@ -50,8 +51,17 @@ func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		maxFooterBytes = DefaultMaxFooterBytes
 	}
 	identity := src.Identity
+	read := driver.ReadRange
+	if opener, ok := driver.(vfs.RangeReaderOpener); ok {
+		reader, err := opener.OpenRangeReader(ctx, src.URI, &identity)
+		if err != nil {
+			return out, err
+		}
+		defer reader.Close()
+		read = reader.ReadRange
+	}
 	trailerReq := vfs.RangeRequest{URI: src.URI, Offset: src.Size - 8, Length: 8, Expected: &identity, Tag: memory.TagParquetRange}
-	trailer, err := driver.ReadRange(ctx, trailerReq, scope, bm)
+	trailer, err := read(ctx, trailerReq, scope, bm)
 	if err != nil {
 		return out, err
 	}
@@ -80,7 +90,7 @@ func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		return out, fmt.Errorf("%w: metadata offset %d", ErrInvalidFooter, metaOffset)
 	}
 	metaReq := vfs.RangeRequest{URI: src.URI, Offset: metaOffset, Length: metaLen, Expected: &identity, Tag: memory.TagMetadata}
-	meta, err := driver.ReadRange(ctx, metaReq, scope, bm)
+	meta, err := read(ctx, metaReq, scope, bm)
 	if err != nil {
 		return out, err
 	}
