@@ -2,9 +2,11 @@ package session
 
 import (
 	"testing"
+	"time"
 
 	"github.com/steamwo/fssql/internal/core/types"
 	formatscan "github.com/steamwo/fssql/internal/format/scan"
+	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
@@ -83,5 +85,41 @@ func TestParquetPushdownRejectsLossyColumnAndLiteralCasts(t *testing.T) {
 	cast := &binder.BoundExpression{Kind: binder.BoundCast, Type: bigint, Children: []*binder.BoundExpression{column}}
 	if index, ok := parquetColumnIndex(cast); !ok || index != 2 {
 		t.Fatalf("safe widening rejected: %d/%v", index, ok)
+	}
+}
+
+func TestParquetPushdownAcceptsTemporalLiteralCasts(t *testing.T) {
+	catalog := function.NewQueryCatalog()
+	timestampCast, ok := catalog.Lookup("__fssql_cast_timestamp")
+	if !ok {
+		t.Fatal("timestamp cast function missing")
+	}
+	dateCast, ok := catalog.Lookup("__fssql_cast_date")
+	if !ok {
+		t.Fatal("date cast function missing")
+	}
+	text := "2024-07-01 00:00:00"
+	literal := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: text}
+	wantTimestamp := time.Date(2024, 7, 1, 0, 0, 0, 0, time.UTC).UnixMicro()
+	for _, cast := range []*binder.BoundExpression{
+		{Kind: binder.BoundFunction, FunctionKind: function.Scalar, FunctionID: timestampCast.ID, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{literal}},
+		{Kind: binder.BoundCast, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{literal}},
+	} {
+		out, ok := parquetLiteral(cast)
+		if !ok || out.Type.ID != types.TimestampType || out.Int64 != wantTimestamp {
+			t.Fatalf("timestamp literal=%+v ok=%v want=%d", out, ok, wantTimestamp)
+		}
+	}
+	dateLiteral := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: "2024-07-01"}
+	dateExpression := &binder.BoundExpression{Kind: binder.BoundFunction, FunctionKind: function.Scalar, FunctionID: dateCast.ID, Type: types.LogicalType{ID: types.DateType}, Children: []*binder.BoundExpression{dateLiteral}}
+	out, ok := parquetLiteral(dateExpression)
+	wantDate := time.Date(2024, 7, 1, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	if !ok || out.Type.ID != types.DateType || out.Int64 != wantDate {
+		t.Fatalf("date literal=%+v ok=%v want=%d", out, ok, wantDate)
+	}
+	badLiteral := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: "not-a-time"}
+	bad := &binder.BoundExpression{Kind: binder.BoundFunction, FunctionKind: function.Scalar, FunctionID: timestampCast.ID, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{badLiteral}}
+	if _, ok := parquetLiteral(bad); ok {
+		t.Fatal("invalid timestamp text accepted")
 	}
 }

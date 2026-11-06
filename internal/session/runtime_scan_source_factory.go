@@ -19,11 +19,15 @@ const internalScanFunctionPrefix = "__fssql_"
 // callback 可以依赖具体格式/VFS，但必须消费传入的 frozen ScanSpec，不能重新做 SQL binding。
 type ScanOpenFunc func(context.Context, planner.ScanSpec) (pipeline.Source, error)
 
+// AggregateScanOpenFunc 尝试把无 GROUP BY 的聚合直接交给元数据 source。
+type AggregateScanOpenFunc func(context.Context, planner.ScanSpec, []planner.AggregateSpec) (pipeline.Source, bool, error)
+
 // ScanOpenAdapter 将稳定 FunctionID 与 runtime scan callback 关联。
 type ScanOpenAdapter struct {
-	FunctionID function.ID  // FunctionID 必须对应 FunctionCatalog 中的 Table function。
-	Open       ScanOpenFunc // Open 打开真实 runtime source；返回 nil source 视为错误。
-	OpenCount  ScanOpenFunc // OpenCount optionally returns one exact BIGINT COUNT(*) row.
+	FunctionID function.ID           // FunctionID 必须对应 FunctionCatalog 中的 Table function。
+	Open       ScanOpenFunc          // Open 打开真实 runtime source；返回 nil source 视为错误。
+	OpenCount  ScanOpenFunc          // OpenCount optionally returns one exact BIGINT COUNT(*) row.
+	OpenStats  AggregateScanOpenFunc // OpenStats optionally answers MIN/MAX from source metadata.
 }
 
 // InternalScanOpenAdapter 只用于 Planner 生成的保留 virtual scan 名称。
@@ -36,10 +40,11 @@ type InternalScanOpenAdapter struct {
 // RuntimeScanSourceFactory 实现 PhysicalPlan lowering 的 generic scan source factory。
 // 它只负责 FunctionCatalog 校验与 immutable dispatch，不包含任何格式/协议实现。
 type RuntimeScanSourceFactory struct {
-	functions *function.Catalog            // functions 是唯一 FunctionCatalog。
-	adapters  map[function.ID]ScanOpenFunc // adapters 构造后不可变。
-	internal  map[string]ScanOpenFunc      // internal 保存 statement-scoped virtual source callback，不构成 SQL FunctionCatalog surface。
-	counts    map[function.ID]ScanOpenFunc
+	functions *function.Catalog                     // functions 是唯一 FunctionCatalog。
+	adapters  map[function.ID]ScanOpenFunc          // adapters 构造后不可变。
+	internal  map[string]ScanOpenFunc               // internal 保存 statement-scoped virtual source callback，不构成 SQL FunctionCatalog surface。
+	counts    map[function.ID]ScanOpenFunc          // counts 是精确 COUNT(*) metadata source。
+	stats     map[function.ID]AggregateScanOpenFunc // stats 是 MIN/MAX metadata source。
 }
 
 // NewRuntimeScanSourceFactory 冻结 runtime table-function scan registry。
@@ -52,6 +57,7 @@ func NewRuntimeScanSourceFactory(functions *function.Catalog, adapters []ScanOpe
 	}
 	bound := make(map[function.ID]ScanOpenFunc, len(adapters))
 	counts := make(map[function.ID]ScanOpenFunc)
+	stats := make(map[function.ID]AggregateScanOpenFunc)
 	for _, adapter := range adapters {
 		if adapter.FunctionID == function.InvalidID || adapter.Open == nil {
 			return nil, fmt.Errorf("session: invalid scan open adapter")
@@ -67,8 +73,11 @@ func NewRuntimeScanSourceFactory(functions *function.Catalog, adapters []ScanOpe
 		if adapter.OpenCount != nil {
 			counts[adapter.FunctionID] = adapter.OpenCount
 		}
+		if adapter.OpenStats != nil {
+			stats[adapter.FunctionID] = adapter.OpenStats
+		}
 	}
-	return &RuntimeScanSourceFactory{functions: functions, adapters: bound, counts: counts, internal: make(map[string]ScanOpenFunc)}, nil
+	return &RuntimeScanSourceFactory{functions: functions, adapters: bound, counts: counts, stats: stats, internal: make(map[string]ScanOpenFunc)}, nil
 }
 
 // WithInternalAdapters 返回带 statement-scoped virtual scan callback 的新 immutable registry。
@@ -85,6 +94,7 @@ func (f *RuntimeScanSourceFactory) WithInternalAdapters(adapters []InternalScanO
 		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)),
 		internal:  make(map[string]ScanOpenFunc, len(f.internal)+len(adapters)),
 		counts:    f.counts,
+		stats:     f.stats,
 	}
 	for id, open := range f.adapters {
 		out.adapters[id] = open
@@ -109,15 +119,11 @@ func (f *RuntimeScanSourceFactory) OpenAggregateScan(ctx context.Context, spec p
 	if f == nil || f.functions == nil {
 		return nil, false, fmt.Errorf("session: uninitialized scan factory")
 	}
-	if len(aggregates) != 1 || len(spec.Pushdown.Filters) != 0 || spec.Pushdown.Limit != 0 {
-		return nil, false, nil
-	}
-	a := aggregates[0]
-	if function.ID(a.FunctionID) != function.CountID || a.Distinct || len(a.Arguments) != 0 || a.Output.Type.ID != types.BigInt {
+	if len(aggregates) == 0 || len(spec.Pushdown.Filters) != 0 || spec.Pushdown.Limit != 0 {
 		return nil, false, nil
 	}
 	def, ok := f.functions.Lookup(strings.TrimSpace(spec.Function))
-	if !ok || def.Kind != function.Table || f.counts[def.ID] == nil {
+	if !ok || def.Kind != function.Table {
 		return nil, false, nil
 	}
 	if spec.RelationID == "" || spec.Source == "" || spec.Fingerprint == "" {
@@ -125,8 +131,17 @@ func (f *RuntimeScanSourceFactory) OpenAggregateScan(ctx context.Context, spec p
 	}
 	prepared := cloneRuntimeScanSpec(spec)
 	prepared.Function = def.Name
-	source, err := f.counts[def.ID](ctx, prepared)
-	return source, true, err
+	if len(aggregates) == 1 && f.counts[def.ID] != nil {
+		a := aggregates[0]
+		if function.ID(a.FunctionID) == function.CountID && !a.Distinct && len(a.Arguments) == 0 && a.Output.Type.ID == types.BigInt {
+			source, err := f.counts[def.ID](ctx, prepared)
+			return source, true, err
+		}
+	}
+	if f.stats[def.ID] != nil {
+		return f.stats[def.ID](ctx, prepared, aggregates)
+	}
+	return nil, false, nil
 }
 
 // Open 根据 ScanSpec.Function 分派真实 Stable table function 或 Planner-only virtual source。

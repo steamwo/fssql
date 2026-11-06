@@ -9,6 +9,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/expression"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/execution/sqltransform"
+	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
@@ -38,6 +39,12 @@ type SortFactory interface {
 // AggregateFactory 把 generic PhysicalHashAggregate 映射为真实 blocking aggregate operator。
 type AggregateFactory interface {
 	OpenAggregate(context.Context, []planner.Column, []*binder.BoundExpression, []planner.AggregateSpec, planner.CardinalityEstimate) (blocking.Operator, error)
+}
+
+// DistinctCountAggregateFactory optionally fuses a global COUNT(DISTINCT x)
+// plan (outer COUNT over an inner key GROUP BY) into one blocking operator.
+type DistinctCountAggregateFactory interface {
+	OpenDistinctCount(context.Context, []planner.Column, int, planner.Column, planner.CardinalityEstimate) (blocking.Operator, error)
 }
 
 // JoinFactory 把 generic PhysicalHashJoin/PhysicalCrossJoin 映射为 build/probe 双输入 Pipeline operator。
@@ -413,17 +420,31 @@ func combineAbort(first, second func() error) func() error {
 // lowerAggregate 创建 aggregate operator 后复用统一 blocking-stage 生命周期。
 func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
 	child := plan.Children[0]
-	if len(plan.GroupBy) == 0 && child.Kind == planner.PhysicalScan && child.Scan != nil {
-		if sources, ok := b.Sources.(AggregateScanSourceFactory); ok {
-			source, accepted, err := sources.OpenAggregateScan(ctx, *child.Scan, plan.Aggregates)
+	if inner, keyIndex, ok := distinctCountChild(plan); ok {
+		if factory, implemented := b.Aggregates.(DistinctCountAggregateFactory); implemented {
+			operator, err := factory.OpenDistinctCount(ctx, inner.Children[0].Output, keyIndex, plan.Aggregates[0].Output, plan.Estimate)
 			if err != nil {
 				return loweredStage{}, err
 			}
-			if accepted {
-				if source == nil {
-					return loweredStage{}, fmt.Errorf("source aggregate returned nil source")
+			return b.lowerBlockingStage(ctx, inner.Children[0], operator, "distinct-count")
+		}
+	}
+	if len(plan.GroupBy) == 0 {
+		if scan, mapping, ok := aggregateScanChild(child); ok {
+			if sources, ok := b.Sources.(AggregateScanSourceFactory); ok {
+				aggregates := remapAggregateArguments(plan.Aggregates, mapping)
+				if aggregates != nil {
+					source, accepted, err := sources.OpenAggregateScan(ctx, *scan.Scan, aggregates)
+					if err != nil {
+						return loweredStage{}, err
+					}
+					if accepted {
+						if source == nil {
+							return loweredStage{}, fmt.Errorf("source aggregate returned nil source")
+						}
+						return loweredStage{source: source, relationID: scan.Scan.RelationID + ":source-aggregate"}, nil
+					}
 				}
-				return loweredStage{source: source, relationID: child.Scan.RelationID + ":source-aggregate"}, nil
 			}
 		}
 	}
@@ -432,6 +453,90 @@ func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan
 		return loweredStage{}, err
 	}
 	return b.lowerBlockingStage(ctx, plan.Children[0], operator, "aggregate")
+}
+
+// distinctCountChild recognizes the two-level global COUNT(DISTINCT x) plan:
+// the outer aggregate has one COUNT over the inner aggregate's only group key.
+func distinctCountChild(plan *planner.PhysicalPlan) (*planner.PhysicalPlan, int, bool) {
+	if plan == nil || len(plan.GroupBy) != 0 || len(plan.Aggregates) != 1 || len(plan.Children) != 1 {
+		return nil, 0, false
+	}
+	spec := plan.Aggregates[0]
+	if function.ID(spec.FunctionID) != function.CountID || len(spec.Arguments) != 1 {
+		return nil, 0, false
+	}
+	argument := spec.Arguments[0]
+	if argument == nil || argument.Kind != binder.BoundColumn || argument.ColumnIndex != 0 {
+		return nil, 0, false
+	}
+	inner := plan.Children[0]
+	if inner == nil || inner.Kind != planner.PhysicalHashAggregate || len(inner.Aggregates) != 0 || len(inner.GroupBy) != 1 || len(inner.Children) != 1 || len(inner.Output) != 1 {
+		return nil, 0, false
+	}
+	if !argument.Type.Same(inner.Output[0].Type) {
+		return nil, 0, false
+	}
+	group := inner.GroupBy[0]
+	if group == nil || group.Kind != binder.BoundColumn || group.ColumnIndex < 0 || group.ColumnIndex >= len(inner.Children[0].Output) {
+		return nil, 0, false
+	}
+	if !group.Type.Same(inner.Children[0].Output[group.ColumnIndex].Type) {
+		return nil, 0, false
+	}
+	return inner, group.ColumnIndex, true
+}
+
+// aggregateScanChild accepts Scan or a pure column Project over Scan, because a
+// global aggregate's pre-projection only renames/reorders arguments.
+func aggregateScanChild(node *planner.PhysicalPlan) (*planner.PhysicalPlan, []int, bool) {
+	if node == nil {
+		return nil, nil, false
+	}
+	if node.Kind == planner.PhysicalScan && node.Scan != nil {
+		return node, nil, true
+	}
+	if node.Kind != planner.PhysicalProject || len(node.Children) != 1 {
+		return nil, nil, false
+	}
+	scan := node.Children[0]
+	if scan == nil || scan.Kind != planner.PhysicalScan || scan.Scan == nil {
+		return nil, nil, false
+	}
+	mapping := make([]int, len(node.Projection))
+	for i, expr := range node.Projection {
+		if expr == nil || expr.Kind != binder.BoundColumn || expr.ColumnIndex < 0 || expr.ColumnIndex >= len(scan.Output) {
+			return nil, nil, false
+		}
+		if !expr.Type.Same(scan.Output[expr.ColumnIndex].Type) {
+			return nil, nil, false
+		}
+		mapping[i] = expr.ColumnIndex
+	}
+	return scan, mapping, true
+}
+
+// remapAggregateArguments rewrites projected column indexes back to scan
+// indexes. nil means the aggregate has a non-column argument and must stay on
+// the ordinary execution path.
+func remapAggregateArguments(aggregates []planner.AggregateSpec, mapping []int) []planner.AggregateSpec {
+	if mapping == nil {
+		return aggregates
+	}
+	out := make([]planner.AggregateSpec, len(aggregates))
+	for i, aggregate := range aggregates {
+		arguments := make([]*binder.BoundExpression, len(aggregate.Arguments))
+		for j, argument := range aggregate.Arguments {
+			if argument == nil || argument.Kind != binder.BoundColumn || argument.ColumnIndex < 0 || argument.ColumnIndex >= len(mapping) {
+				return nil
+			}
+			clone := *argument
+			clone.ColumnIndex = mapping[argument.ColumnIndex]
+			arguments[j] = &clone
+		}
+		aggregate.Arguments = arguments
+		out[i] = aggregate
+	}
+	return out
 }
 
 // lowerDistinct 创建 DISTINCT operator 后复用统一 blocking-stage 生命周期。

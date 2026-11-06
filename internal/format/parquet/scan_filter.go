@@ -73,7 +73,8 @@ func compileScanFilter(t types.LogicalType, filter scan.Filter) func(*vector.Vec
 		return nil
 	}
 	literal := filter.Value
-	if !t.Same(literal.Type) && !(t.ID == types.Integer && literal.Type.ID == types.BigInt && !literal.Type.IsUnsignedInteger()) && !(t.ID == types.Float && literal.Type.ID == types.Double) {
+	timestampLiteral := t.ID == types.TimestampType && literal.Type.ID == types.TimestampType
+	if !t.Same(literal.Type) && !(t.ID == types.Integer && literal.Type.ID == types.BigInt && !literal.Type.IsUnsignedInteger()) && !(t.ID == types.Float && literal.Type.ID == types.Double) && !timestampLiteral {
 		return nil
 	}
 	if t.IsUnsignedInteger() || t.IsBlob() {
@@ -105,9 +106,22 @@ func compileScanFilter(t types.LogicalType, filter scan.Filter) func(*vector.Vec
 		compare = func(data []byte) int {
 			return semantics.CompareInt64(int64(int32(binary.LittleEndian.Uint32(data))), literal.Int64)
 		}
+	case types.DateType:
+		value := literal.Int64
+		compare = func(data []byte) int {
+			return semantics.CompareInt64(int64(int32(binary.LittleEndian.Uint32(data))), value)
+		}
 	case types.BigInt:
 		compare = func(data []byte) int {
 			return semantics.CompareInt64(int64(binary.LittleEndian.Uint64(data)), literal.Int64)
+		}
+	case types.TimestampType:
+		value, err := semantics.ConvertTimestampUnit(literal.Int64, literal.Type.Timestamp.Unit, t.Timestamp.Unit)
+		if err != nil {
+			return nil
+		}
+		compare = func(data []byte) int {
+			return semantics.CompareInt64(int64(binary.LittleEndian.Uint64(data)), value)
 		}
 	case types.Float:
 		compare = func(data []byte) int {

@@ -57,6 +57,15 @@ func NewExternalAggregateFactory(q *query.Context, buffers *memory.BufferManager
 	return &ExternalAggregateFactory{query: q, buffers: buffers, config: config}, nil
 }
 
+// distinctRadixBits raises the spill fan-out for state-less dedup so a
+// high-cardinality key set needs fewer recursive repartitions.
+func distinctRadixBits(configured uint8) uint8 {
+	if configured < 6 {
+		return 6
+	}
+	return configured
+}
+
 // OpenAggregate 实现 lowering.AggregateFactory。
 // Planner 已把 group expression/aggregate argument materialize 成 child BoundColumn；factory 只映射列与函数 ID。
 func (f *ExternalAggregateFactory) OpenAggregate(ctx context.Context, columns []planner.Column, groups []*binder.BoundExpression, specs []planner.AggregateSpec, estimate planner.CardinalityEstimate) (blocking.Operator, error) {
@@ -115,19 +124,74 @@ func (f *ExternalAggregateFactory) OpenAggregate(ctx context.Context, columns []
 		}
 	}
 
+	radixBits := f.config.RadixBits
+	if len(executionSpecs) == 0 {
+		radixBits = distinctRadixBits(radixBits)
+	}
 	operator, err := aggregate.NewExternalAggregate(aggregate.ExternalConfig{
 		InputTypes:      inputTypes,
 		GroupColumns:    groupColumns,
 		Specs:           executionSpecs,
 		EstimatedGroups: 0,
 		MemoryBudget:    f.config.MemoryBudget,
-		RadixBits:       f.config.RadixBits,
+		RadixBits:       radixBits,
 		MaxDepth:        f.config.MaxDepth,
 		SpillBlockBytes: f.config.SpillBlockBytes,
 		Scope:           f.query.Memory,
 		Buffers:         f.buffers,
 		Temp:            f.query.Temp,
 		Compression:     f.config.Compression,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return operator, nil
+}
+
+// OpenDistinctCount 实现 lowering.DistinctCountAggregateFactory。
+// 它把 global COUNT(DISTINCT key) 融合为单个 blocking operator，避免把每个
+// distinct key 物化并再次聚合。
+func (f *ExternalAggregateFactory) OpenDistinctCount(ctx context.Context, columns []planner.Column, argument int, output planner.Column, estimate planner.CardinalityEstimate) (blocking.Operator, error) {
+	if f == nil || f.query == nil || f.query.Memory == nil || f.query.Temp == nil || f.buffers == nil {
+		return nil, fmt.Errorf("session: distinct COUNT factory is uninitialized")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if f.query.Closed() {
+		return nil, fmt.Errorf("session: distinct COUNT query context is closed")
+	}
+	if output.Type.ID != types.BigInt {
+		return nil, fmt.Errorf("session: distinct COUNT requires BIGINT output, got %v", output.Type.ID)
+	}
+	if argument < 0 || argument >= len(columns) {
+		return nil, fmt.Errorf("session: distinct COUNT key index %d out of range", argument)
+	}
+	if columns[argument].Type.ID == types.Invalid {
+		return nil, fmt.Errorf("session: distinct COUNT key has invalid logical type")
+	}
+	_ = estimate
+	inputTypes := make([]types.LogicalType, len(columns))
+	for i, column := range columns {
+		if column.Type.ID == types.Invalid {
+			return nil, fmt.Errorf("session: distinct COUNT input column %d has invalid logical type", i)
+		}
+		inputTypes[i] = cloneAggregateRuntimeType(column.Type)
+	}
+	operator, err := aggregate.NewExternalAggregate(aggregate.ExternalConfig{
+		InputTypes:      inputTypes,
+		GroupColumns:    []int{argument},
+		Specs:           nil,
+		EstimatedGroups: 0,
+		MemoryBudget:    f.config.MemoryBudget,
+		RadixBits:       distinctRadixBits(f.config.RadixBits),
+		MaxDepth:        f.config.MaxDepth,
+		SpillBlockBytes: f.config.SpillBlockBytes,
+		Scope:           f.query.Memory,
+		Buffers:         f.buffers,
+		Temp:            f.query.Temp,
+		Compression:     f.config.Compression,
+		CountOnly:       true,
 	})
 	if err != nil {
 		return nil, err

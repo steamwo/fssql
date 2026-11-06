@@ -221,7 +221,7 @@ func TestDictionaryGroupsNullDuplicatesAndGeneralFallback(t *testing.T) {
 func TestExternalDictionaryGroupsConcurrentSpill(t *testing.T) {
 	h, cleanup := newExtAggHarness(t, 4<<20, 8<<20)
 	defer cleanup()
-	e, err := NewExternalAggregate(ExternalConfig{InputTypes: []types.LogicalType{{ID: types.Varchar}, {ID: types.BigInt}}, GroupColumns: []int{0}, Specs: []Spec{{Kind: CountStar}, {Kind: Sum, Input: 1}}, EstimatedGroups: 8, MemoryBudget: 1024, RadixBits: 2, MaxDepth: 8, SpillBlockBytes: 512, Scope: h.scope, Buffers: h.bm, Temp: h.temp})
+	e, err := NewExternalAggregate(ExternalConfig{InputTypes: []types.LogicalType{{ID: types.Varchar}, {ID: types.BigInt}}, GroupColumns: []int{0}, Specs: []Spec{{Kind: CountStar}, {Kind: Sum, Input: 1}}, EstimatedGroups: 8, MemoryBudget: 512, RadixBits: 2, MaxDepth: 8, SpillBlockBytes: 512, Scope: h.scope, Buffers: h.bm, Temp: h.temp})
 	if err != nil {
 		t.Fatal(err)
 	}

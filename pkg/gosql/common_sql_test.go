@@ -78,6 +78,8 @@ func TestCommonSQLPredicatesSetsAndAggregates(t *testing.T) {
 				{"SELECT count(*) FROM (SELECT 1 AS k UNION ALL SELECT 1 UNION ALL SELECT 2) AS u", [][]any{{int64(3)}}},
 				{"SELECT count(DISTINCT g), count(g), count(*), count(DISTINCT id) FROM common_rows()", [][]any{{int64(2), int64(6), int64(7), int64(3)}}},
 				{"SELECT g,count(DISTINCT id),count(id),sum(id),count(DISTINCT label) FROM common_rows() GROUP BY g ORDER BY g NULLS FIRST", [][]any{{nil, int64(1), int64(1), "3", int64(1)}, {int64(1), int64(2), int64(3), "4", int64(2)}, {int64(2), int64(2), int64(2), "5", int64(2)}}},
+				{"SELECT count(DISTINCT id) FROM common_rows()", [][]any{{int64(3)}}},
+				{"SELECT count(DISTINCT label) FROM common_rows()", [][]any{{int64(5)}}},
 				{"SELECT count(DISTINCT NULL), count(NULL)", [][]any{{int64(0), int64(0)}}},
 				{"SELECT g,count(DISTINCT id) FROM common_rows() GROUP BY g HAVING count(DISTINCT id)>1 ORDER BY g", [][]any{{int64(1), int64(2)}, {int64(2), int64(2)}}},
 			}

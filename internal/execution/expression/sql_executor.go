@@ -222,6 +222,23 @@ func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.Da
 		return nil, fmt.Errorf("SQL expression executor: CAST requires one child")
 	}
 	childExpr := expr.Children[0]
+	if value, ok, parseErr := constantTemporalCast(expr); ok {
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		out, err := vector.NewConstant(e.Scope, e.Buffers, expr.Type, chunk.Cardinality)
+		if err != nil {
+			return nil, err
+		}
+		if !value.Valid {
+			out.SetNull(0)
+		} else if expr.Type.ID == types.DateType {
+			out.SetInt32(0, int32(value.Int64))
+		} else {
+			out.SetInt64(0, value.Int64)
+		}
+		return out, nil
+	}
 	if childExpr.Type.IsUnsignedInteger() || expr.Type.IsUnsignedInteger() || childExpr.Type.ID != types.Integer || (expr.Type.ID != types.BigInt && expr.Type.ID != types.Double) {
 		return e.executeSQL(expr, chunk)
 	}

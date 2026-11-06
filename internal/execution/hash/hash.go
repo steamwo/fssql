@@ -60,6 +60,7 @@ func HashChunk(chunk *vector.DataChunk, keyColumns []int, out []uint64) error {
 	}
 	return nil
 }
+
 type ColumnLayout struct {
 	Type     types.LogicalType
 	Offset   int
@@ -259,6 +260,10 @@ type TupleDataCollection struct {
 	bm                              *memory.BufferManager
 	buf                             *memory.Buffer
 	offsets                         *memory.Buffer
+	data                            []byte // cached b.buf bytes; refreshed on resize
+	offsetData                      []byte // cached offsets bytes; refreshed on resize
+	dataCapacity                    int
+	offsetCapacity                  int
 	layout                          *RowLayout
 	rowWidth, count, capacity, used int
 }
@@ -267,7 +272,7 @@ type TupleDataCollection struct {
 // phase. The caller must not append, resize or release the collection until
 // the reader is discarded. It acquires buffer locks once, outside comparisons.
 func (c *TupleDataCollection) BorrowRowReader() func(int) []byte {
-	data := c.buf.Bytes()
+	data := c.data
 	count := c.count
 	if c.layout == nil {
 		return func(row int) []byte {
@@ -277,7 +282,7 @@ func (c *TupleDataCollection) BorrowRowReader() func(int) []byte {
 			return data[row*c.rowWidth : (row+1)*c.rowWidth]
 		}
 	}
-	offsets := c.offsets.Bytes()
+	offsets := c.offsetData
 	return func(row int) []byte {
 		if row < 0 || row >= count {
 			return nil
@@ -299,7 +304,7 @@ func NewTupleDataCollection(scope *memory.Scope, bm *memory.BufferManager, rowWi
 	if err != nil {
 		return nil, err
 	}
-	return &TupleDataCollection{scope: scope, bm: bm, buf: b, rowWidth: rowWidth, capacity: capacity}, nil
+	return &TupleDataCollection{scope: scope, bm: bm, buf: b, data: b.Bytes(), rowWidth: rowWidth, capacity: capacity, dataCapacity: rowWidth * capacity}, nil
 }
 
 func NewTupleDataCollectionForLayout(scope *memory.Scope, bm *memory.BufferManager, layout RowLayout, capacity int) (*TupleDataCollection, error) {
@@ -323,7 +328,7 @@ func NewTupleDataCollectionForLayout(scope *memory.Scope, bm *memory.BufferManag
 		return nil, err
 	}
 	copyLayout := layout
-	return &TupleDataCollection{scope: scope, bm: bm, buf: data, offsets: offsets, layout: &copyLayout, capacity: capacity}, nil
+	return &TupleDataCollection{scope: scope, bm: bm, buf: data, offsets: offsets, data: data.Bytes(), offsetData: offsets.Bytes(), dataCapacity: dataCap, offsetCapacity: (capacity + 1) * 4, layout: &copyLayout, capacity: capacity}, nil
 }
 
 func (c *TupleDataCollection) Append(row []byte) error {
@@ -339,8 +344,10 @@ func (c *TupleDataCollection) Append(row []byte) error {
 			return err
 		}
 		c.capacity = next
+		c.data = c.buf.Bytes()
+		c.dataCapacity = next * c.rowWidth
 	}
-	copy(c.buf.Bytes()[c.count*c.rowWidth:(c.count+1)*c.rowWidth], row)
+	copy(c.data[c.count*c.rowWidth:(c.count+1)*c.rowWidth], row)
 	c.count++
 	return nil
 }
@@ -356,18 +363,25 @@ func (c *TupleDataCollection) growRows(nextCount int) error {
 	if err := c.offsets.Resize((next+1)*4, nil); err != nil {
 		return err
 	}
+	c.offsetData = c.offsets.Bytes()
+	c.offsetCapacity = (next + 1) * 4
 	c.capacity = next
 	return nil
 }
 func (c *TupleDataCollection) growData(need int) error {
-	if need <= c.buf.Len() {
+	if need <= c.dataCapacity {
 		return nil
 	}
-	next := c.buf.Len() * 2
+	next := c.dataCapacity * 2
 	if next < need {
 		next = need
 	}
-	return c.buf.Resize(next, nil)
+	if err := c.buf.Resize(next, nil); err != nil {
+		return err
+	}
+	c.data = c.buf.Bytes()
+	c.dataCapacity = next
+	return nil
 }
 
 func (c *TupleDataCollection) AppendChunkRow(chunk *vector.DataChunk, row int) error {
@@ -387,14 +401,14 @@ func (c *TupleDataCollection) AppendChunkRow(chunk *vector.DataChunk, row int) e
 	if err := c.growData(c.used + size); err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
-	n, err := c.layout.WriteRow(chunk, row, c.buf.Bytes()[c.used:c.used+size])
+	binary.LittleEndian.PutUint32(c.offsetData[c.count*4:c.count*4+4], uint32(c.used))
+	n, err := c.layout.WriteRow(chunk, row, c.data[c.used:c.used+size])
 	if err != nil {
 		return err
 	}
 	c.used += n
 	c.count++
-	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	binary.LittleEndian.PutUint32(c.offsetData[c.count*4:c.count*4+4], uint32(c.used))
 	return nil
 }
 func (c *TupleDataCollection) AppendEncodedRow(row []byte) error {
@@ -413,11 +427,11 @@ func (c *TupleDataCollection) AppendEncodedRow(row []byte) error {
 	if err := c.growData(c.used + len(row)); err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
-	copy(c.buf.Bytes()[c.used:c.used+len(row)], row)
+	binary.LittleEndian.PutUint32(c.offsetData[c.count*4:c.count*4+4], uint32(c.used))
+	copy(c.data[c.used:c.used+len(row)], row)
 	c.used += len(row)
 	c.count++
-	binary.LittleEndian.PutUint32(c.offsets.Bytes()[c.count*4:c.count*4+4], uint32(c.used))
+	binary.LittleEndian.PutUint32(c.offsetData[c.count*4:c.count*4+4], uint32(c.used))
 	return nil
 }
 func (c *TupleDataCollection) Count() int { return c.count }
@@ -425,25 +439,18 @@ func (c *TupleDataCollection) AllocatedBytes() int {
 	if c == nil {
 		return 0
 	}
-	n := 0
-	if c.buf != nil {
-		n += c.buf.Len()
-	}
-	if c.offsets != nil {
-		n += c.offsets.Len()
-	}
-	return n
+	return c.dataCapacity + c.offsetCapacity
 }
 func (c *TupleDataCollection) Row(i int) []byte {
 	if i < 0 || i >= c.count {
 		return nil
 	}
 	if c.layout == nil {
-		return c.buf.Bytes()[i*c.rowWidth : (i+1)*c.rowWidth]
+		return c.data[i*c.rowWidth : (i+1)*c.rowWidth]
 	}
-	start := int(binary.LittleEndian.Uint32(c.offsets.Bytes()[i*4 : i*4+4]))
-	end := int(binary.LittleEndian.Uint32(c.offsets.Bytes()[(i+1)*4 : (i+1)*4+4]))
-	return c.buf.Bytes()[start:end]
+	start := int(binary.LittleEndian.Uint32(c.offsetData[i*4 : i*4+4]))
+	end := int(binary.LittleEndian.Uint32(c.offsetData[(i+1)*4 : (i+1)*4+4]))
+	return c.data[start:end]
 }
 func (c *TupleDataCollection) Serialize() (*memory.Buffer, error) {
 	if c.layout != nil {
@@ -456,7 +463,7 @@ func (c *TupleDataCollection) Serialize() (*memory.Buffer, error) {
 	dst := out.Bytes()
 	binary.LittleEndian.PutUint32(dst[:4], uint32(c.rowWidth))
 	binary.LittleEndian.PutUint32(dst[4:8], uint32(c.count))
-	copy(dst[8:], c.buf.Bytes()[:c.count*c.rowWidth])
+	copy(dst[8:], c.data[:c.count*c.rowWidth])
 	return out, nil
 }
 func Deserialize(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*TupleDataCollection, error) {
@@ -473,11 +480,13 @@ func Deserialize(data []byte, scope *memory.Scope, bm *memory.BufferManager) (*T
 	if err != nil {
 		return nil, err
 	}
-	copy(c.buf.Bytes(), data[8:])
+	copy(c.data, data[8:])
 	c.count = n
 	return c, nil
 }
 func (c *TupleDataCollection) Release() {
+	c.data = nil
+	c.offsetData = nil
 	if c.buf != nil {
 		c.buf.Release()
 		c.buf = nil

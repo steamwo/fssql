@@ -12,6 +12,7 @@ import (
 	formatscan "github.com/steamwo/fssql/internal/format/scan"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/planner"
+	"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
@@ -26,6 +27,33 @@ func NewParquetScanOpenAdapter(sourceBinder *parquet.SourceBinder) (ScanOpenAdap
 			return parquet.NewMetadataCountSource(ctx, parquet.RuntimeSourceConfig{
 				Binder: sourceBinder, Pattern: spec.Source, ExpectedFingerprint: string(spec.Fingerprint),
 			})
+		},
+		OpenStats: func(ctx context.Context, spec planner.ScanSpec, aggregates []planner.AggregateSpec) (pipeline.Source, bool, error) {
+			if len(spec.Pushdown.Filters) != 0 || spec.Pushdown.Limit != 0 {
+				return nil, false, nil
+			}
+			requests := make([]parquet.StatsRequest, 0, len(aggregates))
+			for _, aggregate := range aggregates {
+				id := function.ID(aggregate.FunctionID)
+				if id != function.MinID && id != function.MaxID {
+					return nil, false, nil
+				}
+				if len(aggregate.Arguments) != 1 {
+					return nil, false, nil
+				}
+				argument := aggregate.Arguments[0]
+				if argument == nil || argument.Kind != binder.BoundColumn || argument.ColumnIndex < 0 {
+					return nil, false, nil
+				}
+				kind := parquet.StatsMin
+				if id == function.MaxID {
+					kind = parquet.StatsMax
+				}
+				requests = append(requests, parquet.StatsRequest{ColumnIndex: argument.ColumnIndex, Kind: kind, OutputType: aggregate.Output.Type})
+			}
+			return parquet.NewMetadataStatsSource(ctx, parquet.RuntimeSourceConfig{
+				Binder: sourceBinder, Pattern: spec.Source, ExpectedFingerprint: string(spec.Fingerprint),
+			}, requests)
 		},
 		Open: func(ctx context.Context, spec planner.ScanSpec) (pipeline.Source, error) {
 			if spec.Function != "read_parquet" {
@@ -166,46 +194,96 @@ func parquetLiteral(expression *binder.BoundExpression) (formatscan.Literal, boo
 		return formatscan.Literal{}, false
 	}
 	target := expression.Type
-	for expression.Kind == binder.BoundCast && len(expression.Children) == 1 {
-		if !parquetSafeCast(expression.Children[0].Type, expression.Type) {
-			return formatscan.Literal{}, false
+	literal := expression
+	for {
+		child, isCast := parquetCastChild(literal)
+		if !isCast {
+			break
 		}
-		expression = expression.Children[0]
+		if child.Kind == binder.BoundNull {
+			return formatscan.Literal{Type: target, Null: true}, true
+		}
+		if parquetSafeCast(child.Type, literal.Type) {
+			literal = child
+			continue
+		}
+		// Text -> DATE/TIMESTAMP is exact when the canonical CAST text parses;
+		// without this the predicate stays residual and re-casts every row.
+		if (literal.Type.ID == types.DateType || literal.Type.ID == types.TimestampType) &&
+			child.Kind == binder.BoundLiteral && child.Type.ID == types.Varchar {
+			if raw, ok := parquetTemporalLiteral(child.Literal, literal.Type); ok {
+				return formatscan.Literal{Type: literal.Type, Int64: raw}, true
+			}
+		}
+		return formatscan.Literal{}, false
 	}
-	if expression.Kind == binder.BoundNull {
+	if literal.Kind == binder.BoundNull {
 		return formatscan.Literal{Type: target, Null: true}, true
 	}
-	if expression.Kind != binder.BoundLiteral {
+	if literal.Kind != binder.BoundLiteral {
 		return formatscan.Literal{}, false
 	}
 	out := formatscan.Literal{Type: target}
 	switch target.ID {
 	case types.Boolean:
-		value, err := strconv.ParseBool(strings.ToLower(expression.Literal))
+		value, err := strconv.ParseBool(strings.ToLower(literal.Literal))
 		if err != nil {
 			return formatscan.Literal{}, false
 		}
 		out.Bool = value
 	case types.TinyInt, types.SmallInt, types.Integer, types.BigInt:
-		value, err := strconv.ParseInt(expression.Literal, 10, 64)
+		value, err := strconv.ParseInt(literal.Literal, 10, 64)
 		if err != nil {
 			return formatscan.Literal{}, false
 		}
 		out.Int64 = value
 	case types.Float, types.Double:
-		value, err := strconv.ParseFloat(expression.Literal, 64)
+		value, err := strconv.ParseFloat(literal.Literal, 64)
 		if err != nil {
 			return formatscan.Literal{}, false
 		}
 		out.Float64 = value
 	case types.Varchar:
-		out.String = expression.Literal
+		out.String = literal.Literal
+	case types.DateType, types.TimestampType:
+		value, ok := parquetTemporalLiteral(literal.Literal, target)
+		if !ok {
+			return formatscan.Literal{}, false
+		}
+		out.Int64 = value
 	default:
 		// Parquet statistics decoding does not currently provide exact safe
 		// comparisons for DECIMAL/HUGEINT/nested values; keep them residual.
 		return formatscan.Literal{}, false
 	}
 	return out, true
+}
+
+func parquetCastChild(expression *binder.BoundExpression) (*binder.BoundExpression, bool) {
+	if expression == nil || len(expression.Children) != 1 {
+		return nil, false
+	}
+	if expression.Kind == binder.BoundCast {
+		return expression.Children[0], true
+	}
+	if expression.Kind == binder.BoundFunction && expression.FunctionKind == function.Scalar &&
+		expression.FunctionID >= function.FirstCastFunctionID && expression.FunctionID < function.FirstDynamicScalarID {
+		return expression.Children[0], true
+	}
+	return nil, false
+}
+
+func parquetTemporalLiteral(text string, target types.LogicalType) (int64, bool) {
+	switch target.ID {
+	case types.DateType:
+		value, err := semantics.ParseDateLiteral(text)
+		return value, err == nil
+	case types.TimestampType:
+		value, err := semantics.ParseTimestampLiteral(text, target.Timestamp.Unit)
+		return value, err == nil
+	default:
+		return 0, false
+	}
 }
 
 // Stripping a cast is safe only when it preserves every input value exactly.

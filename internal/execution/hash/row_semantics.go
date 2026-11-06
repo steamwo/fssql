@@ -212,7 +212,7 @@ func (c *TupleDataCollection) Truncate(count int) error {
 		return nil
 	}
 	c.count = count
-	c.used = int(binary.LittleEndian.Uint32(c.offsets.Bytes()[count*4 : count*4+4]))
+	c.used = int(binary.LittleEndian.Uint32(c.offsetData[count*4 : count*4+4]))
 	return nil
 }
 

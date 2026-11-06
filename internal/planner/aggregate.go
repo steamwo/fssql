@@ -70,6 +70,7 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 		root = &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{root}, Output: preOutput, Projection: preProjection}
 	}
 
+	sharedDistinct, rewriteDistinct := collector.sharedDistinctArgument()
 	aggregates := make([]AggregateSpec, len(collector.aggregates))
 	distinctArguments := map[int]int{}
 	aggregateOutput := make([]Column, 0, len(collector.groups)+len(collector.aggregates))
@@ -82,7 +83,7 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 				return nil, fmt.Errorf("query planner: aggregate argument provenance missing")
 			}
 			columnIndex := len(collector.groups) + argumentIndex
-			if aggregateExpr.Distinct && aggregateExpr.FunctionID != function.MinID && aggregateExpr.FunctionID != function.MaxID {
+			if !rewriteDistinct && aggregateExpr.Distinct && aggregateExpr.FunctionID != function.MinID && aggregateExpr.FunctionID != function.MaxID {
 				if marked, ok := distinctArguments[columnIndex]; ok {
 					columnIndex = marked
 				} else {
@@ -101,12 +102,20 @@ func (p *QueryPlanner) planStableAggregateQuery(ctx context.Context, query *bind
 		aggregates[i] = AggregateSpec{FunctionID: uint16(aggregateExpr.FunctionID), Arguments: arguments, Output: output}
 		aggregateOutput = append(aggregateOutput, output)
 	}
-	root = &LogicalPlan{
-		Kind:       LogicalAggregate,
-		Children:   []*LogicalPlan{root},
-		Output:     aggregateOutput,
-		GroupBy:    groupColumns,
-		Aggregates: aggregates,
+	if rewriteDistinct {
+		var err error
+		root, err = twoLevelDistinctAggregate(root, groupColumns, preOutput, aggregates, aggregateOutput, sharedDistinct)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		root = &LogicalPlan{
+			Kind:       LogicalAggregate,
+			Children:   []*LogicalPlan{root},
+			Output:     aggregateOutput,
+			GroupBy:    groupColumns,
+			Aggregates: aggregates,
+		}
 	}
 	if err := root.Validate(); err != nil {
 		return nil, err

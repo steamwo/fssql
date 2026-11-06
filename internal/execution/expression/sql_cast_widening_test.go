@@ -2,10 +2,12 @@ package expression
 
 import (
 	"testing"
+	"time"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
@@ -52,5 +54,36 @@ func TestExecuteSQLIntegerToBigIntWideningCast(t *testing.T) {
 	}
 	if out.IsValid(1) {
 		t.Fatal("NULL widening cast must remain NULL")
+	}
+}
+
+func TestExecuteSQLConstantTemporalCast(t *testing.T) {
+	executor, chunk, cleanup := sqlExecutorFixture(t, 4)
+	defer cleanup()
+	catalog := function.NewQueryCatalog()
+	timestampCast, ok := catalog.Lookup("__fssql_cast_timestamp")
+	if !ok {
+		t.Fatal("timestamp cast function missing")
+	}
+	text := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: "2024-07-01 00:00:00"}
+	want := time.Date(2024, 7, 1, 0, 0, 0, 0, time.UTC).UnixMicro()
+	for _, expr := range []*binder.BoundExpression{
+		{Kind: binder.BoundFunction, FunctionKind: function.Scalar, FunctionID: timestampCast.ID, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{text}},
+		{Kind: binder.BoundCast, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{text}},
+	} {
+		out, err := executor.ExecuteSQL(expr, chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.Kind != vector.Constant || out.Type.ID != types.TimestampType {
+			t.Fatalf("kind=%v type=%v", out.Kind, out.Type.ID)
+		}
+		for row := 0; row < chunk.Cardinality; row++ {
+			value, valid := out.Int64(row)
+			if !valid || value != want {
+				t.Fatalf("row=%d value=%d valid=%v want=%d", row, value, valid, want)
+			}
+		}
+		out.Release()
 	}
 }

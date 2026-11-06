@@ -63,6 +63,39 @@ func TestNullPruning(t *testing.T) {
 		t.Fatalf("got=%v", got)
 	}
 }
+
+func TestTemporalRowGroupPruning(t *testing.T) {
+	children := int32(1)
+	required := Required
+	i64 := TypeInt64
+	converted := ConvertedTimestampMicros
+	tree, err := BuildSchemaTree([]SchemaElement{
+		{Name: "schema", NumChildren: &children},
+		{Name: "ts", Repetition: &required, Type: &i64, Converted: &converted},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf := tree.Leaves[0]
+	zero := int64(0)
+	rg := RowGroup{NumRows: 10, Columns: []ColumnChunk{{MetaData: &ColumnMetaData{PathInSchema: []string{"ts"}, Statistics: &Statistics{MinValue: i64b(1000), MaxValue: i64b(2000), NullCount: &zero}}}}}
+	micros := leaf.Logical
+	if got := EvaluateRowGroup(tree, rg, []scan.Filter{{Column: "ts", Op: scan.GreaterEqual, Value: scan.Literal{Type: micros, Int64: 3000}}}).Truth; got != scan.AlwaysFalse {
+		t.Fatalf("outside range got=%v", got)
+	}
+	if got := EvaluateRowGroup(tree, rg, []scan.Filter{{Column: "ts", Op: scan.GreaterEqual, Value: scan.Literal{Type: micros, Int64: 1500}}}).Truth; got != scan.MaybeTrue {
+		t.Fatalf("inside range got=%v", got)
+	}
+	millis := coretypes.LogicalType{ID: coretypes.TimestampType, Timestamp: coretypes.TimestampInfo{Unit: coretypes.TimestampMillis}}
+	if got := EvaluateRowGroup(tree, rg, []scan.Filter{{Column: "ts", Op: scan.GreaterEqual, Value: scan.Literal{Type: millis, Int64: 3}}}).Truth; got != scan.AlwaysFalse {
+		t.Fatalf("unit conversion got=%v", got)
+	}
+	inexact := false
+	rg.Columns[0].MetaData.Statistics.IsMaxValueExact = &inexact
+	if got := EvaluateRowGroup(tree, rg, []scan.Filter{{Column: "ts", Op: scan.GreaterEqual, Value: scan.Literal{Type: micros, Int64: 1500}}}).Truth; got != scan.MaybeTrue {
+		t.Fatalf("inexact stats got=%v", got)
+	}
+}
 func TestResolveSchemasUnionByName(t *testing.T) {
 	a := simpleTree(t)
 	r := Required

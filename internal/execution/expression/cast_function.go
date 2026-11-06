@@ -16,6 +16,13 @@ func isCastFunction(expr *binder.BoundExpression) bool {
 
 func (e *Executor) executeRegisteredCast(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if len(expr.Children) != 1 { return nil, fmt.Errorf("CAST requires one argument") }
+	if value, ok, parseErr := constantTemporalCast(expr); ok {
+		if parseErr != nil { return nil, parseErr }
+		out, err := vector.NewConstant(e.Scope, e.Buffers, expr.Type, chunk.Cardinality)
+		if err != nil { return nil, err }
+		if !value.Valid { out.SetNull(0) } else if expr.Type.ID == types.DateType { out.SetInt32(0, int32(value.Int64)) } else { out.SetInt64(0, value.Int64) }
+		return out, nil
+	}
 	src, err := e.ExecuteSQL(expr.Children[0], chunk)
 	if err != nil { return nil, err }
 	defer src.Release()
@@ -29,6 +36,23 @@ func (e *Executor) executeRegisteredCast(expr *binder.BoundExpression, chunk *ve
 		if err := writeScalarValue(out, row, expr.Type, casted); err != nil { out.Release(); return nil, err }
 	}
 	return out, nil
+}
+
+// constantTemporalCast recognizes a text literal cast to DATE/TIMESTAMP and
+// evaluates it once per batch instead of re-parsing every row.
+func constantTemporalCast(expr *binder.BoundExpression) (ScalarValue, bool, error) {
+	if expr == nil || len(expr.Children) != 1 {
+		return ScalarValue{}, false, nil
+	}
+	child := expr.Children[0]
+	if child == nil || child.Kind != binder.BoundLiteral || child.Type.ID != types.Varchar {
+		return ScalarValue{}, false, nil
+	}
+	if expr.Type.ID != types.DateType && expr.Type.ID != types.TimestampType {
+		return ScalarValue{}, false, nil
+	}
+	value, err := parseScalarText(child.Literal, expr.Type)
+	return value, true, err
 }
 
 func castScalarWithDecimalRescaling(value ScalarValue, target types.LogicalType) (ScalarValue, error) {

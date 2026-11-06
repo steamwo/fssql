@@ -26,6 +26,7 @@ func (f *RuntimeScanSourceFactory) WithAdapters(adapters []ScanOpenAdapter) (*Ru
 		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)+len(adapters)),
 		internal:  make(map[string]ScanOpenFunc, len(f.internal)),
 		counts:    make(map[function.ID]ScanOpenFunc, len(f.counts)),
+		stats:     make(map[function.ID]AggregateScanOpenFunc, len(f.stats)),
 	}
 	for id, open := range f.adapters {
 		out.adapters[id] = open
@@ -35,6 +36,9 @@ func (f *RuntimeScanSourceFactory) WithAdapters(adapters []ScanOpenAdapter) (*Ru
 	}
 	for id, open := range f.counts {
 		out.counts[id] = open
+	}
+	for id, open := range f.stats {
+		out.stats[id] = open
 	}
 	for _, adapter := range adapters {
 		if adapter.FunctionID == function.InvalidID || adapter.Open == nil {
@@ -50,6 +54,9 @@ func (f *RuntimeScanSourceFactory) WithAdapters(adapters []ScanOpenAdapter) (*Ru
 		out.adapters[adapter.FunctionID] = adapter.Open
 		if adapter.OpenCount != nil {
 			out.counts[adapter.FunctionID] = adapter.OpenCount
+		}
+		if adapter.OpenStats != nil {
+			out.stats[adapter.FunctionID] = adapter.OpenStats
 		}
 	}
 	return out, nil

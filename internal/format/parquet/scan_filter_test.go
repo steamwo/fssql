@@ -205,6 +205,55 @@ func TestCompiledScanFilterNullsAndConjunction(t *testing.T) {
 	}
 }
 
+func TestCompiledScanFilterTimestampAndDate(t *testing.T) {
+	manager := memory.NewManager(1 << 20)
+	scope := manager.NewScope()
+	buffers := memory.NewBufferManager(nil)
+	typ := types.LogicalType{ID: types.TimestampType, Timestamp: types.TimestampInfo{Unit: types.TimestampMicros}}
+	v, err := vector.NewFlat(scope, buffers, typ, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v.SetInt64(0, 500)
+	v.SetNull(1)
+	v.SetInt64(2, 1500)
+	v.SetInt64(3, 2500)
+	rows := []int{0, 1, 2, 3}
+	lower := compileScanFilter(typ, scan.Filter{Op: scan.GreaterEqual, Value: scan.Literal{Type: typ, Int64: 1000}})
+	upper := compileScanFilter(typ, scan.Filter{Op: scan.LessThan, Value: scan.Literal{Type: typ, Int64: 2000}})
+	if lower == nil || upper == nil {
+		t.Fatal("timestamp range was not compiled")
+	}
+	rows = lower(v, rows)
+	rows = upper(v, rows)
+	if len(rows) != 1 || rows[0] != 2 {
+		t.Fatalf("timestamp selection=%v", rows)
+	}
+	millis := types.LogicalType{ID: types.TimestampType, Timestamp: types.TimestampInfo{Unit: types.TimestampMillis}}
+	rows = compileScanFilter(typ, scan.Filter{Op: scan.GreaterEqual, Value: scan.Literal{Type: millis, Int64: 1}})(v, []int{0, 1, 2, 3})
+	if len(rows) != 2 || rows[0] != 2 || rows[1] != 3 {
+		t.Fatalf("unit conversion selection=%v", rows)
+	}
+	v.Release()
+
+	dateType := types.LogicalType{ID: types.DateType}
+	dates, err := vector.NewFlat(scope, buffers, dateType, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dates.SetInt32(0, 19000)
+	dates.SetInt32(1, 19500)
+	dates.SetInt32(2, 20000)
+	rows = compileScanFilter(dateType, scan.Filter{Op: scan.GreaterEqual, Value: scan.Literal{Type: dateType, Int64: 19500}})(dates, []int{0, 1, 2})
+	if len(rows) != 2 || rows[0] != 1 || rows[1] != 2 {
+		t.Fatalf("date selection=%v", rows)
+	}
+	dates.Release()
+	if scope.Used() != 0 {
+		t.Fatalf("leak=%d", scope.Used())
+	}
+}
+
 func TestSelectedScalarCancellationAndTruncation(t *testing.T) {
 	cursor, _ := dictionaryBatchCursor(t, []string{"x"}, []dictionaryBatchTestPage{{indices: []int{0, 0, 0}}}, false, nil)
 	ctx, cancel := context.WithCancel(context.Background())

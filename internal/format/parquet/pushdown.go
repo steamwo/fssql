@@ -10,6 +10,7 @@ import (
 
 	coretypes "github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/format/scan"
+	"github.com/steamwo/fssql/internal/semantics"
 )
 
 type ProjectionPlan struct{ColumnIndexes []int;LeafPaths []string}
@@ -20,8 +21,21 @@ func evaluateFilter(tree *SchemaTree,rg RowGroup,f scan.Filter)scan.Truth{leaf:=
 	// Existing statistics comparison is signed/text-oriented. Until a literal
 	// carries a dedicated uint64/[]byte payload, do not risk false pruning.
 	if leaf.Logical.IsUnsignedInteger()||leaf.Logical.IsBlob(){return scan.MaybeTrue}
-	if leaf.Logical.ID==coretypes.TimestampType&&!f.Value.Type.Same(leaf.Logical){return scan.MaybeTrue}
-	minb,maxb:=statsBounds(st);if minb==nil||maxb==nil||f.Value.Null{return scan.MaybeTrue};minv,ok1:=decodeStatValue(leaf,minb);maxv,ok2:=decodeStatValue(leaf,maxb);if !ok1||!ok2{return scan.MaybeTrue};cmpMin,ok:=compareLiteral(minv,f.Value);if !ok{return scan.MaybeTrue};cmpMax,ok:=compareLiteral(maxv,f.Value);if !ok{return scan.MaybeTrue};noNulls:=nullsKnown&&nulls==0;switch f.Op{case scan.Equal:if cmpMin>0||cmpMax<0{return scan.AlwaysFalse};if noNulls&&cmpMin==0&&cmpMax==0{return scan.AlwaysTrue};case scan.NotEqual:if noNulls&&cmpMin==0&&cmpMax==0{return scan.AlwaysFalse};if noNulls&&(cmpMax<0||cmpMin>0){return scan.AlwaysTrue};case scan.LessThan:if cmpMin>=0{return scan.AlwaysFalse};if noNulls&&cmpMax<0{return scan.AlwaysTrue};case scan.LessEqual:if cmpMin>0{return scan.AlwaysFalse};if noNulls&&cmpMax<=0{return scan.AlwaysTrue};case scan.GreaterThan:if cmpMax<=0{return scan.AlwaysFalse};if noNulls&&cmpMin>0{return scan.AlwaysTrue};case scan.GreaterEqual:if cmpMax<0{return scan.AlwaysFalse};if noNulls&&cmpMin>=0{return scan.AlwaysTrue};default:return scan.MaybeTrue};return scan.MaybeTrue}
+	literal:=f.Value
+	if literal.Null{return scan.MaybeTrue}
+	if leaf.Logical.ID==coretypes.TimestampType||leaf.Logical.ID==coretypes.DateType {
+		if (st.IsMinValueExact!=nil&&!*st.IsMinValueExact)||(st.IsMaxValueExact!=nil&&!*st.IsMaxValueExact){return scan.MaybeTrue}
+		if leaf.Logical.ID==coretypes.TimestampType {
+			if literal.Type.ID!=coretypes.TimestampType{return scan.MaybeTrue}
+			raw,err:=semantics.ConvertTimestampUnit(literal.Int64,literal.Type.Timestamp.Unit,leaf.Logical.Timestamp.Unit)
+			if err!=nil{return scan.MaybeTrue}
+			literal.Int64=raw
+			literal.Type=leaf.Logical
+		} else if literal.Type.ID!=coretypes.DateType {
+			return scan.MaybeTrue
+		}
+	}
+	minb,maxb:=statsBounds(st);if minb==nil||maxb==nil{return scan.MaybeTrue};minv,ok1:=decodeStatValue(leaf,minb);maxv,ok2:=decodeStatValue(leaf,maxb);if !ok1||!ok2{return scan.MaybeTrue};cmpMin,ok:=compareLiteral(minv,literal);if !ok{return scan.MaybeTrue};cmpMax,ok:=compareLiteral(maxv,literal);if !ok{return scan.MaybeTrue};noNulls:=nullsKnown&&nulls==0;switch f.Op{case scan.Equal:if cmpMin>0||cmpMax<0{return scan.AlwaysFalse};if noNulls&&cmpMin==0&&cmpMax==0{return scan.AlwaysTrue};case scan.NotEqual:if noNulls&&cmpMin==0&&cmpMax==0{return scan.AlwaysFalse};if noNulls&&(cmpMax<0||cmpMin>0){return scan.AlwaysTrue};case scan.LessThan:if cmpMin>=0{return scan.AlwaysFalse};if noNulls&&cmpMax<0{return scan.AlwaysTrue};case scan.LessEqual:if cmpMin>0{return scan.AlwaysFalse};if noNulls&&cmpMax<=0{return scan.AlwaysTrue};case scan.GreaterThan:if cmpMax<=0{return scan.AlwaysFalse};if noNulls&&cmpMin>0{return scan.AlwaysTrue};case scan.GreaterEqual:if cmpMax<0{return scan.AlwaysFalse};if noNulls&&cmpMin>=0{return scan.AlwaysTrue};default:return scan.MaybeTrue};return scan.MaybeTrue}
 func findLeafByName(tree *SchemaTree,name string)*SchemaNode{if tree==nil{return nil};for _,l:=range tree.Leaves{p:=strings.Join(l.Path,".");if p==name||l.Name==name{return l}};return nil}
 func statsBounds(s *Statistics)([]byte,[]byte){minb,maxb:=s.MinValue,s.MaxValue;if len(minb)==0{minb=s.Min};if len(maxb)==0{maxb=s.Max};return minb,maxb}
 type statValue struct{kind coretypes.LogicalTypeID;i int64;f float64;b bool;s string}
