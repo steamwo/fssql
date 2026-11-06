@@ -53,6 +53,7 @@ func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
 		vfs.StreamingWrite,
 		vfs.ServerSideList,
 		vfs.AtomicPublishWrite,
+		vfs.ConditionalWrite,
 	)
 }
 

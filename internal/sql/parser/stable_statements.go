@@ -263,6 +263,17 @@ func (p *Parser) parseCopyOption() (ast.CopyOption, error) {
 		return ast.CopyOption{}, err
 	}
 	o := ast.CopyOption{Name: name}
+	if strings.EqualFold(name.Name, "encryption_config") {
+		p.redactErrors = true
+		value, err := p.parseCopyEncryption()
+		if err != nil {
+			// Do not propagate token-bearing parse errors from a key expression.
+			return ast.CopyOption{}, p.errorf("invalid COPY ENCRYPTION_CONFIG syntax")
+		}
+		o.Value = value
+		o.Span = ast.Span{Start: start, End: p.previous().Span.End}
+		return o, nil
+	}
 	if p.peek().Kind != lexer.Comma && p.peek().Kind != lexer.RParen {
 		v, err := p.parseCopyScalar()
 		if err != nil {

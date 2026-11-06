@@ -15,6 +15,7 @@ type Parser struct {
 	internalSeq uint64
 	pendingCTEs []ast.CTE
 	parameterSlots map[int]int
+	redactErrors bool // COPY key literals must never appear in token diagnostics.
 }
 
 func Parse(sql string) (ast.Statement, error) {
@@ -396,4 +397,4 @@ func (p *Parser) accept(k lexer.Kind) bool { if p.peek().Kind == k { p.pos++; re
 func (p *Parser) expect(k lexer.Kind, label string) error { if !p.accept(k) { return p.errorf("expected %s", label) }; return nil }
 func (p *Parser) peek() lexer.Token { if p.pos >= len(p.tokens) { return p.tokens[len(p.tokens)-1] }; return p.tokens[p.pos] }
 func (p *Parser) previous() lexer.Token { if p.pos == 0 { return p.tokens[0] }; return p.tokens[p.pos-1] }
-func (p *Parser) errorf(format string, args ...any) error { t := p.peek(); return fmt.Errorf("sql parser %d:%d: %s", t.Span.Start.Line, t.Span.Start.Column, fmt.Sprintf(format, args...)) }
+func (p *Parser) errorf(format string, args ...any) error { t := p.peek(); message := "invalid encrypted COPY syntax"; if !p.redactErrors { message = fmt.Sprintf(format, args...) }; return fmt.Errorf("sql parser %d:%d: %s", t.Span.Start.Line, t.Span.Start.Column, message) }

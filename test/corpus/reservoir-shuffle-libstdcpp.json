@@ -1,0 +1,96 @@
+{
+  "profile": "duckdb",
+  "compiler": "MinGW GCC 15.2.0 libstdc++",
+  "cases": [
+    {
+      "seed": 0,
+      "count": 1,
+      "next_uint32": 3894649422,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "seed": 0,
+      "count": 2,
+      "next_uint32": 2055130073,
+      "sha256": "82c1315e6c757f33c4a77ca58b2a184f5a88614470c05ec77f3d28918db6b8ae"
+    },
+    {
+      "seed": 0,
+      "count": 17,
+      "next_uint32": 3521718650,
+      "sha256": "094b9c294e2b066d1f7f5d6636a230314da435d6ac067c6577662965fe31548d"
+    },
+    {
+      "seed": 0,
+      "count": 2051,
+      "next_uint32": 1887908801,
+      "sha256": "fad799417cbd6926b92762eb6001b8b6a51650ab3a8900d71a36a69d99c6f3fe"
+    },
+    {
+      "seed": 0,
+      "count": 70000,
+      "next_uint32": 2592022357,
+      "sha256": "d536b596cc4431598d0a86d7f015c4435c7043a284bac81142d4cf144add622d"
+    },
+    {
+      "seed": 42,
+      "count": 1,
+      "next_uint32": 3270867926,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "seed": 42,
+      "count": 2,
+      "next_uint32": 1795671209,
+      "sha256": "82c1315e6c757f33c4a77ca58b2a184f5a88614470c05ec77f3d28918db6b8ae"
+    },
+    {
+      "seed": 42,
+      "count": 17,
+      "next_uint32": 2062288904,
+      "sha256": "590efdf574bf0c1e5cbff8f754c56048959f33af4c0f81386099e87697c28d3e"
+    },
+    {
+      "seed": 42,
+      "count": 2051,
+      "next_uint32": 2563522324,
+      "sha256": "8b2aeef1fd4f19e4c76ab0877522082db54caadb39a78986e9ffdb845b35e0e9"
+    },
+    {
+      "seed": 42,
+      "count": 70000,
+      "next_uint32": 4074572340,
+      "sha256": "18bb480b22fb6fee1dadfbd7a84fadba8f4a9e2dd3cbc3f01f5adaa3829277ed"
+    },
+    {
+      "seed": 999,
+      "count": 1,
+      "next_uint32": 525609531,
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "seed": 999,
+      "count": 2,
+      "next_uint32": 52582016,
+      "sha256": "5d90ef7fc0d040fd56a1e48697cfa99e0dfaf4fd803aefefc3b5053ec1d36aea"
+    },
+    {
+      "seed": 999,
+      "count": 17,
+      "next_uint32": 3051085312,
+      "sha256": "fb74b455b3e62c96b2abf64b3c8395248da98fdafccb799139b5074586ef2564"
+    },
+    {
+      "seed": 999,
+      "count": 2051,
+      "next_uint32": 4165552206,
+      "sha256": "b49277acfd32e1e406d973f9bdb5b0d832251f0f1f8b1091929891c9e75e2169"
+    },
+    {
+      "seed": 999,
+      "count": 70000,
+      "next_uint32": 3071725370,
+      "sha256": "7b733ab2f2ee2a68c29874cbcf6a1fbc72181ff7f31c4fec7510ab3d44ef4e87"
+    }
+  ]
+}

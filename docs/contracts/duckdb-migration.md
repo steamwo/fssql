@@ -2,7 +2,7 @@
 
 ## 配置与默认值
 
-fssql 不执行通用 SET。引擎时间函数使用 UTC；没有可变会话时区。DuckDB 的 `SET TimeZone='UTC'` 不需要重复执行。`threads` 对应 Config.Workers；未指定时执行器默认 1。内存、临时空间和目录分别使用 MemoryLimitBytes、TempLimitBytes、SpillMemoryBudgetBytes、TempDir、ManifestDir。扩展加载与 force_mbedtls_unsafe 无对应项；加密导出通过 CopyTo 和 ParquetKeys 完成。
+fssql 不执行通用 SET。引擎时间函数使用 UTC；没有可变会话时区。DuckDB 的 `SET TimeZone='UTC'` 不需要重复执行。`threads` 对应 Config.Workers；未指定时执行器默认 1。内存、临时空间和目录分别使用 MemoryLimitBytes、TempLimitBytes、SpillMemoryBudgetBytes、TempDir、ManifestDir。扩展加载与 force_mbedtls_unsafe 无对应项；加密导出支持 CopyTo/ParquetKeys 与下列受限 SQL 入口。
 
 SQL COPY 和 CopyTo 的 Parquet 默认仍为 identity；需要 DuckDB 默认行为时显式使用 `Compression: "snappy"`，或 SQL `COMPRESSION snappy`。不静默修改原生 API 的已有默认值。
 
@@ -63,12 +63,32 @@ result, err := db.CopyTo(ctx, query, destination, gosql.CopyOptions{
 })
 ```
 
-加密输出在上述 options 中设置 Encryption，在 Config.ParquetKeys 中按 keyId 和 algorithm 解析密钥；不能把密钥拼入 SQL。既有加密能力维持现状，外部 Java 消费端互通按用户要求暂缓验收。
+API 加密输出在上述 options 中设置 Encryption，在 Config.ParquetKeys 中按 keyId 和 algorithm 解析密钥。推荐此方式避免 SQL 字符串携带密钥；外部 Java 消费端互通按用户要求暂缓验收。
 
-上句描述当前可用 API。原有 `FORMAT ENCRYPTED_PARQUET, ENCRYPTION_CONFIG {footer_key_value: from_base64(...), master_key_id: ...}` 加密 SQL 入口当前尚不支持，已列入 F6c 计划；这项 SQL 兼容建设与暂缓的 Java 互通分开推进。
+兼容 SQL 支持以下形态，无需注册 ParquetKeys：
 
-原生加密目标及当前源码行为：所有列和 footer 直接使用同一 raw AES key；数据页先压缩再加密，页头与 FileMetaData 先序列化再独立加密；每个模块生成独立随机 12 字节 nonce，使用标准 module AAD。FileCryptoMetaData 保持明文，保存 AES_GCM_V1、file unique AAD 和 KeyID 等元数据，不保存 raw key。完整文件的独立标准验收仍待 F6d 补齐。
+```sql
+COPY (SELECT ...) TO 'file:///.../out.parquet' (
+  FORMAT ENCRYPTED_PARQUET, COMPRESSION snappy,
+  ENCRYPTION_CONFIG {
+    footer_key_value: from_base64('raw AES key 的标准 Base64'),
+    master_key_id: 'key-001'
+  }
+);
+```
+
+ENCRYPTION_CONFIG 必须与显式 FORMAT ENCRYPTED_PARQUET 同时使用，且只允许上述两个字段与静态字符串常量。Base64 必须带标准 padding、无换行；解码后直接使用 16/32 字节 raw key，分别映射 AES-128/256-GCM，不派生或包装密钥。缺项、重复/未知字段、错误 Base64/key 长度、CSV 专用选项或其他格式组合均拒绝，不降级为明文。压缩默认 identity，也可显式 snappy。
+
+绑定产生的 raw key 自有副本在绑定失败、执行结束或查询关闭时清理；writer 独立副本在 Close/Abort/失败时清理。诊断、bound/AST 格式化与 manifest 不输出 raw key/Base64；完整 SQL/prepared AST 仍持有调用方的不可变字符串，由其生命周期与 Go GC 回收，不能承诺原地抹除，调用方不得记录这类完整 SQL。COPY/CopyTo 单文件路径在最终发布时条件创建目标，拒绝覆盖已有对象并保持原子可见性；本地文件系统须支持同目录 hard link。
+
+原生加密目标及已验证行为：所有列和 footer 直接使用同一 raw AES key；数据页先压缩再加密，页头与 FileMetaData 先序列化再独立加密；每个模块生成独立随机 12 字节 nonce，使用标准 module AAD。FileCryptoMetaData 保持明文，保存 AES_GCM_V1、file unique AAD 和 KeyID 等元数据，不保存 raw key。`test/parquetcheck` 使用独立 AES-GCM/AAD/compact Thrift 路径完成 SQL/API 完整文件验证，包括原始值、压缩顺序、多列/页/行组和逐模块认证失败；这不代表已完成 Java 互通或提供公开加密 reader。当前仅生成数据页、数据页头及 footer，不生成 dictionary/index/bloom 模块。
+
+## 随机采样
+
+reservoir 默认保持原生 Go 随机流。Config.SampleCompatibility 可显式设为 `duckdb`（libstdc++）或 `duckdb-msvc`（MSVC）；它们固定 DuckDB 1.5.5/2.0.0 的初始 shuffle、按批 replacement、慢速加权 skip/heap 和百分比分段/重采样路径。Bernoulli/system 继续使用已有 PCG 实现。
+
+固定 seed 的相同结果要求相同输入顺序、实际分批及标准库 profile；不同并行到达顺序不在逐行一致保证内，兼容路径显式 seed 上限为 signed int64。当前真实引擎差分使用 Windows 两版本、threads=1、137/2048 行输入批、三个 seed、空输入与最多 200,001 行；libstdc++ 的 std::shuffle 另有 GCC 15.2.0 独立参照。真实目标 Linux DuckDB 的完整差分仍未执行，不能将 MSVC 结果当作其验收。原始 MD5 采样 SQL 另有规范化文本、Unicode、DECIMAL/时间、阈值与并列键差分，不以 MD5 替代 SAMPLE 算法。
 
 ## 未承诺能力
 
-ATTACH、PostgreSQL/MySQL scanner 明确不支持。TableFunction 不是 scanner 的等价替代。原生 SAMPLE 的跨引擎兼容以差分证据的具体方法、版本和输入分批为准；reservoir 与完整 TEMP 隔离不能据通用测试通过认定兼容。
+ATTACH、PostgreSQL/MySQL scanner 明确不支持。TableFunction 不是 scanner 的等价替代。SAMPLE 的跨引擎兼容以差分证据的具体方法、版本、标准库与输入分批为准；完整 TEMP 隔离仍未实现。

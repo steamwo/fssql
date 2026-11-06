@@ -1,6 +1,6 @@
 # fssql 能力完善任务：承接 edge-agent-go 的 DuckDB 替换
 
-更新日期：2026-11-05。状态：已实施主要引擎/API 改造并完成相关验证；reservoir 精确兼容未完成，加密互通按用户要求暂缓。详细范围见下表。
+更新日期：2026-11-06。状态：已补齐显式 reservoir 兼容路径、加密 COPY SQL 入口与独立加密格式验收；真实 Linux DuckDB 的完整采样差分和 Java 加密互通尚未执行。详细范围见下表。
 
 ## 目标与范围
 
@@ -40,7 +40,7 @@
 
 ## fssql 主任务总表
 
-下表为当前实施与验证状态。F6a 的 reservoir、F8 的完整 TEMP 连接隔离仍是明确缺口。F6b 按用户“先维持现状，标记任务”的要求保持现有加密实现，暂缓外部消费端验收。
+下表为当前实施与验证状态。F6a 的验收限定于列明的版本、标准库、输入顺序及分批；F8 的完整 TEMP 连接隔离仍是明确缺口。F6b 按用户“先维持现状，标记任务”的要求保持现有加密实现，暂缓外部消费端验收。
 
 | 项目 | 当前状态 | 证据或限制 |
 | --- | --- | --- |
@@ -49,10 +49,10 @@
 | F3 | 已实现，定向验证通过 | 原生默认格式保留；ForceQuote/DuckDBCompatible、UTC CAST，双版本 CSV 字节对照 |
 | F4 | 已实现，定向与 race 验证通过 | Materialize/SQL/Close；独立 reader、租约、取消、限额、8,193 行 spill、DB.Close |
 | F5 | 已实现，定向验证通过 | 原语法展开改为单次求值；NULL 真值、nullability 与 cluster 连接 |
-| F6a | 部分完成 | Bernoulli/system 改用 PCG，两版本、三个 seed、8,193 行且分批一致的样本对照通过；reservoir 保留原生算法，尚不兼容 DuckDB |
+| F6a | 显式兼容路径已实现，固定范围差分通过 | 原生 reservoir 默认不变；SampleCompatibility 区分 libstdc++/MSVC。真实 Windows DuckDB 1.5.5/2.0.0 对照，另有 GCC shuffle 独立参照；尚未执行真实 Linux 引擎完整差分 |
 | F6b | 用户要求暂缓 | 已找到 1.5.5 Linux 扩展并记录摘要；未执行 Java 互通，不标为通过 |
-| F6c | 待实现：加密 SQL 入口 | 支持 FORMAT ENCRYPTED_PARQUET / ENCRYPTION_CONFIG；复用现有 writer，与暂缓的 Java 互通独立 |
-| F6d | 原生加密契约已明确，源码核对符合，独立验收待补 | 同一 raw AES key、逐模块随机 nonce、标准 module AAD、明文 FileCryptoMetaData |
+| F6c | 已实现并验证 | FORMAT ENCRYPTED_PARQUET / ENCRYPTION_CONFIG / from_base64；SQL/API 复用 writer，验证 raw key 校验、清理、条件写与原子提交 |
+| F6d | 独立格式验收通过 | 独立 AES-GCM/AAD/Thrift 路径验证完整文件，覆盖多列/页/行组、压缩、NULL、错误 key/AAD 与篡改 |
 | F7 | 已实现调用契约与回归 | Config 映射、CopyTo、显式 snappy、真实 codec 检查、路径与提交示例 |
 | F8 | 已实现所列入口，存在明确范围限制 | CTAS/OR REPLACE/TEMP 的 DB 生命周期实现；reader 别名、columns 结构体、参数绑定通过。TEMP 不提供连接私有命名空间/同名遮蔽 |
 | F9 | 已记录不支持，拒绝行为通过 | ATTACH、postgres_scan、mysql_scan 明确报错 |
@@ -127,12 +127,15 @@
 
 ### F6a：原生 SAMPLE 兼容
 
-当前仅 Bernoulli/system 已完成所列固定样本的跨引擎对照，条件包括相同输入次序与分批。reservoir 的 shuffle、replacement、百分比采样等未完成逐行兼容；保留既有 Go 随机流，不因引入 PCG 而顺带改变其原生结果。PCG 实现参考固定版本 DuckDB 的 [RandomEngine](https://github.com/duckdb/duckdb/blob/v1.5.5/src/common/random_engine.cpp)。
+Bernoulli/system 保留已验证的 PCG 路径。reservoir 默认仍使用既有 Go 随机流；通过 Config.SampleCompatibility 显式启用兼容路径：`duckdb` 对应 libstdc++，`duckdb-msvc` 对应固定 Windows wheel 使用的 MSVC。兼容路径实现初始 shuffle、按输入批次 replacement、122,880 行后的加权 skip/heap，以及按 100,000 行分段的百分比采样和尾段重采样；数据仍使用原生 chunk 序列化与 spill store，候选元数据计入内存配额。
 
-- [ ] 按实际使用方法核对 DuckDB RNG、seed 初始化、随机数消费次数、批次和并行影响；不能仅替换 RNG 就认定相同。
-- [ ] 实现需要的 DuckDB 兼容采样路径，覆盖 Bernoulli、reservoir、system 等实际需求；不把 MD5 算法当作原算法的等价替代。
-- [ ] 验证空输入、固定 seed、跨批、比例/行数边界、大输入；未覆盖的方法仍标为未完成。
-- [ ] MD5 类方法另验规范化文本、DECIMAL/时间格式、Unicode、阈值与并列值。内部可复现只是基础测试。
+PCG 实现参考固定版本 DuckDB 的 [RandomEngine](https://github.com/duckdb/duckdb/blob/v1.5.5/src/common/random_engine.cpp)，reservoir 参考同版本 `reservoir_sample.cpp` / `base_reservoir_sample.cpp`。`std::shuffle` 是标准库相关行为，不能只按 DuckDB 版本假定跨平台结果相同。固定 seed 必须同时匹配输入顺序与实际分批；本轮真实引擎参考固定 threads=1，不承诺不同分批或不同并行到达顺序仍选中相同行。兼容路径拒绝超过 signed int64 的显式 seed。
+
+- [x] 按实际使用方法核对 RNG、seed、随机数消费、批次与并行边界；显式区分标准库 profile。
+- [x] 实现显式 reservoir 兼容路径；Bernoulli/system 复用已有验证路径，不以 MD5 代替随机算法。
+- [x] 对照 Windows DuckDB 1.5.5/2.0.0：三个 seed、空输入、0/100%、超出输入的行数、137/2048 行分批、最多 200,001 行、快速/慢速替换及百分比分段。GCC 15.2.0 的 std::shuffle 独立参照覆盖两种分布分支和随机数消费。
+- [x] MD5 另以两版本真实引擎对照调用方使用的长度前缀文本、DECIMAL(38,6)、负时间/毫秒、Unicode/组合字符、NULL/空串、阈值等号与重复键并列排序；另用 Go crypto/md5 校验 UTF-8 字节摘要。
+- [ ] 在目标 Linux DuckDB 二进制上执行完整 reservoir 差分；当前 libstdc++ shuffle 参照不等价于已完成该外部引擎验收。
 
 ### F6b：加密 Parquet 互通
 
@@ -145,7 +148,7 @@
 
 ### F6c：加密 SQL 入口兼容
 
-状态：待实现。Java 消费端互通暂缓不影响此项建设；已有 CopyTo 加密 API 不能算作 SQL 入口已经兼容。
+状态：已实现并通过定向验证；Java 消费端互通仍由 F6b 独立跟踪。SQL 只接受所列静态结构体与 from_base64 字符串常量，不提供任意运行时选项求值。
 
 目标是兼容 edge-agent-go 当前自编译 DuckDB 扩展的调用形态：
 
@@ -159,12 +162,14 @@ COPY (SELECT ...) TO 'file:///.../out.parquet' (
 );
 ```
 
-- [ ] 补齐 COPY 选项中的 ENCRYPTION_CONFIG 结构体解析、FORMAT ENCRYPTED_PARQUET 和 from_base64 常量解码；限定所需表达式范围，不扩大为任意运行时函数求值。
-- [ ] 校验必填字段、重复/未知字段、Base64、raw key 长度和格式组合；直接使用解码后的 raw AES key，按 16/32 字节映射当前支持的 AES-128/256-GCM，不做口令派生或 DEK 包装。
-- [ ] 将绑定结果映射到现有 ParquetEncryptionConfig 和同一 writer；Go API 的 ParquetKeys 解析路径继续可用，不要求 SQL 调用方额外注册回调。
-- [ ] 错误文本、日志和 manifest 不输出 raw key/Base64；明确绑定及执行阶段的密钥生命周期和自有副本清理。
-- [ ] 对照 SQL/API 两种入口，验证相同的格式、算法和 KeyID。随机 nonce 导致文件密文字节不同，不以密文字节相等作为等价标准。
-- [ ] 覆盖 AES-128/256、snappy/identity、空结果、多列/多页/多行组和失败清理；缺少加密配置或校验失败必须报错，不回退明文。
+- [x] 补齐 COPY 选项中的 ENCRYPTION_CONFIG 结构体解析、FORMAT ENCRYPTED_PARQUET 和 from_base64 常量解码；限定所需表达式范围，不扩大为任意运行时函数求值。
+- [x] 校验必填字段、重复/未知字段、严格标准 Base64（带 padding、无换行）、raw key 长度和格式组合；直接使用解码后的 raw AES key，按 16/32 字节映射当前支持的 AES-128/256-GCM，不做口令派生或 DEK 包装。
+- [x] 将绑定结果映射到现有 ParquetEncryptionConfig 和同一 writer；Go API 的 ParquetKeys 解析路径继续可用，不要求 SQL 调用方额外注册回调。
+- [x] 诊断及 bound/AST 格式化脱敏，manifest 仅保存算法/KeyID。绑定失败清理已解码副本；执行结束或查询关闭清理 bound key，writer 的独立副本在 Close/Abort/失败时清理。调用方 SQL 与不可变字符串 AST 由调用方/prepared statement 生命周期持有并由 Go GC 回收，不承诺原地抹除；调用方不得记录含 Base64 的完整 SQL。
+- [x] 对照 SQL/API 两种入口，验证相同的格式、算法和 KeyID。独立检查 file AAD/nonce 与解密值，不以密文字节相等作为等价标准。
+- [x] 覆盖 AES-128/256、snappy/identity、空结果、4,101 行两列多页/三行组、上游失败/取消、重复目标与临时文件清理；缺少加密配置或校验失败报错，不回退明文。
+
+验证发现本地旧 AtomicPublishWrite 允许替换已有目标，已为 SQL COPY/CopyTo 单文件路径强制 IfNoneMatch，并由本地 driver 在发布时使用原子 hard link 条件创建。并发打开的 writer 只能有一个成功发布，失败方只删除自己的 staging 文件；普通显式替换写保持原契约。
 
 验收：原 SQL 形态可执行并产生符合 F6d 的加密文件；保留 COPY 的条件写和原子提交。Java 消费端互通仍由 F6b 独立验收。
 
@@ -172,7 +177,7 @@ COPY (SELECT ...) TO 'file:///.../out.parquet' (
 
 用户指定的目标：同一把 raw AES key 独立加密所有列的 Page Header、压缩后的 Page Data，以及序列化的 FileMetaData；每个 crypto module 独立生成随机 nonce，使用对应的标准 module AAD。FileCryptoMetaData 保持明文，只保存算法、file unique AAD、KeyID 等非密钥元数据。
 
-2026-11-05 源码逐项核对：目前 writer 符合上述处理路径，但不能据此宣称已完成独立格式验收或 Java 互通。标准依据为 [Apache Parquet Modular Encryption](https://parquet.apache.org/docs/file-format/data-pages/encryption/)，尤其 4.4.2 与 5.4。
+2026-11-05 先完成源码核对，2026-11-06 补齐下列完整文件的独立格式验收；两者均不代表 Java 互通通过。标准依据为 [Apache Parquet Modular Encryption](https://parquet.apache.org/docs/file-format/data-pages/encryption/)，尤其 4.4.2 与 5.4。
 
 | 项目 | 当前实现 |
 | --- | --- |
@@ -189,11 +194,11 @@ COPY (SELECT ...) TO 'file:///.../out.parquet' (
 | 文件封装 | PARE + 加密页模块 + 明文 FileCryptoMetaData + 加密 FileMetaData + 二者总长度 + PARE |
 
 - [x] 根据实际 writer/crypto 源码核对上述 key、nonce、AAD 和明文/密文边界。
-- [ ] 用独立构造的标准 AAD 和解密/Thrift 解析路径验证完整产物；不能只使用同一 parquetModuleAAD 辅助函数加密再解密来证明标准符合性。
-- [ ] 覆盖多列、多页、多行组，逐模块检查 nonce、AAD、压缩后的 page data 与原始逻辑值；错误 key、篡改和错误 module AAD 应解密失败。
-- [ ] 明确当前支持的模块范围：writer 使用数据页、数据页头及 footer；未来增加 dictionary/index/bloom 模块时同步补齐其标准 module type/AAD。
+- [x] `test/parquetcheck` 不导入生产 writer、AAD 或 Thrift 编解码器，独立构造标准 AAD、AES-GCM 解密并解析 compact Thrift；检查完整文件的明文 crypto metadata、密文 footer、页头、页体与字节边界。
+- [x] SQL/API 产物覆盖多列、多页、多行组，逐模块检查 nonce 唯一、AAD、解密后再解压的数据与 NULL/原始逻辑值；每个模块均验证错误 key、修改 AAD 的每个字节、nonce/密文/tag 篡改失败。
+- [x] 当前只生成数据页（模块 2）、数据页头（模块 4）及 footer（模块 0）。没有 dictionary/index/bloom 模块；未来增加时须补齐对应标准 module type/AAD 和独立测试。
 
-备注：当前普通 Parquet reader 仅支持 PAR1，不提供加密回读；上述验收需要独立测试工具。Java 消费端互通按用户要求继续暂缓。
+备注：当前普通 Parquet reader 仅支持 PAR1，不提供加密回读；独立测试工具仅供格式验收，不是新公开 reader。Java 消费端互通按用户要求继续暂缓。
 
 ### F7：配置与导出契约
 
@@ -227,6 +232,16 @@ COPY (SELECT ...) TO 'file:///.../out.parquet' (
 - [ ] 覆盖 typed/对象输入、规则、采样、字段探测、CSV/Parquet、大输入、取消、超限与失败清理。
 
 ## 已执行的初步验证
+
+2026-11-06，F6 追加验证（Go 1.25.11，windows/amd64）：
+
+- `CGO_ENABLED=0 go test ./...` 与 `CGO_ENABLED=0 go build ./...` 通过，最终日志为 `.cache/edge-migration-verification/f6-go-test.log` / `f6-go-build.log`。初次全量运行发现旧 COPY 测试驱动未声明/实现条件创建，已修正并增加拒绝覆盖测试；另一次 Windows manifest 替换 Access denied 在单独及最终全量重跑中通过，没有为此修改 manifest 实现。
+- 定向 `go test -race` 覆盖加密 SQL/API、bound key 清理、采样取消/超限/失败回收、慢速 reservoir 和本地竞争发布；通过，日志为 `.cache/edge-migration-verification/f6-race.log` / `f6-race-slow.log`。仅 race 检查开启 CGO，生产无此依赖。
+- `TestDuckDBReservoirReference`：两版本共 150 个真实 Windows DuckDB 参考用例；比较选中集合摘要与固定执行条件下的输出顺序摘要。参考由 `test/integration/generate_reservoir_reference.py` 生成，版本/平台不匹配即拒绝。
+- `TestDuckDBReservoirLibstdcppShuffle`：GCC 15.2.0 独立 std::shuffle 程序生成 15 组参考，覆盖 paired/fallback 分支、结果与后续 RNG 状态。C++ 仅用于离线生成参考，不是 Go 构建或测试依赖。
+- `TestSamplingCanonicalHashReference`：两版本真实 DuckDB 生成规范化文本、MD5、Top-N、阈值及并列键参考；`TestEncryptedCopySQLAndAPI` / `test/parquetcheck` 完成 F6c/F6d 独立文件验收。加密原语、密钥及格式处理继续复用原 writer，未修改现有加密格式。
+
+尚未执行目标 Linux DuckDB 的完整 reservoir 差分、Java 消费端加密互通或 edge-agent-go 生产替换，不因上述测试通过关闭这些外部验收。
 
 本轮实施后的验证：
 

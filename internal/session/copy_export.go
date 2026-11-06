@@ -73,6 +73,9 @@ func (e *ExportCopyExecutor) Run(q *query.Context, bound *binder.BoundCopyTo, pr
 	if bound == nil {
 		return errors.New("session: COPY bound statement is nil")
 	}
+	if bound.Options.Encryption != nil {
+		defer bound.Options.Encryption.Clear()
+	}
 	schema, err := copyExportSchema(prepared)
 	if err != nil {
 		return err
@@ -161,6 +164,9 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 	}
 	if !caps.Has(vfs.AtomicPublishWrite) {
 		return CopyExportResult{}, fmt.Errorf("session: COPY destination %s does not provide AtomicPublishWrite", finalURI.Scheme)
+	}
+	if !caps.Has(vfs.ConditionalWrite) {
+		return CopyExportResult{}, fmt.Errorf("session: COPY destination %s does not provide conditional create", finalURI.Scheme)
 	}
 
 	queryFingerprint := fingerprintText(queryText)
@@ -262,6 +268,12 @@ func copyWriterConfig(options binder.BoundCopyOptions, schema []exportpkg.Column
 		config.Format = exportpkg.FormatNDJSON
 	case binder.CopyParquet:
 		config.Format = exportpkg.FormatParquet
+		if options.Encryption != nil {
+			config.Parquet.Encryption = &exportpkg.ParquetEncryptionConfig{Algorithm: options.Encryption.Algorithm, KeyID: options.Encryption.KeyID, Key: options.Encryption.Key()}
+			if err := exportpkg.ValidateParquetEncryption(config.Parquet.Encryption); err != nil {
+				return exportpkg.FileWriterConfig{}, err
+			}
+		}
 	default:
 		return exportpkg.FileWriterConfig{}, fmt.Errorf("session: unsupported bound COPY format %q", options.Format)
 	}

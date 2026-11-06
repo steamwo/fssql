@@ -17,7 +17,8 @@ import (
 )
 
 type ExternalSortRuntimeConfig struct {
-	MemoryBudget int64
+	SampleCompatibility string
+	MemoryBudget        int64
 	// TopNMemoryBudget 是 TopN 候选集可用的查询级内存上限；<=0 时回退到 MemoryBudget。
 	// 固定宽度 TopN 是 N 有界的算子，DuckDB 同样按查询内存而非溢写预算约束它。
 	TopNMemoryBudget int64
@@ -67,6 +68,15 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 		return nil, fmt.Errorf("session: external SORT query context is closed")
 	}
 	if spec, ok := planner.IsPhase5SampleSort(keys); ok {
+		if f.config.SampleCompatibility != "" {
+			parsed, err := parsePhase5SampleSpec(spec)
+			if err != nil {
+				return nil, err
+			}
+			if parsed.method == 'r' || parsed.method == 'p' {
+				return newDuckDBReservoirOperator(f.query, f.buffers, spec, f.config.SampleCompatibility)
+			}
+		}
 		return newPhase5SampleOperator(f.query, f.buffers, spec)
 	}
 	if key, ok := planner.IsPhase5CTESort(keys); ok {

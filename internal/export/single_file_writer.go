@@ -18,6 +18,7 @@ func NewAtomicSingleFileDatasetWriter(manifest *Manifest, router *FileRouter, fa
 		return nil, errors.New("export: atomic single-file writer requires file writer factory")
 	}
 	return newDatasetWriter(manifest, router, func(ctx context.Context, uri vfs.URI, opts vfs.WriteOptions) (FormatWriter, error) {
+		opts.IfNoneMatch = true
 		return factory.OpenAtomicPublish(ctx, uri, opts)
 	})
 }

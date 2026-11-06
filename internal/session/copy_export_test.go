@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -76,21 +77,22 @@ func (d *copyTestAtomicDriver) List(context.Context, vfs.URI, vfs.ListOptions) (
 func (d *copyTestAtomicDriver) ReadRange(context.Context, vfs.RangeRequest, *memory.Scope, *memory.BufferManager) (vfs.RangeResult, error) {
 	return vfs.RangeResult{}, vfs.ErrRangeUnsupported
 }
-func (d *copyTestAtomicDriver) OpenAtomicPublishWrite(_ context.Context, uri vfs.URI, _ vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (vfs.WriteHandle, error) {
+func (d *copyTestAtomicDriver) OpenAtomicPublishWrite(_ context.Context, uri vfs.URI, opts vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (vfs.WriteHandle, error) {
 	if scope == nil || bm == nil {
 		return nil, errors.New("managed memory required")
 	}
 	d.mu.Lock()
 	d.opens++
 	d.mu.Unlock()
-	return &copyTestAtomicHandle{driver: d, uri: uri}, nil
+	return &copyTestAtomicHandle{driver: d, uri: uri, noReplace: opts.IfNoneMatch}, nil
 }
 
 type copyTestAtomicHandle struct {
-	driver   *copyTestAtomicDriver
-	uri      vfs.URI
-	pending  []byte
-	terminal bool
+	driver    *copyTestAtomicDriver
+	uri       vfs.URI
+	pending   []byte
+	terminal  bool
+	noReplace bool
 }
 
 func (h *copyTestAtomicHandle) Write(ctx context.Context, data []byte) (int, error) {
@@ -114,6 +116,9 @@ func (h *copyTestAtomicHandle) Close(ctx context.Context) (vfs.ObjectIdentity, e
 	defer h.driver.mu.Unlock()
 	if h.driver.failClose {
 		return vfs.ObjectIdentity{}, errors.New("injected publish failure")
+	}
+	if h.noReplace && h.driver.final != nil {
+		return vfs.ObjectIdentity{}, os.ErrExist
 	}
 	h.driver.final = append(h.driver.final[:0], h.pending...)
 	h.driver.etag++
@@ -164,7 +169,7 @@ func newCopyEngineHarness(t *testing.T, driver *copyTestAtomicDriver) (*StableSt
 }
 
 func TestStableCopyUsesAtomicExportAndCommitsManifest(t *testing.T) {
-	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite), final: []byte("old-complete")}
+	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite, vfs.ConditionalWrite)}
 	engine, manager, store := newCopyEngineHarness(t, driver)
 	q := query.New(context.Background(), manager)
 	prepared, err := engine.Prepare(context.Background(), q, "COPY (SELECT 1 AS value) TO 'copytest://host/result.csv' (FORMAT csv, HEADER true)")
@@ -177,7 +182,7 @@ func TestStableCopyUsesAtomicExportAndCommitsManifest(t *testing.T) {
 	driver.mu.Lock()
 	before := string(driver.final)
 	driver.mu.Unlock()
-	if before != "old-complete" {
+	if before != "" {
 		t.Fatalf("Prepare mutated final=%q", before)
 	}
 	if err := prepared.Run(q, statementNoopSink{}); err != nil {
@@ -204,7 +209,7 @@ func TestStableCopyUsesAtomicExportAndCommitsManifest(t *testing.T) {
 }
 
 func TestStableCopyZeroRowsStillPublishesValidFile(t *testing.T) {
-	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite), final: []byte("old")}
+	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite, vfs.ConditionalWrite)}
 	engine, manager, _ := newCopyEngineHarness(t, driver)
 	q := query.New(context.Background(), manager)
 	prepared, err := engine.Prepare(context.Background(), q, "COPY (SELECT 1 AS value WHERE false) TO 'copytest://host/empty.csv' (FORMAT csv, HEADER true)")
@@ -226,7 +231,7 @@ func TestStableCopyZeroRowsStillPublishesValidFile(t *testing.T) {
 }
 
 func TestStableCopyPublishFailureLeavesPreviousFinalAndCleansOwnership(t *testing.T) {
-	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite), final: []byte("old-complete"), failClose: true}
+	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite, vfs.ConditionalWrite), final: []byte("old-complete"), failClose: true}
 	engine, manager, store := newCopyEngineHarness(t, driver)
 	q := query.New(context.Background(), manager)
 	prepared, err := engine.Prepare(context.Background(), q, "COPY (SELECT 7 AS value) TO 'copytest://host/result.csv' (FORMAT csv)")
@@ -301,6 +306,40 @@ func TestStableCopyCanceledBeforeRunDoesNotOpenOrReplace(t *testing.T) {
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStableCopyRejectsExistingTarget(t *testing.T) {
+	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite, vfs.ConditionalWrite), final: []byte("old")}
+	engine, manager, _ := newCopyEngineHarness(t, driver)
+	q := query.New(context.Background(), manager)
+	defer q.Close()
+	prepared, err := engine.Prepare(context.Background(), q, "COPY (SELECT 1) TO 'copytest://host/result.csv'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = prepared.Run(q, statementNoopSink{}); !errors.Is(err, os.ErrExist) {
+		t.Fatal(err)
+	}
+	if string(driver.final) != "old" || driver.aborts != 1 {
+		t.Fatal("conditional create failed to preserve target/cleanup")
+	}
+}
+
+func TestStableCopyRequiresConditionalCreateBeforeManifest(t *testing.T) {
+	driver := &copyTestAtomicDriver{caps: vfs.Capabilities(vfs.StreamingWrite, vfs.AtomicPublishWrite)}
+	engine, manager, store := newCopyEngineHarness(t, driver)
+	q := query.New(context.Background(), manager)
+	defer q.Close()
+	prepared, err := engine.Prepare(context.Background(), q, "COPY (SELECT 1) TO 'copytest://host/result.csv'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = prepared.Run(q, statementNoopSink{}); err == nil {
+		t.Fatal("missing conditional create accepted")
+	}
+	if driver.opens != 0 || store.saves != 0 {
+		t.Fatal("unsupported destination touched output/manifest")
 	}
 }
 

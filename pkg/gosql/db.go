@@ -65,6 +65,10 @@ type Config struct {
 	ScalarFunctions        []ScalarFunction
 	// ParquetKeys resolves encrypted-export key bytes without placing keys in SQL or manifests.
 	ParquetKeys ParquetKeyResolver
+	// SampleCompatibility enables DuckDB reservoir sampling. Empty preserves the
+	// native stream; duckdb uses libstdc++, duckdb-msvc uses the Windows wheel.
+	// Input order and chunk boundaries must match the reference engine.
+	SampleCompatibility string
 }
 
 type DB struct {
@@ -78,6 +82,9 @@ type DB struct {
 }
 
 func Open(config Config) (*DB, error) {
+	if config.SampleCompatibility != "" && config.SampleCompatibility != "duckdb" && config.SampleCompatibility != "duckdb-msvc" {
+		return nil, errors.New("gosql: unsupported SampleCompatibility (use duckdb or duckdb-msvc)")
+	}
 	if config.MemoryLimitBytes <= 0 {
 		config.MemoryLimitBytes = defaultMemoryLimit
 	}
@@ -193,7 +200,7 @@ func Open(config Config) (*DB, error) {
 		Buffers:       buffers,
 		Scalars:       scalars,
 		Distinct:      session.ExternalDistinctRuntimeConfig{MemoryBudget: spillBudget, RadixBits: 4, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
-		Sort:          session.ExternalSortRuntimeConfig{MemoryBudget: spillBudget, TopNMemoryBudget: config.MemoryLimitBytes, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
+		Sort:          session.ExternalSortRuntimeConfig{SampleCompatibility: config.SampleCompatibility, MemoryBudget: spillBudget, TopNMemoryBudget: config.MemoryLimitBytes, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Aggregate:     session.ExternalAggregateRuntimeConfig{MemoryBudget: spillBudget, RadixBits: 4, MaxDepth: 8, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Join:          session.ExternalJoinRuntimeConfig{MemoryBudget: joinBudget, RadixBits: 4, MaxDepth: 8, MinReductionPercent: 10, SpillBlockBytes: spillBlock, Compression: storagetemp.CompressionNone},
 		Workers:       config.Workers,

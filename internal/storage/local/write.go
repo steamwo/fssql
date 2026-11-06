@@ -17,8 +17,11 @@ func (d *Driver) OpenWrite(ctx context.Context, u vfs.URI, opts vfs.WriteOptions
 	if scope == nil || bm == nil {
 		return nil, errors.New("local: managed memory required for write")
 	}
-	if opts.IfNoneMatch || opts.Expected != nil {
-		return nil, fmt.Errorf("%w: local conditional write is not advertised", vfs.ErrWriteUnsupported)
+	if opts.IfNoneMatch {
+		return d.OpenAtomicPublishWrite(ctx, u, opts, scope, bm)
+	}
+	if opts.Expected != nil {
+		return nil, fmt.Errorf("%w: local compare-and-swap write is unsupported", vfs.ErrWriteUnsupported)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -38,8 +41,8 @@ func (d *Driver) OpenAtomicPublishWrite(ctx context.Context, u vfs.URI, opts vfs
 	if scope == nil || bm == nil {
 		return nil, errors.New("local: managed memory required for atomic publish write")
 	}
-	if opts.IfNoneMatch || opts.Expected != nil {
-		return nil, fmt.Errorf("%w: local conditional write is not advertised", vfs.ErrWriteUnsupported)
+	if opts.Expected != nil {
+		return nil, fmt.Errorf("%w: local compare-and-swap write is unsupported", vfs.ErrWriteUnsupported)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -52,7 +55,7 @@ func (d *Driver) OpenAtomicPublishWrite(ctx context.Context, u vfs.URI, opts vfs
 	if err != nil {
 		return nil, err
 	}
-	return &writeHandle{file: staging, finalPath: finalPath, cleanupPath: staging.Name(), atomic: true}, nil
+	return &writeHandle{file: staging, finalPath: finalPath, cleanupPath: staging.Name(), atomic: true, noReplace: opts.IfNoneMatch}, nil
 }
 
 func (d *Driver) Delete(ctx context.Context, u vfs.URI, expected *vfs.ObjectIdentity) error {
@@ -75,6 +78,7 @@ type writeHandle struct {
 	finalPath   string
 	cleanupPath string
 	atomic      bool
+	noReplace   bool
 	failed      error
 	terminal    bool
 }
@@ -132,7 +136,11 @@ func (h *writeHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
 	}
 	h.file = nil
 	if h.atomic {
-		if err := publishFile(h.cleanupPath, h.finalPath); err != nil {
+		publish := publishFile
+		if h.noReplace {
+			publish = publishFileIfAbsent
+		}
+		if err := publish(h.cleanupPath, h.finalPath); err != nil {
 			h.failed = err
 			return vfs.ObjectIdentity{}, err
 		}
@@ -140,6 +148,21 @@ func (h *writeHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
 	}
 	h.terminal = true
 	return identity, nil
+}
+
+// Linking a completed staging inode creates the final name atomically and
+// fails if another writer wins. A prior Stat would leave an overwrite race.
+func publishFileIfAbsent(stagingPath, finalPath string) error {
+	if err := os.Link(stagingPath, finalPath); err != nil {
+		return err
+	}
+	// Publication already succeeded; a cleanup error cannot undo that outcome.
+	_ = os.Remove(stagingPath)
+	if dir, err := os.Open(filepath.Dir(finalPath)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	return nil
 }
 
 func (h *writeHandle) Abort(ctx context.Context) error {

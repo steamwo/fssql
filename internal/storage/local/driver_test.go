@@ -3,6 +3,7 @@ package local
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -213,7 +214,7 @@ func TestUnsupportedConditionalWriteFailsBeforeTouchingTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope, bm := managed(t, 1024)
-	_, err = driver.OpenAtomicPublishWrite(context.Background(), mustURI(t, path), vfs.WriteOptions{IfNoneMatch: true}, scope, bm)
+	_, err = driver.OpenAtomicPublishWrite(context.Background(), mustURI(t, path), vfs.WriteOptions{Expected: &vfs.ObjectIdentity{}}, scope, bm)
 	if !errors.Is(err, vfs.ErrWriteUnsupported) {
 		t.Fatalf("conditional error=%v", err)
 	}
@@ -222,5 +223,60 @@ func TestUnsupportedConditionalWriteFailsBeforeTouchingTarget(t *testing.T) {
 	}
 	if err := scope.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAtomicConditionalPublishRejectsCompetingWriter(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprint(streaming), func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "out.parquet")
+			driver, err := NewDriver(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope, bm := managed(t, 1024)
+			defer scope.Close()
+			open := driver.OpenAtomicPublishWrite
+			if streaming {
+				open = driver.OpenWrite
+			}
+			first, err := open(context.Background(), mustURI(t, path), vfs.WriteOptions{IfNoneMatch: true}, scope, bm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer first.Abort(context.Background())
+			second, err := open(context.Background(), mustURI(t, path), vfs.WriteOptions{IfNoneMatch: true}, scope, bm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer second.Abort(context.Background())
+			if _, err = first.Write(context.Background(), []byte("winner")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = second.Write(context.Background(), []byte("loser")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("uncommitted target visible")
+			}
+			if _, err = first.Close(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = second.Close(context.Background()); !errors.Is(err, os.ErrExist) {
+				t.Fatalf("expected commit-time conflict, got %v", err)
+			}
+			if err = second.Abort(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "winner" {
+				t.Fatal("winning output changed")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil || len(entries) != 1 {
+				t.Fatal("staging file leaked")
+			}
+		})
 	}
 }

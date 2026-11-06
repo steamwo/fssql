@@ -75,6 +75,18 @@ type CopyOption struct {
 
 func (o CopyOption) NodeSpan() Span { return o.Span }
 
+// CopyEncryptionExpr is a bounded COPY-only struct; its values are not evaluated
+// by the scalar execution engine. Formatting must never reveal key literals.
+type CopyEncryptionExpr struct {
+	Span   Span
+	Fields []CopyOption
+}
+
+func (*CopyEncryptionExpr) exprNode()          {}
+func (e *CopyEncryptionExpr) NodeSpan() Span   { return e.Span }
+func (*CopyEncryptionExpr) String() string     { return "ENCRYPTION_CONFIG <redacted>" }
+func (e *CopyEncryptionExpr) GoString() string { return e.String() }
+
 // CopyStmt 表示 Stable COPY ... TO；Relation 与 Query 恰有一个非 nil/非零。
 type CopyStmt struct {
 	Span        Span           // Span 覆盖完整 COPY statement。

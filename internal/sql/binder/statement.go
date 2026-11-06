@@ -112,6 +112,7 @@ const (
 
 // BoundCopyOptions 是能够无损映射到现有 Export FileWriterConfig 的 Stable SQL 子集。
 type BoundCopyOptions struct {
+	Encryption  *BoundCopyEncryption
 	ForceQuote  bool
 	Format      CopyFormat // Format 是最终目标格式。
 	Compression string     // Compression 是 identity/gzip/zstd。
@@ -396,15 +397,28 @@ func appendUniqueFold(dst *[]string, value, label string) error {
 // bindCopyOptions 只开放当前 Export 可以直接表达且不需要第二套状态机的 Stable option 子集。
 func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOptions, error) {
 	out := inferCopyOptions(destination)
+	valid := false
+	defer func() {
+		if !valid && out.Encryption != nil {
+			out.Encryption.Clear()
+		}
+	}()
 	seen := make(map[string]struct{}, len(options))
 	var csvSpecific bool
+	var encryptedFormat bool
 	for _, option := range options {
 		name := strings.ToLower(option.Name.Name)
 		if _, ok := seen[name]; ok {
-			return BoundCopyOptions{}, fmt.Errorf("duplicate COPY option %s", option.Name.Name)
+			return BoundCopyOptions{}, fmt.Errorf("duplicate COPY option")
 		}
 		seen[name] = struct{}{}
 		switch name {
+		case "encryption_config":
+			var err error
+			out.Encryption, err = bindCopyEncryption(option.Value)
+			if err != nil {
+				return BoundCopyOptions{}, err
+			}
 		case "force_quote":
 			value, err := copyStringLike(option.Value)
 			if err != nil || value != "*" {
@@ -426,8 +440,11 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 				out.Format = CopyNDJSON
 			case "parquet":
 				out.Format = CopyParquet
+			case "encrypted_parquet":
+				out.Format = CopyParquet
+				encryptedFormat = true
 			default:
-				return BoundCopyOptions{}, fmt.Errorf("unsupported COPY FORMAT %q", value)
+				return BoundCopyOptions{}, fmt.Errorf("unsupported COPY FORMAT")
 			}
 		case "compression":
 			value, err := copyStringLike(option.Value)
@@ -439,7 +456,7 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 				value = "identity"
 			}
 			if value != "identity" && value != "gzip" && value != "zstd" && value != "snappy" {
-				return BoundCopyOptions{}, fmt.Errorf("unsupported COPY COMPRESSION %q", value)
+				return BoundCopyOptions{}, fmt.Errorf("unsupported COPY COMPRESSION")
 			}
 			out.Compression = value
 		case "header":
@@ -464,11 +481,14 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 			out.Quote = value[0]
 			csvSpecific = true
 		default:
-			return BoundCopyOptions{}, fmt.Errorf("unsupported COPY option %s", option.Name.Name)
+			return BoundCopyOptions{}, fmt.Errorf("unsupported COPY option")
 		}
 	}
 	if out.Compression == "" {
 		out.Compression = "identity"
+	}
+	if encryptedFormat != (out.Encryption != nil) {
+		return BoundCopyOptions{}, fmt.Errorf("ENCRYPTED_PARQUET requires ENCRYPTION_CONFIG; ENCRYPTION_CONFIG requires FORMAT ENCRYPTED_PARQUET")
 	}
 	if out.Format == CopyParquet && out.Compression != "identity" && out.Compression != "snappy" {
 		return BoundCopyOptions{}, fmt.Errorf("Parquet whole-file compression %q is unsupported", out.Compression)
@@ -482,6 +502,7 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 	if out.Delimiter == out.Quote {
 		return BoundCopyOptions{}, fmt.Errorf("CSV DELIMITER and QUOTE must differ")
 	}
+	valid = true
 	return out, nil
 }
 

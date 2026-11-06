@@ -131,6 +131,12 @@ func (e *StableStatementEngine) PrepareParsed(ctx context.Context, q *query.Cont
 	// no Catalog transaction; rollback happens before Prepare returns.
 	var copyPrepared *PreparedSQLQuery
 	if value, ok := bound.(*binder.BoundCopyTo); ok {
+		if value.Options.Encryption != nil {
+			if err := q.AddCleanup(func() error { value.Options.Encryption.Clear(); return nil }); err != nil {
+				value.Options.Encryption.Clear()
+				return nil, err
+			}
+		}
 		if e.copy == nil {
 			return nil, fmt.Errorf("session: COPY executor is not configured")
 		}
