@@ -176,8 +176,7 @@ func (s *SpillablePageStore) DeletePage(id PageID)error{s.mu.Lock();defer s.mu.U
 func (s *SpillablePageStore) Close() error {
 	s.mu.Lock(); defer s.mu.Unlock(); if s.closed { return nil }
 	var errs []error
-	for i, seg := range s.segments { if seg == nil { continue }; if err := seg.file.Remove(); err != nil { errs = append(errs, err); continue }; if seg.reservation != nil { seg.reservation.Release(); seg.reservation = nil }; s.segments[i] = nil }
-	if len(errs) != 0 { return errors.Join(errs...) }
+	for i, seg := range s.segments { if seg == nil { continue }; if err := seg.file.Remove(); err != nil { errs = append(errs, err) }; if seg.reservation != nil { seg.reservation.Release(); seg.reservation = nil }; s.segments[i] = nil }
 	if s.directory != nil { s.directory.Release(); s.directory = nil; s.directoryCap = 0 }
-	s.livePages = 0; s.current = nil; s.closed = true; return nil
+	s.livePages = 0; s.current = nil; s.closed = true; return errors.Join(errs...)
 }
