@@ -393,7 +393,7 @@ go test ./internal/export ./internal/format/... -run '^$' -bench . -benchmem -be
 ### 9.4 外部格式互操作
 
 ```sh
-python test/interop/phase4/run.py
+python test/interop/parquet_writer/run.py
 ```
 
 该现有入口主要验证普通 Parquet 的小样本互读。其他阶段脚本按其实际依赖准备后执行；没有装在锁定环境中的 Spark/Polars 等不能宣称已验证。扩展类型、压缩和自编译加密仍需新增互操作矩阵，不能由此小样本推导通过。

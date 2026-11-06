@@ -38,7 +38,7 @@ func TestCountRecordsQuotesWidthAndPartialTail(t *testing.T) {
 }
 
 func TestCSVCountSourceAvoidsPayloadVectors(t *testing.T) {
-	driver := newPhase3MemoryDriver(t, makeParallelFixture(5000), vfs.Capabilities(vfs.RandomRead))
+	driver := newMemoryCSVDriver(t, makeParallelFixture(5000), vfs.Capabilities(vfs.RandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)

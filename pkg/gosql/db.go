@@ -119,7 +119,7 @@ func Open(config Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	functions := function.NewPhase5Catalog()
+	functions := function.NewQueryCatalog()
 	materialized := &materializedRegistry{items: make(map[string]*Materialized), limit: config.CatalogMaxEntries}
 	functions, err = functions.With(function.Definition{ID: materializedFunctionID, Name: materializedFunctionName, Kind: function.Table, MinArgs: 1, MaxArgs: 1})
 	if err != nil {

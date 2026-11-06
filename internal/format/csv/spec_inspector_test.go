@@ -12,7 +12,7 @@ import (
 
 func TestSpecInspectorMatchesDirectBindBackedInspection(t *testing.T) {
 	data := []byte("id,name\n1,alpha\n2,beta\n")
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestSpecInspectorMatchesDirectBindBackedInspection(t *testing.T) {
 
 func TestSpecInspectorRejectsParquetOnlyOptions(t *testing.T) {
 	data := []byte("id\n1\n")
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
 	registry, _ := vfs.NewRegistry(driver)
 	manager := memory.NewManager(1 << 20)
 	binder, _ := NewSourceBinder(registry, manager.NewScope(), memory.NewBufferManager(nil))

@@ -3,6 +3,7 @@
 package export
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -14,7 +15,10 @@ func prepareLocalManifestDir(dir string) error {
 }
 
 // publishLocalManifest 原子替换同目录文件，并同步目录中的新名称。
-func publishLocalManifest(temporary, path string) error {
+func publishLocalManifest(ctx context.Context, temporary, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.Rename(temporary, path); err != nil {
 		return err
 	}
@@ -22,7 +26,10 @@ func publishLocalManifest(temporary, path string) error {
 }
 
 // removeLocalManifest 删除恢复入口后同步目录，确保成功清理进入持久化边界。
-func removeLocalManifest(path string) error {
+func removeLocalManifest(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil

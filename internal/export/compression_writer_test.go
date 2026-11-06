@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
-	phasecompression "github.com/steamwo/fssql/internal/format/compression"
+	"github.com/steamwo/fssql/internal/format/compression"
 )
 
 func TestGzipCompressionSinkLogicalEquality(t *testing.T) {
@@ -44,7 +44,7 @@ func TestGzipCompressionSinkLogicalEquality(t *testing.T) {
 	}
 }
 
-func TestZstdRawCompressionSinkInteropWithPhase3Decoder(t *testing.T) {
+func TestZstdRawCompressionSinkInteropWithDecoder(t *testing.T) {
 	mm := memory.NewManager(16 << 20)
 	scope := mm.NewScope()
 	bm := memory.NewBufferManager(nil)
@@ -60,7 +60,7 @@ func TestZstdRawCompressionSinkInteropWithPhase3Decoder(t *testing.T) {
 	if _, err := z.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := phasecompression.Zstd().Decompress(context.Background(), sink.buf.Bytes(), int64(len(payload)+1), scope, bm)
+	decoded, err := compression.Zstd().Decompress(context.Background(), sink.buf.Bytes(), int64(len(payload)+1), scope, bm)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestZstdFlushProducesValidContinuation(t *testing.T) {
 	if _, err := z.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := phasecompression.Zstd().Decompress(context.Background(), sink.buf.Bytes(), 64, scope, bm)
+	decoded, err := compression.Zstd().Decompress(context.Background(), sink.buf.Bytes(), 64, scope, bm)
 	if err != nil {
 		t.Fatal(err)
 	}

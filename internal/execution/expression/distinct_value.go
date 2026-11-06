@@ -16,7 +16,7 @@ func (e *Executor) executeDistinctValue(expr *binder.BoundExpression, chunk *vec
 		args = append(args, arg)
 	}
 	defer releaseScalarVectors(args)
-	state := phase5State(e, expr)
+	state := windowStateFor(e, expr)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	out, err := vector.NewFlat(e.Scope, e.Buffers, expr.Type, chunk.Cardinality)

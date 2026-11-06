@@ -8,13 +8,13 @@ func sortStageOrdered(keys []planner.SortKey) bool {
 	if len(keys) == 0 {
 		return false
 	}
-	if _, ok := planner.IsPhase5SampleSort(keys); ok {
+	if _, ok := planner.IsSampleSort(keys); ok {
 		return false
 	}
-	if _, ok := planner.IsPhase5CTESort(keys); ok {
+	if _, ok := planner.IsCTESort(keys); ok {
 		return false
 	}
-	if _, ok := planner.IsPhase5GlobalWindowSort(keys); ok {
+	if _, ok := planner.IsGlobalWindowSort(keys); ok {
 		return false
 	}
 	return true

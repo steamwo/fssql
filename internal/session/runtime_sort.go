@@ -67,9 +67,9 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 	if f.query.Closed() {
 		return nil, fmt.Errorf("session: external SORT query context is closed")
 	}
-	if spec, ok := planner.IsPhase5SampleSort(keys); ok {
+	if spec, ok := planner.IsSampleSort(keys); ok {
 		if f.config.SampleCompatibility != "" {
-			parsed, err := parsePhase5SampleSpec(spec)
+			parsed, err := parseSampleSpec(spec)
 			if err != nil {
 				return nil, err
 			}
@@ -77,13 +77,13 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 				return newDuckDBReservoirOperator(f.query, f.buffers, spec, f.config.SampleCompatibility)
 			}
 		}
-		return newPhase5SampleOperator(f.query, f.buffers, spec)
+		return newSampleOperator(f.query, f.buffers, spec)
 	}
-	if key, ok := planner.IsPhase5CTESort(keys); ok {
-		return newPhase5CTEOperator(f, key)
+	if key, ok := planner.IsCTESort(keys); ok {
+		return newCTEOperator(f, key)
 	}
-	if spec, ok := planner.IsPhase5GlobalWindowSort(keys); ok {
-		return newPhase5GlobalWindowOperator(f, columns, spec)
+	if spec, ok := planner.IsGlobalWindowSort(keys); ok {
+		return newGlobalWindowOperator(f, columns, spec)
 	}
 	if len(columns) == 0 || len(keys) == 0 {
 		return nil, fmt.Errorf("session: SORT requires input columns and sort keys")

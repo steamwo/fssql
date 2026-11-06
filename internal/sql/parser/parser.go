@@ -236,7 +236,7 @@ func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 				if err := p.expect(lexer.KeywordFrom, "FROM"); err != nil { return nil, err }
 				right, err := p.parseExpr(31); if err != nil { return nil, err }
 				span := ast.Span{Start: start, End: right.NodeSpan().End}
-				value := ast.Expr(phase4Call("__fssql_not_distinct", span, left, right))
+				value := ast.Expr(scalarCall("__fssql_not_distinct", span, left, right))
 				if !not { value = &ast.UnaryExpr{Span: span, Op: "NOT", Expr: value} }
 				left = value; continue
 			}
@@ -245,7 +245,7 @@ func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 		}
 		lbp, rbp, op, ok := infixBinding(p.peek().Kind); if !ok || lbp < minBP { return left, nil }; p.pos++
 		right, err := p.parseExpr(rbp); if err != nil { return nil, err }; span := ast.Span{Start: left.NodeSpan().Start, End: right.NodeSpan().End}
-		if op == "||" { left = phase4Call("__fssql_concat", span, left, right) } else { left = &ast.BinaryExpr{Span: span, Left: left, Op: op, Right: right} }
+		if op == "||" { left = scalarCall("__fssql_concat", span, left, right) } else { left = &ast.BinaryExpr{Span: span, Left: left, Op: op, Right: right} }
 	}
 }
 
@@ -269,8 +269,8 @@ func (p *Parser) parsePrefix() (ast.Expr, error) {
 		e, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return e, nil
 	case lexer.Identifier, lexer.QuotedIdentifier:
 		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text,"exists") { start:=t.Span.Start;p.pos++;if err:=p.expect(lexer.LParen,"(");err!=nil{return nil,err};q,ok,err:=p.parseSelectStatement();if err!=nil{return nil,err};if !ok{return nil,p.errorf("EXISTS requires SELECT")};if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err};return &ast.SubqueryExpr{Span:ast.Span{Start:start,End:p.previous().Span.End},Query:q,Exists:true},nil }
-		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "case") { return p.parsePhase4Case() }
-		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "cast") { return p.parsePhase4Cast() }
+		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "case") { return p.parseCase() }
+		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "cast") { return p.parseCast() }
 		name, err := p.parseQualifiedName(); if err != nil { return nil, err }
 		if !p.accept(lexer.LParen) { return &ast.NameExpr{Span: name.Span, Name: name}, nil }
 		call := &ast.CallExpr{Function: name}
@@ -296,9 +296,9 @@ func (p *Parser) parseWindowCall(call *ast.CallExpr) (ast.Expr, error) {
 	synthetic := ""
 	switch name {
 	case "row_number": if call.Star || len(call.Args) != 0 { return nil, p.errorf("ROW_NUMBER takes no arguments") }; synthetic = "__fssql_window_row_number"
-	case "count": if !call.Star || len(call.Args) != 0 { return nil, p.errorf("phase 5 window supports COUNT(*) only") }; synthetic = "__fssql_window_count"
+	case "count": if !call.Star || len(call.Args) != 0 { return nil, p.errorf("window supports COUNT(*) only") }; synthetic = "__fssql_window_count"
 	case "sum": if call.Star || len(call.Args) != 1 { return nil, p.errorf("SUM window requires one argument") }; synthetic = "__fssql_window_sum"
-	default: return nil, p.errorf("window function %s is not supported in phase 5", name)
+	default: return nil, p.errorf("window function %s is not supported", name)
 	}
 	if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }
 	var partition []ast.Expr; var order []ast.OrderTerm
@@ -310,15 +310,15 @@ func (p *Parser) parseWindowCall(call *ast.CallExpr) (ast.Expr, error) {
 		if !p.acceptWord("between") || !p.acceptWord("unbounded") || !p.acceptWord("preceding") || !p.accept(lexer.KeywordAnd) { return nil, p.errorf("only ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING is supported") }
 		t := p.peek(); if t.Kind != lexer.Number || t.Raw != "1" { return nil, p.errorf("only 1 PRECEDING frame end is supported") }; p.pos++
 		if !p.acceptWord("preceding") { return nil, p.errorf("expected PRECEDING") }; frame = "prefix1"
-	} else if p.peekWord("range") || p.peekWord("groups") { return nil, p.errorf("only the phase 5 ROWS frame is supported") }
+	} else if p.peekWord("range") || p.peekWord("groups") { return nil, p.errorf("only the ROWS frame is supported") }
 	if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
-	if (name == "count" || name == "sum") && frame == "none" && (len(partition) != 0 || len(order) != 0) { return nil, p.errorf("phase 5 %s window without explicit frame supports OVER () only", strings.ToUpper(name)) }
+	if (name == "count" || name == "sum") && frame == "none" && (len(partition) != 0 || len(order) != 0) { return nil, p.errorf("%s window without explicit frame supports OVER () only", strings.ToUpper(name)) }
 	desc := make([]byte, len(order)); nulls := make([]byte, len(order)); for i, term := range order { if term.Descending { desc[i] = '1' } else { desc[i] = '0' }; if term.NullsFirst != nil && *term.NullsFirst { nulls[i] = 'f' } else { nulls[i] = 'l' } }
 	spec := fmt.Sprintf("p=%d;o=%d;d=%s;n=%s;f=%s", len(partition), len(order), string(desc), string(nulls), frame)
 	span := ast.Span{Start: call.Span.Start, End: p.previous().Span.End}; args := []ast.Expr{&ast.LiteralExpr{Span: span, Kind: ast.LiteralString, Value: spec}}
 	if name == "sum" { args = append(args, call.Args[0]) }
 	args = append(args, partition...); for _, term := range order { args = append(args, term.Expr) }
-	return phase4Call(synthetic, span, args...), nil
+	return scalarCall(synthetic, span, args...), nil
 }
 
 func (p *Parser) parseWindowExprList() ([]ast.Expr, error) {
@@ -337,11 +337,11 @@ func (p *Parser) parseWindowOrderTerms() ([]ast.OrderTerm, error) {
 	}
 }
 
-func (p *Parser) parsePhase4Cast() (ast.Expr, error) {
-	start := p.peek().Span.Start; p.pos++; if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }; value, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.KeywordAs, "AS"); err != nil { return nil, err }; castName, err := p.parsePhase4CastType(); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return phase4Call("__fssql_cast_"+castName, ast.Span{Start: start, End: p.previous().Span.End}, value), nil
+func (p *Parser) parseCast() (ast.Expr, error) {
+	start := p.peek().Span.Start; p.pos++; if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }; value, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.KeywordAs, "AS"); err != nil { return nil, err }; castName, err := p.parseCastType(); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return scalarCall("__fssql_cast_"+castName, ast.Span{Start: start, End: p.previous().Span.End}, value), nil
 }
 
-func (p *Parser) parsePhase4CastType() (string, error) {
+func (p *Parser) parseCastType() (string, error) {
 	id, err := p.parseIdentifier(); if err != nil { return "", err }; name := strings.ToLower(id.Name)
 	switch name {
 	case "boolean", "tinyint", "smallint", "integer", "bigint", "hugeint", "utinyint", "usmallint", "uinteger", "ubigint", "float", "double", "varchar", "blob", "date", "timestamp", "timestamp_ns", "timestamptz": return name, nil
@@ -353,7 +353,7 @@ func (p *Parser) parsePhase4CastType() (string, error) {
 	}
 }
 
-func (p *Parser) parsePhase4Case() (ast.Expr, error) {
+func (p *Parser) parseCase() (ast.Expr, error) {
 	start := p.peek().Span.Start; p.pos++; var base ast.Expr
 	if !p.peekWord("when") { var err error; base, err = p.parseExpr(0); if err != nil { return nil, err } }
 	type arm struct{ cond, value ast.Expr }; var arms []arm
@@ -361,15 +361,15 @@ func (p *Parser) parsePhase4Case() (ast.Expr, error) {
 	if len(arms) == 0 { return nil, p.errorf("CASE requires WHEN") }
 	var otherwise ast.Expr; if p.acceptWord("else") { var err error; otherwise, err = p.parseExpr(0); if err != nil { return nil, err } } else { otherwise = &ast.LiteralExpr{Span: p.peek().Span, Kind: ast.LiteralNull, Value: "NULL"} }
 	if !p.acceptWord("end") { return nil, p.errorf("expected END") }; end := p.previous().Span.End
-	for i := len(arms)-1; i >= 0; i-- { otherwise = phase4Call("__fssql_case_when", ast.Span{Start: start, End: end}, arms[i].cond, arms[i].value, otherwise) }
+	for i := len(arms)-1; i >= 0; i-- { otherwise = scalarCall("__fssql_case_when", ast.Span{Start: start, End: end}, arms[i].cond, arms[i].value, otherwise) }
 	return otherwise, nil
 }
 
-func phase4Call(name string, span ast.Span, args ...ast.Expr) *ast.CallExpr { id := ast.Identifier{Span: span, Raw: name, Name: name}; return &ast.CallExpr{Span: span, Function: ast.QualifiedName{Span: span, Parts: []ast.Identifier{id}}, Args: args} }
+func scalarCall(name string, span ast.Span, args ...ast.Expr) *ast.CallExpr { id := ast.Identifier{Span: span, Raw: name, Name: name}; return &ast.CallExpr{Span: span, Function: ast.QualifiedName{Span: span, Parts: []ast.Identifier{id}}, Args: args} }
 func (p *Parser) peekWord(word string) bool { t := p.peek(); return t.Kind == lexer.Identifier && strings.EqualFold(t.Text, word) }
 func (p *Parser) peekNWord(n int, word string) bool { if p.pos+n >= len(p.tokens) { return false }; t := p.tokens[p.pos+n]; return t.Kind == lexer.Identifier && strings.EqualFold(t.Text, word) }
 func (p *Parser) acceptWord(word string) bool { if p.peekWord(word) { p.pos++; return true }; return false }
-func (p *Parser) acceptPhase4Word(word string) bool { return p.acceptWord(word) }
+func (p *Parser) acceptKeyword(word string) bool { return p.acceptWord(word) }
 
 func infixBinding(k lexer.Kind) (int, int, string, bool) {
 	switch k {

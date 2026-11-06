@@ -10,13 +10,13 @@ func physicalOutputOrdered(plan *planner.PhysicalPlan) bool {
 	}
 	switch plan.Kind {
 	case planner.PhysicalSort:
-		if _, ok := planner.IsPhase5SampleSort(plan.Sort); ok {
+		if _, ok := planner.IsSampleSort(plan.Sort); ok {
 			return false
 		}
-		if _, ok := planner.IsPhase5CTESort(plan.Sort); ok {
+		if _, ok := planner.IsCTESort(plan.Sort); ok {
 			return false
 		}
-		if _, ok := planner.IsPhase5GlobalWindowSort(plan.Sort); ok {
+		if _, ok := planner.IsGlobalWindowSort(plan.Sort); ok {
 			return false
 		}
 		return len(plan.Sort) > 0

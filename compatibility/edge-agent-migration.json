@@ -8,7 +8,7 @@
   ],
   "production_cgo": false,
   "requirements": [
-    {"original_item": 1, "id": "EDGE.CONFIG.001", "implementation": "Config mapping and UTC defaults documented", "verification": "PASS", "evidence": ["docs/contracts/duckdb-migration.md", "pkg/gosql/phase4_test.go"]},
+    {"original_item": 1, "id": "EDGE.CONFIG.001", "implementation": "Config mapping and UTC defaults documented", "verification": "PASS", "evidence": ["docs/contracts/duckdb-migration.md", "pkg/gosql/scalar_sql_test.go"]},
     {"original_item": 2, "id": "EDGE.DDL.001", "implementation": "CTAS, OR REPLACE VIEW, DB-lifetime TEMP syntax", "verification": "PASS", "limitations": ["No connection-private TEMP namespace or main/temp name shadowing"], "evidence": ["pkg/gosql/migration_sql_test.go", "internal/catalog/view_replace_test.go"]},
     {"original_item": 3, "id": "EDGE.SNAPSHOT.001", "implementation": "Materialize/SQL/Close with bounded native spill and reader leases", "verification": "PASS", "evidence": ["pkg/gosql/materialized_test.go"]},
     {"original_item": 4, "id": "EDGE.COPY.001", "implementation": "ForceQuote API and SQL, CopyTo encryption boundary, atomic commit preserved", "verification": "PASS", "limitations": ["External encrypted-Parquet interoperability deferred by user", "USE_TMP_FILE false is not emulated"], "evidence": ["pkg/gosql/edge_migration_test.go", "pkg/gosql/migration_sql_test.go"]},

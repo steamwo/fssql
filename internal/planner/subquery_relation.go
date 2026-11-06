@@ -11,19 +11,19 @@ import (
 
 func attachParameterDomain(input, domain *LogicalPlan) *LogicalPlan {
 	if len(input.Output) == 0 {
-		return clonePhase5Logical(domain)
+		return cloneLogical(domain)
 	}
 	if len(domain.Output) == 0 {
 		return input
 	}
-	return &LogicalPlan{Kind: LogicalJoin, Join: JoinCross, Children: []*LogicalPlan{input, clonePhase5Logical(domain)}, Output: append(clonePlannerColumns(input.Output), domain.Output...)}
+	return &LogicalPlan{Kind: LogicalJoin, Join: JoinCross, Children: []*LogicalPlan{input, cloneLogical(domain)}, Output: append(clonePlannerColumns(input.Output), domain.Output...)}
 }
 
 // Every relation returns its original columns followed by the same parameter
 // schema. Query blocks can therefore keep their bound local column indexes.
 func (p *QueryPlanner) planDomainRelation(ctx context.Context, relation *binder.BoundRelation, domain *LogicalPlan, slots map[int]int) (*LogicalPlan, error) {
 	if relation == nil {
-		return clonePhase5Logical(domain), nil
+		return cloneLogical(domain), nil
 	}
 	if !binder.QueryCorrelated(&binder.BoundQuery{Source: relation}) {
 		input, err := p.planRelation(ctx, relation)
@@ -43,7 +43,7 @@ func (p *QueryPlanner) planDomainRelation(ctx context.Context, relation *binder.
 			return nil, err
 		}
 		// Relation aliases and UNION coercions own the visible output metadata.
-		input = &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{input}, Output: output, Projection: phase5PassThrough(input.Output)}
+		input = &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{input}, Output: output, Projection: passThrough(input.Output)}
 		if relation.Materialize {
 			input = materializeDomainInput(input, fmt.Sprintf("domain-cte:%p:%p", relation.CTEQuery, domain))
 		}
@@ -203,7 +203,7 @@ func (p *QueryPlanner) finishDomainJoin(ctx context.Context, relation *binder.Bo
 		if identity == nil {
 			identity = eq
 		} else {
-			identity = phase5And(identity, eq)
+			identity = andExpression(identity, eq)
 		}
 	}
 	matched := &LogicalPlan{Kind: LogicalJoin, Join: JoinCross, Children: []*LogicalPlan{left, right}, Output: append(clonePlannerColumns(left.Output), right.Output...)}
@@ -243,7 +243,7 @@ func (p *QueryPlanner) finishDomainJoin(ctx context.Context, relation *binder.Bo
 			join = JoinSemi
 		}
 		lkey := len(side.Output) - 1
-		return subqueryJoin(clonePhase5Logical(side), clonePhase5Logical(matched), []int{lkey}, []int{id}, join)
+		return subqueryJoin(cloneLogical(side), cloneLogical(matched), []int{lkey}, []int{id}, join)
 	}
 	if kind == JoinSemi || kind == JoinAnti {
 		selected, err := selectSide(left, len(left.Output)-1, kind == JoinSemi)

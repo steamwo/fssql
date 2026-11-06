@@ -11,7 +11,7 @@ import (
 // TestNewRuntimeSourceReusesRealBindFingerprint 验证 runtime 使用真实 FileSetPlanner/Bind fingerprint，并复用现有并发 CSV Source。
 func TestNewRuntimeSourceReusesRealBindFingerprint(t *testing.T) {
 	data := []byte("1,true\n2,false\n")
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestNewRuntimeSourceReusesRealBindFingerprint(t *testing.T) {
 
 // TestNewRuntimeSourceRejectsSnapshotDrift 验证 Statement bind 后对象 size/identity 变化时，在读取任何结果前拒绝执行。
 func TestNewRuntimeSourceRejectsSnapshotDrift(t *testing.T) {
-	driver := newPhase3MemoryDriver(t, []byte("1,true\n"), vfs.Capabilities(vfs.RandomRead))
+	driver := newMemoryCSVDriver(t, []byte("1,true\n"), vfs.Capabilities(vfs.RandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestNewRuntimeSourceRejectsSnapshotDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	planned := binding.Fingerprint()
-	// 模拟 bind 后远端对象被替换；phase3MemoryDriver 的 Stat identity 会随 size 改变。
+	// 模拟 bind 后远端对象被替换；memoryCSVDriver 的 Stat identity 会随 size 改变。
 	driver.data = append(driver.data, []byte("2,false\n")...)
 	if source, err := NewRuntimeSource(context.Background(), RuntimeSourceConfig{
 		Binder: binder, Pattern: driver.uri.String(), ExpectedFingerprint: planned,

@@ -64,12 +64,12 @@ func TestDatabaseSQLParameterValues(t *testing.T) {
 }
 
 func TestDatabaseSQLPreparedStatementReuse(t *testing.T) {
-	db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{phase5RowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{groupedRowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	stmt, err := db.PrepareContext(context.Background(), "SELECT count(*), (SELECT 7) FROM (SELECT id FROM phase5_rows()) AS d WHERE id > ?")
+	stmt, err := db.PrepareContext(context.Background(), "SELECT count(*), (SELECT 7) FROM (SELECT id FROM grouped_rows()) AS d WHERE id > ?")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestDatabaseSQLPreparedStatementReuse(t *testing.T) {
 	if err := named.QueryRowContext(context.Background(), sql.Named("n", 3)).Scan(&count); err != nil || count != 6 {
 		t.Fatalf("named statement: %d %v", count, err)
 	}
-	limited, err := db.PrepareContext(context.Background(), "SELECT id FROM phase5_rows() ORDER BY id LIMIT ? OFFSET ?")
+	limited, err := db.PrepareContext(context.Background(), "SELECT id FROM grouped_rows() ORDER BY id LIMIT ? OFFSET ?")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,9 +221,9 @@ func TestDatabaseSQLParameterValidationAndTransactions(t *testing.T) {
 }
 
 func TestDatabaseSQLPreparedEarlyCloseReleasesMemory(t *testing.T) {
-	native := phase5DB(t, 1<<20)
+	native := groupedRowsDB(t, 1<<20)
 	conn := &sqlConn{db: native}
-	statement, err := conn.PrepareContext(context.Background(), "SELECT id FROM phase5_rows() WHERE id > ?")
+	statement, err := conn.PrepareContext(context.Background(), "SELECT id FROM grouped_rows() WHERE id > ?")
 	if err != nil {
 		t.Fatal(err)
 	}

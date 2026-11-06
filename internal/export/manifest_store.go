@@ -109,7 +109,7 @@ func (s *LocalManifestStore) Save(ctx context.Context, manifest *Manifest) error
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := publishLocalManifest(tmpName, s.path); err != nil {
+	if err := publishLocalManifest(ctx, tmpName, s.path); err != nil {
 		return err
 	}
 	published = true
@@ -162,7 +162,7 @@ func (s *LocalManifestStore) Delete(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return removeLocalManifest(s.path)
+	return removeLocalManifest(ctx, s.path)
 }
 
 // writeLocalManifestAll 完整写出 payload，并在每次文件写入前观察取消状态。

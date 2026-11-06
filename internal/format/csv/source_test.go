@@ -12,32 +12,32 @@ import (
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-type phase3MemoryDriver struct {
+type memoryCSVDriver struct {
 	data []byte
 	caps vfs.CapabilitySet
 	uri  vfs.URI
 }
 
-func newPhase3MemoryDriver(t *testing.T, data []byte, caps vfs.CapabilitySet) *phase3MemoryDriver {
+func newMemoryCSVDriver(t *testing.T, data []byte, caps vfs.CapabilitySet) *memoryCSVDriver {
 	t.Helper()
 	u, err := vfs.ParseURI("mem://dataset/data.csv")
 	if err != nil { t.Fatal(err) }
-	return &phase3MemoryDriver{data: append([]byte(nil), data...), caps: caps, uri: u}
+	return &memoryCSVDriver{data: append([]byte(nil), data...), caps: caps, uri: u}
 }
-func (d *phase3MemoryDriver) Scheme() string { return "mem" }
-func (d *phase3MemoryDriver) StaticCapabilities() vfs.CapabilitySet { return d.caps }
-func (d *phase3MemoryDriver) Probe(context.Context) (vfs.ProbeResult, error) {
+func (d *memoryCSVDriver) Scheme() string { return "mem" }
+func (d *memoryCSVDriver) StaticCapabilities() vfs.CapabilitySet { return d.caps }
+func (d *memoryCSVDriver) Probe(context.Context) (vfs.ProbeResult, error) {
 	return vfs.ProbeResult{Supported: d.caps, Endpoint: "mem://dataset", CredentialScope: "test", SecurityProfile: "test"}, nil
 }
-func (d *phase3MemoryDriver) Stat(context.Context, vfs.URI) (vfs.ObjectInfo, error) {
+func (d *memoryCSVDriver) Stat(context.Context, vfs.URI) (vfs.ObjectInfo, error) {
 	id := vfs.ObjectIdentity{ETag: "fixture", Size: int64(len(d.data))}
 	return vfs.ObjectInfo{URI: d.uri, Size: int64(len(d.data)), Identity: id}, nil
 }
-func (d *phase3MemoryDriver) List(context.Context, vfs.URI, vfs.ListOptions) (vfs.ListPage, error) {
+func (d *memoryCSVDriver) List(context.Context, vfs.URI, vfs.ListOptions) (vfs.ListPage, error) {
 	id := vfs.ObjectIdentity{ETag: "fixture", Size: int64(len(d.data))}
 	return vfs.ListPage{Entries: []vfs.ListEntry{{URI: d.uri, Size: int64(len(d.data)), Identity: id}}}, nil
 }
-func (d *phase3MemoryDriver) ReadRange(ctx context.Context, r vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager) (vfs.RangeResult, error) {
+func (d *memoryCSVDriver) ReadRange(ctx context.Context, r vfs.RangeRequest, scope *memory.Scope, bm *memory.BufferManager) (vfs.RangeResult, error) {
 	if err := ctx.Err(); err != nil { return vfs.RangeResult{}, err }
 	if err := r.Validate(); err != nil { return vfs.RangeResult{}, err }
 	if r.Offset+r.Length > int64(len(d.data)) { return vfs.RangeResult{}, fmt.Errorf("test range out of bounds") }
@@ -49,7 +49,7 @@ func (d *phase3MemoryDriver) ReadRange(ctx context.Context, r vfs.RangeRequest, 
 
 func TestSourceBindingAndInspectionShareInference(t *testing.T) {
 	data := []byte("id,active,value,name\n1,true,1.5,alpha\n2,false,2,beta\n")
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil { t.Fatal(err) }
 	manager := memory.NewManager(1 << 20)
@@ -122,7 +122,7 @@ func collectIDs(t *testing.T, src *Source, workers int) []int64 {
 func TestParallelCSVEqualsSequentialCSV(t *testing.T) {
 	const rows = 5000
 	data := makeParallelFixture(rows)
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil { t.Fatal(err) }
 	manager := memory.NewManager(32 << 20)
@@ -148,7 +148,7 @@ func TestParallelCSVEqualsSequentialCSV(t *testing.T) {
 
 func TestParallelRequestFallsBackToSequentialWithoutParallelRandomRead(t *testing.T) {
 	data := makeParallelFixture(300)
-	driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
 	registry, _ := vfs.NewRegistry(driver)
 	manager := memory.NewManager(4 << 20)
 	scope := manager.NewScope()

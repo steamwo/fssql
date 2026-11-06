@@ -72,7 +72,7 @@ func (p *QueryPlanner) planLateralJoin(ctx context.Context, relation *binder.Bou
 		projection[i] = subqueryColumn(left.Output, index)
 		output[i] = left.Output[index]
 	}
-	input := &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{clonePhase5Logical(left)}, Output: output, Projection: projection}
+	input := &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{cloneLogical(left)}, Output: output, Projection: projection}
 	input = &LogicalPlan{Kind: LogicalDistinct, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output)}
 	right, err := p.planDomainRelation(ctx, query.Source, input, parameterSlots)
 	if err != nil {

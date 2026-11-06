@@ -10,7 +10,7 @@ import (
 func TestSQLCompatibilitySamplingAndComposition(t *testing.T) {
 	for _, budget := range []int64{1 << 20, 1} {
 		t.Run(fmt.Sprint(budget), func(t *testing.T) {
-			db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{phase5RowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir(), SpillMemoryBudgetBytes: budget})
+			db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{groupedRowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir(), SpillMemoryBudgetBytes: budget})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -19,25 +19,25 @@ func TestSQLCompatibilitySamplingAndComposition(t *testing.T) {
 				sql  string
 				want []any
 			}{
-				{"SELECT count(*) FROM phase5_rows() TABLESAMPLE reservoir(3 ROWS) REPEATABLE(42)", []any{int64(3)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE 3", []any{int64(3)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE 100 PERCENT", []any{int64(5)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE 0% (system, 42)", []any{int64(0)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE 100% (bernoulli, 42)", []any{int64(5)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE reservoir(40%) REPEATABLE(42)", []any{int64(2)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE reservoir(50%) REPEATABLE(42)", []any{int64(3)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE reservoir(0%)", []any{int64(0)}},
-				{"SELECT count(*) FROM phase5_rows() USING SAMPLE reservoir(100%)", []any{int64(5)}},
-				{"SELECT sum(d.id), (SELECT count(*) FROM phase5_rows()) FROM (SELECT id FROM phase5_rows()) AS d", []any{"15", int64(5)}},
-				{"SELECT count(*) FROM (SELECT id FROM phase5_rows()) AS d WHERE d.id > (SELECT 2)", []any{int64(3)}},
-				{"SELECT d.n FROM (SELECT count(*) AS n FROM phase5_rows() WHERE id > (SELECT 2)) AS d", []any{int64(3)}},
-				{"WITH c AS (SELECT count(*) AS n FROM phase5_rows() WHERE id > (SELECT 2)) SELECT a.n, b.n, (SELECT 7) FROM c AS a CROSS JOIN c AS b", []any{int64(3), int64(3), int64(7)}},
-				{"SELECT count(*) FROM phase5_rows() HAVING count(*) = (SELECT 5)", []any{int64(5)}},
-				{"SELECT sum(id), (SELECT 7 WHERE FALSE) FROM phase5_rows()", []any{"15", nil}},
-				{"SELECT count(*) FROM phase5_rows() WHERE id > 2 USING SAMPLE 100%", []any{int64(3)}},
-				{"SELECT count(*) FROM phase5_rows() AS a JOIN phase5_rows() AS b ON a.id = b.id USING SAMPLE 3 ROWS", []any{int64(3)}},
-				{"SELECT count(a.id) FROM phase5_rows() AS a TABLESAMPLE 3 ROWS JOIN phase5_rows() AS b ON a.id = b.id", []any{int64(3)}},
-				{"SELECT count(*) FROM phase5_rows() TABLESAMPLE 4 ROWS WHERE id > 0 USING SAMPLE 3 ROWS", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() TABLESAMPLE reservoir(3 ROWS) REPEATABLE(42)", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE 3", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE 100 PERCENT", []any{int64(5)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE 0% (system, 42)", []any{int64(0)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE 100% (bernoulli, 42)", []any{int64(5)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE reservoir(40%) REPEATABLE(42)", []any{int64(2)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE reservoir(50%) REPEATABLE(42)", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE reservoir(0%)", []any{int64(0)}},
+				{"SELECT count(*) FROM grouped_rows() USING SAMPLE reservoir(100%)", []any{int64(5)}},
+				{"SELECT sum(d.id), (SELECT count(*) FROM grouped_rows()) FROM (SELECT id FROM grouped_rows()) AS d", []any{"15", int64(5)}},
+				{"SELECT count(*) FROM (SELECT id FROM grouped_rows()) AS d WHERE d.id > (SELECT 2)", []any{int64(3)}},
+				{"SELECT d.n FROM (SELECT count(*) AS n FROM grouped_rows() WHERE id > (SELECT 2)) AS d", []any{int64(3)}},
+				{"WITH c AS (SELECT count(*) AS n FROM grouped_rows() WHERE id > (SELECT 2)) SELECT a.n, b.n, (SELECT 7) FROM c AS a CROSS JOIN c AS b", []any{int64(3), int64(3), int64(7)}},
+				{"SELECT count(*) FROM grouped_rows() HAVING count(*) = (SELECT 5)", []any{int64(5)}},
+				{"SELECT sum(id), (SELECT 7 WHERE FALSE) FROM grouped_rows()", []any{"15", nil}},
+				{"SELECT count(*) FROM grouped_rows() WHERE id > 2 USING SAMPLE 100%", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() AS a JOIN grouped_rows() AS b ON a.id = b.id USING SAMPLE 3 ROWS", []any{int64(3)}},
+				{"SELECT count(a.id) FROM grouped_rows() AS a TABLESAMPLE 3 ROWS JOIN grouped_rows() AS b ON a.id = b.id", []any{int64(3)}},
+				{"SELECT count(*) FROM grouped_rows() TABLESAMPLE 4 ROWS WHERE id > 0 USING SAMPLE 3 ROWS", []any{int64(3)}},
 				{"SELECT CAST(7 AS BIGINT) % CAST(3 AS BIGINT), CAST(-7 AS BIGINT) % 3, CAST(7 AS BIGINT) % -3", []any{int64(1), int64(-1), int64(1)}},
 				{"SELECT CAST(NULL AS BIGINT) % 2", []any{nil}},
 				{"SELECT CAST('170141183460469231731687303715884105727' AS HUGEINT), CAST('-170141183460469231731687303715884105728' AS HUGEINT)", []any{"170141183460469231731687303715884105727", "-170141183460469231731687303715884105728"}},
@@ -69,9 +69,9 @@ func TestSQLCompatibilitySamplingAndComposition(t *testing.T) {
 }
 
 func TestSQLCompatibilitySamplingRejectsInvalidSizes(t *testing.T) {
-	db := phase5DB(t, 1<<20)
+	db := groupedRowsDB(t, 1<<20)
 	for _, suffix := range []string{"bernoulli(3 ROWS)", "system(3 ROWS)", "bernoulli(101%)", "-1 ROWS", "3.5 ROWS", "3 (unknown)", "3 (reservoir, 1) REPEATABLE(2)"} {
-		_, err := db.QueryChunks(context.Background(), "SELECT id FROM phase5_rows() USING SAMPLE "+suffix, func(*Chunk) error { return nil })
+		_, err := db.QueryChunks(context.Background(), "SELECT id FROM grouped_rows() USING SAMPLE "+suffix, func(*Chunk) error { return nil })
 		if err == nil {
 			t.Errorf("accepted invalid sample %s", suffix)
 		}
@@ -91,12 +91,12 @@ func TestSQLCompatibilitySamplingRejectsInvalidSizes(t *testing.T) {
 }
 
 func TestSQLCompatibilityGroupedScalarSubqueries(t *testing.T) {
-	db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{phase5RowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	db, err := OpenSQLDB(Config{TableFunctions: []TableFunction{groupedRowsFunction()}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(context.Background(), "SELECT grp, count(*), (SELECT 7) FROM phase5_rows() GROUP BY grp HAVING count(*) > (SELECT 1) ORDER BY grp")
+	rows, err := db.QueryContext(context.Background(), "SELECT grp, count(*), (SELECT 7) FROM grouped_rows() GROUP BY grp HAVING count(*) > (SELECT 1) ORDER BY grp")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -62,7 +62,7 @@ func bindPredicateComparable(in BindInput) (BindResult, error) {
 			}
 		} else {
 			var err error
-			t, err = phase4CommonNumeric(t, other)
+			t, err = commonNumeric(t, other)
 			if err != nil {
 				return BindResult{}, err
 			}

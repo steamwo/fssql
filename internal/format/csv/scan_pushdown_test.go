@@ -9,7 +9,7 @@ import (
 )
 
 func TestCSVLimitAvoidsParallelBoundaryPrescan(t *testing.T) {
-	driver := &trackingCSVDriver{phase3MemoryDriver: newPhase3MemoryDriver(t, makeParallelFixture(10000), vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))}
+	driver := &trackingCSVDriver{memoryCSVDriver: newMemoryCSVDriver(t, makeParallelFixture(10000), vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead))}
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestCSVLimitAvoidsParallelBoundaryPrescan(t *testing.T) {
 }
 
 func TestCSVSerialWindowServesMultipleChunksAndCloseReleasesIt(t *testing.T) {
-	driver := &trackingCSVDriver{phase3MemoryDriver: newPhase3MemoryDriver(t, makeParallelFixture(10000), vfs.Capabilities(vfs.RandomRead))}
+	driver := &trackingCSVDriver{memoryCSVDriver: newMemoryCSVDriver(t, makeParallelFixture(10000), vfs.Capabilities(vfs.RandomRead))}
 	registry, _ := vfs.NewRegistry(driver)
 	m, scope, bm := testMemory(8 << 20)
 	binder, _ := NewSourceBinder(registry, scope, bm)

@@ -1,0 +1,49 @@
+{
+  "rows": 1000000,
+  "files": {
+    "1m.csv": 228978009
+  },
+  "cases": [
+    {
+      "name": "csv_scan_64",
+      "sql": "SELECT column0, column15, column17 FROM read_csv('s3://test-bucket/1m.csv')",
+      "ordered": false,
+      "kind": "compare",
+      "memory_limit": 67108864,
+      "spill_budget": 4194304,
+      "expected_rows": 1000000,
+      "expected_digest": "eec8d67b2ecaebaed7e4deca6ecd971f61f17b771c68c3eefdeef2fdc2db1486"
+    },
+    {
+      "name": "csv_temporal_64",
+      "sql": "SELECT CAST(column19 AS VARCHAR), CAST(column20 AS VARCHAR), CAST(column21 AS VARCHAR) FROM read_csv('s3://test-bucket/1m.csv')",
+      "ordered": false,
+      "kind": "compare",
+      "memory_limit": 67108864,
+      "spill_budget": 4194304,
+      "expected_rows": 1000000,
+      "expected_digest": "870a8dfcad7a947aba56ae8970ae5d1e386c895e6434f15255b386b3d5a52b57"
+    },
+    {
+      "name": "csv_scan_256",
+      "sql": "SELECT column0, column15, column17 FROM read_csv('s3://test-bucket/1m.csv')",
+      "ordered": false,
+      "kind": "compare",
+      "memory_limit": 268435456,
+      "spill_budget": 4194304,
+      "expected_rows": 1000000,
+      "expected_digest": "eec8d67b2ecaebaed7e4deca6ecd971f61f17b771c68c3eefdeef2fdc2db1486"
+    },
+    {
+      "name": "csv_temporal_256",
+      "sql": "SELECT CAST(column19 AS VARCHAR), CAST(column20 AS VARCHAR), CAST(column21 AS VARCHAR) FROM read_csv('s3://test-bucket/1m.csv')",
+      "ordered": false,
+      "kind": "compare",
+      "memory_limit": 268435456,
+      "spill_budget": 4194304,
+      "expected_rows": 1000000,
+      "expected_digest": "870a8dfcad7a947aba56ae8970ae5d1e386c895e6434f15255b386b3d5a52b57"
+    }
+  ],
+  "duckdb_version": "2.0.0"
+}

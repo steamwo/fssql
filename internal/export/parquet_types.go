@@ -22,6 +22,7 @@ func parquetPhysicalType(typ coretypes.LogicalType) (parquet.PhysicalType, error
 	case coretypes.Double:
 		return parquet.TypeDouble, nil
 	case coretypes.Decimal:
+		if typ.Decimal.Width <= 9 { return parquet.TypeInt32,nil }
 		if typ.Decimal.Width <= 18 { return parquet.TypeInt64,nil }
 		return parquet.TypeFixedLenByteArray,nil
 	case coretypes.Varchar:

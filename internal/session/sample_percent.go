@@ -11,7 +11,7 @@ import (
 // Reservoir percentages need the population size first. Keep the input in the
 // spillable store, then reuse the fixed-size reservoir without retaining it all
 // in memory.
-func (s *phase5SampleOperator) emitReservoirPercent(ctx context.Context, emit func(*vector.DataChunk) error) error {
+func (s *sampleOperator) emitReservoirPercent(ctx context.Context, emit func(*vector.DataChunk) error) error {
 	k := uint64(math.Round(float64(s.seen) * math.Float64frombits(s.spec.amount) / 100))
 	if k == 0 {
 		return nil
@@ -23,7 +23,7 @@ func (s *phase5SampleOperator) emitReservoirPercent(ctx context.Context, emit fu
 	if !s.spec.seeded {
 		seed = s.rng.Uint64()
 	}
-	op, err := newPhase5SampleOperator(s.q, s.buffers, fmt.Sprintf("sample:r:%x:s:%x", k, seed))
+	op, err := newSampleOperator(s.q, s.buffers, fmt.Sprintf("sample:r:%x:s:%x", k, seed))
 	if err != nil {
 		return err
 	}

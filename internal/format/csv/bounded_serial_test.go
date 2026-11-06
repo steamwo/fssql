@@ -12,7 +12,7 @@ import (
 )
 
 type trackingCSVDriver struct {
-	*phase3MemoryDriver
+	*memoryCSVDriver
 	mu       sync.Mutex
 	reads    int
 	maxRange int64
@@ -33,7 +33,7 @@ func (d *trackingCSVDriver) ReadRange(ctx context.Context, r vfs.RangeRequest, s
 	if failAt > 0 && read == failAt {
 		return vfs.RangeResult{}, fmt.Errorf("injected csv range failure")
 	}
-	return d.phase3MemoryDriver.ReadRange(ctx, r, scope, bm)
+	return d.memoryCSVDriver.ReadRange(ctx, r, scope, bm)
 }
 
 func (d *trackingCSVDriver) reset(failAt int) {
@@ -66,8 +66,8 @@ func TestSequentialCSVUsesBoundedRangeReads(t *testing.T) {
 		fmt.Fprintf(&fixture, "%d,%s\n", i, payload)
 	}
 	data := []byte(fixture.String())
-	base := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
-	driver := &trackingCSVDriver{phase3MemoryDriver: base}
+	base := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := &trackingCSVDriver{memoryCSVDriver: base}
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestSequentialCSVStripsUTF8BOM(t *testing.T) {
 				body = "id,note\n" + body
 			}
 			data := append([]byte{0xEF, 0xBB, 0xBF}, []byte(body)...)
-			driver := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+			driver := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
 			registry, err := vfs.NewRegistry(driver)
 			if err != nil {
 				t.Fatal(err)
@@ -171,8 +171,8 @@ func TestSequentialCSVStripsUTF8BOM(t *testing.T) {
 func TestSequentialCSVExpandsOnlyForOversizedRecord(t *testing.T) {
 	const target = int64(4 << 10)
 	data := []byte("id,note\n1,\"" + strings.Repeat("x", 96<<10) + "\"\n2,short\n")
-	base := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
-	driver := &trackingCSVDriver{phase3MemoryDriver: base}
+	base := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := &trackingCSVDriver{memoryCSVDriver: base}
 	registry, _ := vfs.NewRegistry(driver)
 
 	bindManager := memory.NewManager(2 << 20)
@@ -209,8 +209,8 @@ func TestSequentialCSVExpandsOnlyForOversizedRecord(t *testing.T) {
 
 func TestSequentialCSVRangeFailureReleasesManagedMemory(t *testing.T) {
 	data := makeParallelFixture(2000)
-	base := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
-	driver := &trackingCSVDriver{phase3MemoryDriver: base}
+	base := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	driver := &trackingCSVDriver{memoryCSVDriver: base}
 	registry, _ := vfs.NewRegistry(driver)
 	buffers := memory.NewBufferManager(nil)
 	bindManager := memory.NewManager(8 << 20)
@@ -243,7 +243,7 @@ func TestSequentialCSVRangeFailureReleasesManagedMemory(t *testing.T) {
 
 func TestSequentialCSVCancellationLeavesNoManagedState(t *testing.T) {
 	data := makeParallelFixture(2000)
-	base := newPhase3MemoryDriver(t, data, vfs.Capabilities(vfs.RandomRead))
+	base := newMemoryCSVDriver(t, data, vfs.Capabilities(vfs.RandomRead))
 	registry, _ := vfs.NewRegistry(base)
 	buffers := memory.NewBufferManager(nil)
 	bindManager := memory.NewManager(8 << 20)
@@ -280,7 +280,7 @@ func BenchmarkSequentialCSVBoundedScan(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
-	driver := &phase3MemoryDriver{data: data, caps: vfs.Capabilities(vfs.RandomRead), uri: u}
+	driver := &memoryCSVDriver{data: data, caps: vfs.Capabilities(vfs.RandomRead), uri: u}
 	registry, err := vfs.NewRegistry(driver)
 	if err != nil {
 		b.Fatal(err)

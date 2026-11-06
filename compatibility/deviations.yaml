@@ -40,20 +40,20 @@
       "classification": "bug",
       "surface": "production remote scan pushdown performance",
       "stable_sql_semantics": false,
-      "summary": "Projection/filter/LIMIT pushdown now has an implementation and small-scale tests, but the million-row physical-I/O acceptance has not been re-run after the remediation.",
+      "summary": "Million-row physical HTTP-I/O acceptance passed on loopback; production remote Parquet acceptance remains open.",
       "duckdb": "Projected and prunable scans can avoid reading unrelated columns and row groups.",
-      "fssql": "The current branch maps projection/filter/limit into the Parquet runtime and has focused tests for projection mapping and early row-group stop. The last million-row report predates these changes and measured approximately the entire 300 MB source for narrow projection, LIMIT 100 and empty predicates.",
-      "rationale": "Keep the defect open until post-remediation large-file acceptance directly measures physical I/O for projection, row-group pruning and safe LIMIT. Unit tests and optimizer plans alone are insufficient evidence."
+      "fssql": "Post-remediation 1,000,000-row, 299,960,006-byte Parquet HTTP Range replay reads 24,233,731 bytes for narrow projection, 1,267,162 for LIMIT 100, 360,411 for a 1,000-row range filter and 36,043 for an empty predicate. All result digests match DuckDB 2.0.0 and managed memory returns to zero. The production remote Parquet case has not been re-run in this acceptance.",
+      "rationale": "Loopback exercises the production S3 adapter and measures actual consumed HTTP bodies, but does not certify production remote service behavior. Evidence: docs/validation/2026-11-06-scan-acceptance/report.md."
     },
     {
       "id": "MEM-001",
       "classification": "bug",
       "surface": "default CSV and NDJSON large-file resource envelope",
       "stable_sql_semantics": false,
-      "summary": "Bounded serial-window scanning is implemented and covered by focused CSV/NDJSON tests, but the original large production fixtures have not been re-run under 64 MiB and default 256 MiB budgets.",
+      "summary": "Original-size generated CSV/NDJSON passed 64/256 MiB on loopback; a remote million-row CSV also passed both budgets. Full remote text acceptance remains open.",
       "duckdb": "Text readers can stream large sources without requiring a whole-file input buffer.",
-      "fssql": "The current branch uses bounded serial range reads and tests that normal scans do not request the whole file, including oversized-record expansion and cleanup paths. The prior 283/344 MB failure report predates this remediation.",
-      "rationale": "Keep the defect open until the original and replacement >budget fixtures complete under 64 MiB and 256 MiB managed-memory budgets with measured cleanup. Small fixtures prove the implementation shape, not the large-file acceptance gate."
+      "fssql": "Post-remediation 283,038,719-byte CSV and 344,274,015-byte NDJSON HTTP Range replay complete at both budgets with DuckDB 2.0.0 result digests and zero managed/temp memory after execution. The supplied remote 228,978,009-byte CSV returns all 1,000,000 rows, including DATE/TIMESTAMP string projections, at 64/256 MiB; managed peak is at most 1,369,329 bytes. Remote NDJSON and original-size remote fixtures remain unverified.",
+      "rationale": "The supplied remote CSV is smaller than the default 256 MiB budget. Preserve the open gate for original/replacement >budget remote fixtures rather than equating loopback evidence with full production acceptance. Evidence: docs/validation/2026-11-06-scan-acceptance/report.md."
     },
     {
       "id": "SQL-SUBQUERY-001",
@@ -64,6 +64,26 @@
       "duckdb": "DuckDB accepts derived tables, aggregate/scalar combinations and correlated or nested scalar subqueries.",
       "fssql": "Parameter domains support non-equality predicates, constant per-domain LIMIT/OFFSET, nested references, empty global aggregates/HAVING, derived tables/CTEs, UNION ALL, JOIN ON subqueries, outer-owned aggregates and explicit/implicit INNER/CROSS/LEFT lateral derived inputs. Non-correlated scalar dependencies are prepared bottom-up. Dynamic table-function arguments and quantified ANY/ALL remain unsupported. Correlation through SAMPLE, non-constant correlated limits and disallowed dependent join types are rejected as in DuckDB 2.0.0.",
       "rationale": "The implementation reuses materialization, NULL-safe hash joins, grouping and partitioned row numbers. Full operator coverage remains future work; candidate pairs without usable hash keys still require a cross product/filter with a managed-memory build side."
+    },
+    {
+      "id": "SQL-FUNCTION-001",
+      "classification": "unsupported_feature",
+      "surface": "general DuckDB SQL function coverage",
+      "stable_sql_semantics": false,
+      "summary": "The built-in SQL catalog is a finite subset, not arbitrary DuckDB SQL compatibility.",
+      "duckdb": "DuckDB provides a substantially larger function and expression surface.",
+      "fssql": "upper, abs, round, regexp_*, date_part, try_cast and string_split are not implemented by the current built-in catalog/parser. Unknown functions and unsupported syntax fail explicitly; registered Go scalar UDFs extend only their declared names and types.",
+      "rationale": "Do not claim general DuckDB replacement from the existing scalar test corpus. Adding functions requires individual binding, type/NULL semantics, execution and differential tests."
+    },
+    {
+      "id": "CSV-INFER-001",
+      "classification": "unsupported_feature",
+      "surface": "CSV automatic type and date/time format candidates",
+      "stable_sql_semantics": false,
+      "summary": "CSV inference supports ISO DATE/TIMESTAMP/TIMESTAMPTZ; custom candidates and general date/time format detection remain unsupported.",
+      "duckdb": "DuckDB supports configurable auto_type_candidates and date/time format detection. DECIMAL is an optional candidate rather than a default inference requirement.",
+      "fssql": "ISO dates, space/T-separated timestamps and offset timestamps are inferred using the execution decoder. DATE and naive TIMESTAMP promote to TIMESTAMP. Mixed zoned/unzoned values conservatively fall back to VARCHAR. Fractional numeric input retains default DOUBLE inference; exact DECIMAL requires explicit columns.",
+      "rationale": "Keep inferred types executable and preserve explicit DECIMAL input semantics; wider CSV format/candidate compatibility is separate work."
     }
   ]
 }

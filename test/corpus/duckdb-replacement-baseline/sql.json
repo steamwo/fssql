@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "baseline": "duckdb-replacement-baseline",
+  "reference": {
+    "duckdb_version": "2.0.0",
+    "caller_compiler_capture": "unavailable",
+    "note": "Cases below freeze the replacement-plan acceptance shapes. Cases marked caller_capture_required must be replaced/confirmed by exact caller-generated SQL before phase 0 can be declared complete."
+  },
+  "cases": [
+    {
+      "id": "csv_projection",
+      "source": "file",
+      "sql": "SELECT id, note FROM read_csv_auto('file:///baseline/input.csv', HEADER = TRUE)",
+      "expected_schema": ["id BIGINT", "note VARCHAR"],
+      "expected_result": [[1, "alpha"], [2, null], [3, "line\\nbreak"]],
+      "resource_budget": {"managed_memory_mib": [64, 256]},
+      "status": "acceptance_shape_frozen"
+    },
+    {
+      "id": "ndjson_projection",
+      "source": "file",
+      "sql": "SELECT id, note FROM read_json_auto('file:///baseline/input.ndjson', FORMAT = 'newline_delimited')",
+      "expected_schema": ["id BIGINT", "note VARCHAR"],
+      "expected_result": [[1, "alpha"], [2, null], [3, "unicode-中文"]],
+      "resource_budget": {"managed_memory_mib": [64, 256]},
+      "status": "acceptance_shape_frozen"
+    },
+    {
+      "id": "parquet_projection_filter_limit",
+      "source": "file",
+      "sql": "SELECT id FROM read_parquet('s3://baseline/input.parquet') WHERE grp >= 7 ORDER BY id LIMIT 100",
+      "expected_schema": ["id BIGINT"],
+      "expected_result": "duckdb_reference_rows",
+      "resource_budget": {"managed_memory_mib": [64, 256], "physical_io_must_be_pruned": true},
+      "status": "acceptance_shape_frozen"
+    },
+    {
+      "id": "typed_rowstream_projection",
+      "source": "database_rowstream",
+      "sql": "SELECT * FROM baseline_rows()",
+      "expected_schema": ["i64 BIGINT", "u64 UBIGINT", "d38 DECIMAL(38,9)", "txt VARCHAR", "bin BLOB", "ts_ns TIMESTAMP_NS", "ts_tz TIMESTAMPTZ"],
+      "expected_result": "test/corpus/duckdb-replacement-baseline/types.json",
+      "resource_budget": {"default_batch_target_mib": 1, "max_rows_per_batch": 2048},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "hash_sample",
+      "source": "database_rowstream",
+      "sql": "SELECT * FROM baseline_rows() WHERE hash(sample_key, 42) % 100 < 10",
+      "expected_schema": ["input schema"],
+      "expected_result": "caller_reference_rows",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "ordered_sample",
+      "source": "database_rowstream",
+      "sql": "SELECT * FROM baseline_rows() QUALIFY row_number() OVER (ORDER BY sample_key, tie_breaker) <= 100",
+      "expected_schema": ["input schema"],
+      "expected_result": "caller_reference_rows",
+      "resource_budget": {"managed_memory_mib": 64, "spill_if_needed": true},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "random_sample",
+      "source": "database_rowstream",
+      "sql": "SELECT * FROM baseline_rows() USING SAMPLE 100 ROWS (reservoir, 42)",
+      "expected_schema": ["input schema"],
+      "expected_result": "count=100; same seed reproduces selection",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "mask_hmac",
+      "source": "database_rowstream",
+      "sql": "SELECT baseline_hmac(email) AS email FROM baseline_rows()",
+      "expected_schema": ["email VARCHAR"],
+      "expected_result": "caller_reference_rows",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "copy_csv",
+      "source": "export",
+      "sql": "COPY (SELECT * FROM baseline_rows()) TO 'file:///baseline/out.csv' (FORMAT CSV, HEADER TRUE)",
+      "expected_schema": ["ExportResult(row_count, byte_count, columns)"],
+      "expected_result": "external_round_trip",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "copy_parquet",
+      "source": "export",
+      "sql": "COPY (SELECT * FROM baseline_rows()) TO 'file:///baseline/out.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY)",
+      "expected_schema": ["ExportResult(row_count, byte_count, columns)"],
+      "expected_result": "external_round_trip",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "caller_capture_required"
+    },
+    {
+      "id": "copy_parquet_encrypted",
+      "source": "export",
+      "sql": "COPY (SELECT * FROM baseline_rows()) TO 'file:///baseline/out.encrypted.parquet' (FORMAT PARQUET)",
+      "expected_schema": ["ExportResult(row_count, byte_count, columns)"],
+      "expected_result": "existing_reader_accepts_AES128_and_AES256; wrong_key_rejected; PARE/masterKeyID recognized",
+      "resource_budget": {"managed_memory_mib": 64},
+      "status": "blocked_external_baseline"
+    }
+  ]
+}

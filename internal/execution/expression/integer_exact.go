@@ -121,7 +121,7 @@ func exactIntegerBinaryValue(x, y ScalarValue, op string) (ScalarValue, error) {
 		default:
 			return ScalarValue{}, fmt.Errorf("unsupported unsigned integer operator %q", op)
 		}
-		if overflow != 0 || out.Uint64 > phase4CastUnsignedMax(x.Type.ID) {
+		if overflow != 0 || out.Uint64 > castUnsignedMax(x.Type.ID) {
 			return ScalarValue{}, semantics.ErrOverflow
 		}
 		return out, nil
@@ -138,7 +138,7 @@ func exactIntegerBinaryValue(x, y ScalarValue, op string) (ScalarValue, error) {
 		if y.Int64 == 0 {
 			return ScalarValue{}, fmt.Errorf("integer modulo by zero")
 		}
-		if y.Int64 == -1 && (x.Int64 == math.MinInt64 || !phase4CastSignedFits(x.Type.ID, -x.Int64)) {
+		if y.Int64 == -1 && (x.Int64 == math.MinInt64 || !castSignedFits(x.Type.ID, -x.Int64)) {
 			return ScalarValue{}, semantics.ErrOverflow
 		}
 		out.Int64 = x.Int64 % y.Int64
@@ -148,7 +148,7 @@ func exactIntegerBinaryValue(x, y ScalarValue, op string) (ScalarValue, error) {
 	if err != nil {
 		return ScalarValue{}, err
 	}
-	if !phase4CastSignedFits(x.Type.ID, out.Int64) {
+	if !castSignedFits(x.Type.ID, out.Int64) {
 		return ScalarValue{}, semantics.ErrOverflow
 	}
 	return out, nil
@@ -182,12 +182,12 @@ func (e *Executor) executeSQLExactIntegerUnary(expr *binder.BoundExpression, chu
 		case "-":
 			switch {
 			case value.Type.IsUnsignedInteger():
-				value.Uint64 = (0 - value.Uint64) & phase4CastUnsignedMax(value.Type.ID)
+				value.Uint64 = (0 - value.Uint64) & castUnsignedMax(value.Type.ID)
 			case value.Type.ID == types.HugeInt:
 				value.Int128, err = types.NegInt128(value.Int128)
 			default:
 				value.Int64, err = semantics.SubInt64(0, value.Int64)
-				if err == nil && !phase4CastSignedFits(value.Type.ID, value.Int64) {
+				if err == nil && !castSignedFits(value.Type.ID, value.Int64) {
 					err = semantics.ErrOverflow
 				}
 			}

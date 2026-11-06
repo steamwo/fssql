@@ -20,7 +20,7 @@ func TestDistinctAggregatesShareInputAndIgnoreInsensitiveDistinct(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		functions := function.NewPhase5Catalog()
+		functions := function.NewQueryCatalog()
 		query, err := binder.NewQueryBinder(functions, nil, nil, sql).BindSelect(context.Background(), parsed.(*ast.SelectStmt))
 		if err != nil {
 			t.Fatal(err)

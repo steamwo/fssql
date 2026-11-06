@@ -56,7 +56,7 @@ type domainPlanResolver struct {
 
 func (r domainPlanResolver) PlanBoundRelation(ctx context.Context, relation *binder.BoundRelation) (*LogicalPlan, error) {
 	if relation.ID == r.id {
-		return clonePhase5Logical(r.plan), nil
+		return cloneLogical(r.plan), nil
 	}
 	if r.parent == nil {
 		return nil, fmt.Errorf("query planner: missing relation %s", relation.ID)
@@ -78,7 +78,7 @@ func (p *QueryPlanner) planOnDomainInput(ctx context.Context, q *binder.BoundQue
 }
 
 func materializeDomainInput(input *LogicalPlan, key string) *LogicalPlan {
-	return &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: []SortKey{{Expr: phase5Marker(function.CTEMarkerID, key)}}}
+	return &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: []SortKey{{Expr: internalMarker(function.CTEMarkerID, key)}}}
 }
 
 func domainBinary(op string, a, b *binder.BoundExpression) *binder.BoundExpression {
@@ -96,7 +96,7 @@ func domainCase(cond, value *binder.BoundExpression) *binder.BoundExpression {
 func domainNullSafeEqual(a, b *binder.BoundExpression) *binder.BoundExpression {
 	eq := domainBinary("=", a, b)
 	coalesce := &binder.BoundExpression{Kind: binder.BoundFunction, FunctionID: function.CoalesceID, FunctionKind: function.Scalar, Type: eq.Type, Children: []*binder.BoundExpression{eq, {Kind: binder.BoundLiteral, Type: eq.Type, Literal: "false"}}}
-	return domainBinary("OR", coalesce, phase5And(domainIsNull(a, "IS NULL"), domainIsNull(b, "IS NULL")))
+	return domainBinary("OR", coalesce, andExpression(domainIsNull(a, "IS NULL"), domainIsNull(b, "IS NULL")))
 }
 
 func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPlan, expr *binder.BoundExpression) (*LogicalPlan, *binder.BoundExpression, error) {
@@ -129,7 +129,7 @@ func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPl
 		projection[i] = subqueryColumn(input.Output, k)
 		output[i] = input.Output[k]
 	}
-	domain := &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{clonePhase5Logical(input)}, Output: output, Projection: projection}
+	domain := &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{cloneLogical(input)}, Output: output, Projection: projection}
 	domain = &LogicalPlan{Kind: LogicalDistinct, Children: []*LogicalPlan{domain}, Output: clonePlannerColumns(domain.Output)}
 	fullDomain := domain
 	if expr.Op == "IN" {
@@ -158,7 +158,7 @@ func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPl
 			if identity == nil {
 				identity = eq
 			} else {
-				identity = phase5And(identity, eq)
+				identity = andExpression(identity, eq)
 			}
 		}
 		result = &LogicalPlan{Kind: LogicalJoin, Join: JoinInner, Children: []*LogicalPlan{result, fullDomain}, Output: append(clonePlannerColumns(result.Output), fullDomain.Output...), Predicate: identity}
@@ -199,7 +199,7 @@ func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPl
 		if predicate == nil {
 			predicate = eq
 		} else {
-			predicate = phase5And(predicate, eq)
+			predicate = andExpression(predicate, eq)
 		}
 	}
 	for i := range right.Output {
@@ -243,10 +243,10 @@ func (p *QueryPlanner) completeDomainGroups(ctx context.Context, joined, domain 
 		if identity == nil {
 			identity = eq
 		} else {
-			identity = phase5And(identity, eq)
+			identity = andExpression(identity, eq)
 		}
 	}
-	absent := &LogicalPlan{Kind: LogicalJoin, Join: JoinAnti, Children: []*LogicalPlan{clonePhase5Logical(domain), clonePhase5Logical(matched)}, Output: clonePlannerColumns(domain.Output), Predicate: identity}
+	absent := &LogicalPlan{Kind: LogicalJoin, Join: JoinAnti, Children: []*LogicalPlan{cloneLogical(domain), cloneLogical(matched)}, Output: clonePlannerColumns(domain.Output), Predicate: identity}
 	nulls := make([]*binder.BoundExpression, len(output))
 	for i := 0; i < width; i++ {
 		nulls[i] = &binder.BoundExpression{Kind: binder.BoundNull, Type: output[i].Type, Nullable: true}
@@ -304,7 +304,7 @@ func limitDomainRows(input *LogicalPlan, keys []int, order []SortKey, limitExpr,
 	if offset > math.MaxInt64 {
 		offset = math.MaxInt64
 	}
-	predicate := phase5And(domainBinary(">", row, domainInt(offset)), domainBinary("<=", row, domainInt(upper)))
+	predicate := andExpression(domainBinary(">", row, domainInt(offset)), domainBinary("<=", row, domainInt(upper)))
 	return &LogicalPlan{Kind: LogicalFilter, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Predicate: predicate}, nil
 }
 

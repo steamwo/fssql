@@ -67,7 +67,7 @@
 | F3 | CSV 引用、格式与 CAST | pkg/gosql/copy.go、internal/export、表达式执行 | FORCE_QUOTE、NULL、BLOB、UTC 文本 |
 | F4 | 跨语句类型化物化 | gosql、catalog、源运行时、临时存储 | 同一快照、独立 reader、有界 spill |
 | F5 | NULL-safe 比较 | parser、binder、lowering、表达式执行 | cluster join 可原生执行 |
-| F6a | DuckDB sampling 兼容 | runtime_sample_phase5.go | 固定 seed 的选中结果对照 |
+| F6a | DuckDB sampling 兼容 | runtime_sample.go | 固定 seed 的选中结果对照 |
 | F6b | 加密 Parquet 互通 | Parquet writer、crypto、CopyTo | 现有 Java 消费端实际可读 |
 | F6c | 加密 SQL 入口兼容 | COPY parser、binder、session、writer 选项 | 原有加密 SQL 可运行，与 API 写出使用同一实现 |
 | F6d | 原生加密格式契约 | Parquet writer、crypto、独立格式测试 | 逐模块 key/nonce/AAD、压缩顺序及明文/密文边界正确 |

@@ -320,7 +320,9 @@ func minIOLargeLoad(tb testing.TB) minIOLargeManifest {
 // minIOLargeConfig 构造有界测试配置，只允许专用测试 bucket。
 func minIOLargeConfig(tb testing.TB, scene minIOLargeCase) Config {
 	tb.Helper()
-	if !strings.HasPrefix(os.Getenv("FSSQL_MINIO_BUCKET"), "fssql-agent-test-") {
+	readOnlyBucket := os.Getenv("FSSQL_LARGE_READONLY_BUCKET")
+	readOnly := readOnlyBucket != "" && readOnlyBucket == os.Getenv("FSSQL_MINIO_BUCKET") && scene.Kind == "compare" && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(scene.SQL)), "SELECT ")
+	if !strings.HasPrefix(os.Getenv("FSSQL_MINIO_BUCKET"), "fssql-agent-test-") && !readOnly {
 		tb.Fatal("large matrix requires a dedicated test bucket")
 	}
 	limit := scene.TempLimit

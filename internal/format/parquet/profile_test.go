@@ -9,7 +9,7 @@ import (
 	"github.com/steamwo/fssql/internal/format/scan"
 )
 
-func TestBuildScanProfileAggregatesPhase1Evidence(t *testing.T) {
+func TestBuildScanProfileAggregatesEvidence(t *testing.T) {
 	d := newBindDriver(t, map[string][]byte{
 		"mem://x/a.parquet": parquetFile(metadataWithField("id")),
 		"mem://x/b.parquet": parquetFile(metadataWithField("id")),

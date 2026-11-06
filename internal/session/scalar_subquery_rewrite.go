@@ -157,7 +157,7 @@ func (r *scalarQueryRewriter) rewriteExpr(expr *binder.BoundExpression) (*binder
 		if err != nil {
 			return nil, fmt.Errorf("session: plan scalar subquery: %w", err)
 		}
-		logical, err = planner.RewritePhase5Logical(logical)
+		logical, err = planner.RewriteQueryLogical(logical)
 		if err != nil {
 			return nil, err
 		}

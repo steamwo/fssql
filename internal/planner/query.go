@@ -150,7 +150,7 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		if err != nil {
 			return nil, err
 		}
-		return &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: []SortKey{{Expr: phase5Marker(function.SampleMarkerID, relation.ID)}}}, nil
+		return &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: []SortKey{{Expr: internalMarker(function.SampleMarkerID, relation.ID)}}}, nil
 	case binder.RelationTableFunction:
 		return p.planTableFunction(relation)
 	case binder.RelationJoin:
@@ -174,7 +174,7 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 			return nil, fmt.Errorf("query planner: CTE %s executable schema does not match Binder schema", relation.ID)
 		}
 		if relation.Materialize {
-			planned = &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{planned}, Output: clonePlannerColumns(planned.Output), Sort: []SortKey{{Expr: phase5Marker(function.CTEMarkerID, relation.ID)}}}
+			planned = &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{planned}, Output: clonePlannerColumns(planned.Output), Sort: []SortKey{{Expr: internalMarker(function.CTEMarkerID, relation.ID)}}}
 		}
 		return planned, nil
 	case binder.RelationCatalog:

@@ -49,7 +49,7 @@ func (h *reservoirWeights) Pop() any {
 }
 
 type duckDBReservoirOperator struct {
-	storage               *phase5SampleOperator
+	storage               *sampleOperator
 	current               *duckReservoir
 	finished              []*duckReservoir
 	rng                   *sampleRandom
@@ -61,7 +61,7 @@ type duckDBReservoirOperator struct {
 }
 
 func newDuckDBReservoirOperator(q *query.Context, buffers *memory.BufferManager, raw, profile string) (blocking.Operator, error) {
-	spec, err := parsePhase5SampleSpec(raw)
+	spec, err := parseSampleSpec(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,7 @@ func newDuckDBReservoirOperator(q *query.Context, buffers *memory.BufferManager,
 	if err != nil {
 		return nil, err
 	}
-	s := &duckDBReservoirOperator{storage: &phase5SampleOperator{q: q, buffers: buffers, store: store}, rng: newSampleRandom(seed), msvc: profile == "duckdb-msvc", percentage: spec.method == 'p'}
+	s := &duckDBReservoirOperator{storage: &sampleOperator{q: q, buffers: buffers, store: store}, rng: newSampleRandom(seed), msvc: profile == "duckdb-msvc", percentage: spec.method == 'p'}
 	k := spec.amount
 	if s.percentage {
 		s.percent = math.Float64frombits(spec.amount) / 100
@@ -205,7 +205,7 @@ func (s *duckDBReservoirOperator) emit(ctx context.Context, r *duckReservoir, em
 			if output == nil {
 				// Allocate the final vector directly; dummy repeated row indices only
 				// size the chunk and are overwritten below with each selected row.
-				output, err = phase5CopyRows(s.storage.q.Memory, s.storage.buffers, one, make([]int, end-start))
+				output, err = copyRows(s.storage.q.Memory, s.storage.buffers, one, make([]int, end-start))
 				if err != nil {
 					one.Release()
 					return err
@@ -244,7 +244,7 @@ func (s *duckDBReservoirOperator) Release() {
 	s.finished = nil
 }
 
-func (r *duckReservoir) consume(ctx context.Context, s *phase5SampleOperator, chunk *vector.DataChunk, start, n int) error {
+func (r *duckReservoir) consume(ctx context.Context, s *sampleOperator, chunk *vector.DataChunk, start, n int) error {
 	if r.k == 0 || n == 0 {
 		return nil
 	}
@@ -304,7 +304,7 @@ func (r *duckReservoir) consume(ctx context.Context, s *phase5SampleOperator, ch
 	return nil
 }
 
-func (r *duckReservoir) save(ctx context.Context, s *phase5SampleOperator, chunk *vector.DataChunk, row, slot int) error {
+func (r *duckReservoir) save(ctx context.Context, s *sampleOperator, chunk *vector.DataChunk, row, slot int) error {
 	if slot == len(r.pages) {
 		if r.metadata == nil {
 			var err error
@@ -319,7 +319,7 @@ func (r *duckReservoir) save(ctx context.Context, s *phase5SampleOperator, chunk
 			return err
 		}
 	}
-	one, err := phase5CopyRows(s.q.Memory, s.buffers, chunk, []int{row})
+	one, err := copyRows(s.q.Memory, s.buffers, chunk, []int{row})
 	if err != nil {
 		return err
 	}

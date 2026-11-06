@@ -59,7 +59,7 @@ func TestRepeatBudgetAndOverflow(t *testing.T) {
 }
 
 func TestFloatIntegerCastRounding(t *testing.T) {
-	db := phase5DB(t, 1<<20)
+	db := groupedRowsDB(t, 1<<20)
 	for _, kind := range []string{"FLOAT", "DOUBLE"} {
 		for _, target := range []string{"TINYINT", "SMALLINT", "INTEGER", "BIGINT", "UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT"} {
 			for _, tc := range []struct {
@@ -126,7 +126,7 @@ func TestGlobalWindowsOnFileScans(t *testing.T) {
 			if strings.HasPrefix(query, "SELECT id,") {
 				column = 1
 			}
-			if got := collectPhase5Int(t, db, query, column); !reflect.DeepEqual(got, []int64{3, 3, 3}) {
+			if got := collectInt64Column(t, db, query, column); !reflect.DeepEqual(got, []int64{3, 3, 3}) {
 				t.Fatalf("%s: %v", query, got)
 			}
 		}
@@ -163,14 +163,14 @@ func TestGlobalWindowsOnFileScans(t *testing.T) {
 }
 
 func TestCompositeNullSafeInnerJoin(t *testing.T) {
-	db := phase5DB(t, 1<<20)
-	prefix := "WITH data AS (SELECT CASE WHEN id=1 THEN CAST(NULL AS BIGINT) ELSE grp END AS x, id AS y FROM phase5_rows()) SELECT COUNT(*) FROM data a JOIN data b ON "
+	db := groupedRowsDB(t, 1<<20)
+	prefix := "WITH data AS (SELECT CASE WHEN id=1 THEN CAST(NULL AS BIGINT) ELSE grp END AS x, id AS y FROM grouped_rows()) SELECT COUNT(*) FROM data a JOIN data b ON "
 	for _, predicate := range []string{
 		"a.x IS NOT DISTINCT FROM b.x AND a.y IS NOT DISTINCT FROM b.y",
 		"a.x IS NOT DISTINCT FROM b.x AND a.y=b.y",
 		"a.y=b.y AND a.x IS NOT DISTINCT FROM b.x",
 	} {
-		if got := collectPhase5Int(t, db, prefix+predicate, 0); !reflect.DeepEqual(got, []int64{5}) {
+		if got := collectInt64Column(t, db, prefix+predicate, 0); !reflect.DeepEqual(got, []int64{5}) {
 			t.Fatalf("%s: %v", predicate, got)
 		}
 	}

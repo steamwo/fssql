@@ -46,7 +46,7 @@ func extractHashJoinConjunct(expr *binder.BoundExpression, leftColumns, rightCol
 		}
 		return extractHashJoinConjunct(expr.Children[1], leftColumns, rightColumns, out)
 	}
-	nullSafe := isPhase5NullSafeEquality(expr)
+	nullSafe := isNullSafeEquality(expr)
 	if nullSafe {
 		expr = expr.Children[0].Children[0]
 	}

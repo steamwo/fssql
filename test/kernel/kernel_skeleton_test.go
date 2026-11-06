@@ -12,4 +12,4 @@ import (
 	_ "github.com/steamwo/fssql/internal/execution/scheduler"
 )
 
-func TestPhase0KernelPackagesCompile(t *testing.T) {}
+func TestKernelPackagesCompile(t *testing.T) {}

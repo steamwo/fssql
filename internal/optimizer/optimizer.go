@@ -98,11 +98,11 @@ func (o *Optimizer) markRequiredScanColumns(node *planner.LogicalPlan, needed ma
 		case planner.LogicalSort:
 			// Cached rows are shared by consumers with different projections.
 			// Preserve the complete materialized schema for every cache reader.
-			if _, ok := planner.IsPhase5CTESort(node.Sort); ok {
+			if _, ok := planner.IsCTESort(node.Sort); ok {
 				return
 			}
 			// Global windows append columns; their output indexes are not scan indexes.
-			if _, ok := planner.IsPhase5GlobalWindowSort(node.Sort); ok {
+			if _, ok := planner.IsGlobalWindowSort(node.Sort); ok {
 				return
 			}
 			for _, key := range node.Sort {

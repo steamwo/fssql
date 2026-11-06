@@ -1,6 +1,7 @@
 package export
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -59,12 +61,14 @@ func createLocalManifestDir(dir string) error {
 }
 
 // publishLocalManifest 用同卷 write-through 替换发布已同步的临时文件。
-func publishLocalManifest(temporary, path string) error {
-	return moveLocalManifest(temporary, path, manifestMoveReplaceExisting|manifestMoveWriteThrough)
+func publishLocalManifest(ctx context.Context, temporary, path string) error {
+	return retryLocalManifestMove(ctx, func() error {
+		return moveLocalManifest(temporary, path, manifestMoveReplaceExisting|manifestMoveWriteThrough)
+	})
 }
 
 // removeLocalManifest 先同步移走恢复入口，再清理 tombstone，避免复用不支持的目录 Sync。
-func removeLocalManifest(path string) error {
+func removeLocalManifest(ctx context.Context, path string) error {
 	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
@@ -80,7 +84,9 @@ func removeLocalManifest(path string) error {
 	if err := tombstone.Close(); err != nil {
 		return err
 	}
-	if err := moveLocalManifest(path, name, manifestMoveReplaceExisting|manifestMoveWriteThrough); err != nil {
+	if err := retryLocalManifestMove(ctx, func() error {
+		return moveLocalManifest(path, name, manifestMoveReplaceExisting|manifestMoveWriteThrough)
+	}); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -88,6 +94,48 @@ func removeLocalManifest(path string) error {
 	}
 	// 原路径的移除已经由同步移动确认，遗留 tombstone 不会被 Load 当作有效状态。
 	return os.Remove(name)
+}
+
+// retryLocalManifestMove 容忍 Windows 文件句柄短暂拒绝共享删除；持续权限错误仍返回原生错误。
+// 所有尝试保持相同的原子移动和 write-through 标志，不使用删除目标或复制文件降级。
+func retryLocalManifestMove(ctx context.Context, move func() error) error {
+	deadline := time.Now().Add(2 * time.Second)
+	delay := time.Millisecond
+	var lastErr error
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if lastErr != nil && !time.Now().Before(deadline) {
+			return lastErr
+		}
+		err := move()
+		if !errors.Is(err, syscall.ERROR_ACCESS_DENIED) && !errors.Is(err, syscall.Errno(32)) {
+			return err
+		}
+		lastErr = err
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return lastErr
+		}
+		wait := delay
+		if wait > remaining {
+			wait = remaining
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if delay < 50*time.Millisecond {
+			delay *= 2
+			if delay > 50*time.Millisecond {
+				delay = 50 * time.Millisecond
+			}
+		}
+	}
 }
 
 // moveLocalManifest 调用原生同步移动并保留系统错误，不启用跨卷 copy/delete fallback。

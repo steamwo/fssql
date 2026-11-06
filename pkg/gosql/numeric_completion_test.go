@@ -108,9 +108,9 @@ func TestNumericWideningEvaluatesVolatileChildOnce(t *testing.T) {
 }
 
 func TestExactIntegerExpressionsAcrossRows(t *testing.T) {
-	db := phase5DB(t, 1<<20)
+	db := groupedRowsDB(t, 1<<20)
 	var got [][3]string
-	_, err := db.QueryChunks(context.Background(), "SELECT CAST(id AS TINYINT) * CAST(2 AS TINYINT), CAST(id AS HUGEINT) + CAST('9223372036854775808' AS HUGEINT), CAST(id AS UTINYINT) + CAST(1 AS UTINYINT) FROM phase5_rows() ORDER BY id", func(chunk *Chunk) error {
+	_, err := db.QueryChunks(context.Background(), "SELECT CAST(id AS TINYINT) * CAST(2 AS TINYINT), CAST(id AS HUGEINT) + CAST('9223372036854775808' AS HUGEINT), CAST(id AS UTINYINT) + CAST(1 AS UTINYINT) FROM grouped_rows() ORDER BY id", func(chunk *Chunk) error {
 		for row := 0; row < chunk.RowCount(); row++ {
 			signed, ok, err := chunk.Int64(row, 0)
 			if err != nil || !ok {
@@ -144,9 +144,9 @@ func TestExactIntegerExpressionsAcrossRows(t *testing.T) {
 		t.Fatalf("managed memory leak: %d", used)
 	}
 	for _, sql := range []string{
-		"SELECT CAST(id AS TINYINT) + CAST(127 AS TINYINT) FROM phase5_rows()",
-		"SELECT CAST(id AS HUGEINT) + CAST('170141183460469231731687303715884105727' AS HUGEINT) FROM phase5_rows()",
-		"SELECT CAST(id AS UTINYINT) * CAST(255 AS UTINYINT) FROM phase5_rows()",
+		"SELECT CAST(id AS TINYINT) + CAST(127 AS TINYINT) FROM grouped_rows()",
+		"SELECT CAST(id AS HUGEINT) + CAST('170141183460469231731687303715884105727' AS HUGEINT) FROM grouped_rows()",
+		"SELECT CAST(id AS UTINYINT) * CAST(255 AS UTINYINT) FROM grouped_rows()",
 	} {
 		if _, err := db.QueryChunks(context.Background(), sql, func(*Chunk) error { return nil }); err == nil {
 			t.Fatalf("expected arithmetic overflow: %s", sql)

@@ -17,7 +17,7 @@
 | 能力 | 当前实现范围 | 边界与验证入口 |
 | --- | --- | --- |
 | 查询与聚合 | 基线算子；无 FROM 聚合使用一条隐式输入行，WHERE FALSE 保留空集聚合语义 | [基础 SQL](../../pkg/gosql/common_sql_test.go)、[数值测试](../../pkg/gosql/numeric_completion_test.go) |
-| 精确数值 | 有符号/无符号整数、HUGEINT、DECIMAL；整数溢出检查，DECIMAL 转整数按中点远离零舍入 | [数值边界](../../pkg/gosql/numeric_completion_test.go)、[DECIMAL](../../pkg/gosql/phase4_decimal_test.go)；宽整数不通过浮点数中转 |
+| 精确数值 | 有符号/无符号整数、HUGEINT、DECIMAL；整数溢出检查，DECIMAL 转整数按中点远离零舍入 | [数值边界](../../pkg/gosql/numeric_completion_test.go)、[DECIMAL](../../pkg/gosql/decimal_cast_test.go)；宽整数不通过浮点数中转 |
 | 集合与谓词 | IN/NOT IN 列表和单列 SELECT、EXISTS/NOT EXISTS、BETWEEN、Unicode LIKE、UNION ALL | NULL/空集合有用例；UNION 去重、INTERSECT、EXCEPT、量化 ANY/ALL 未实现；[用例](../../pkg/gosql/common_sql_test.go) |
 | DISTINCT 聚合 | 单参数 COUNT/SUM/AVG/MIN/MAX(DISTINCT expr) | COUNT/SUM/AVG 可共享相同参数的去重输入；不同参数可能增加排序和临时 I/O；[测试](../../pkg/gosql/subquery_design_test.go) |
 | JOIN | 基线连接、USING 合并键及两侧限定列；可哈希键先缩小候选，其他条件保留计算 | 无可用键时用交叉积/过滤，CROSS build 输入驻留受管内存；[连接输出](../../pkg/gosql/join_output_test.go)、[关系树关联](../../pkg/gosql/subquery_relation_test.go) |
@@ -27,7 +27,7 @@
 | LATERAL 派生表 | 显式与自动左侧引用；逗号/CROSS/INNER/LEFT、链式引用、局部聚合、UNION ALL、列别名 | JOIN 优先于逗号；实际依赖的 RIGHT/FULL/SEMI/ANTI、归属于左输入的聚合按 DuckDB 拒绝；[测试](../../pkg/gosql/lateral_test.go) |
 | 相关分页 | ORDER BY 后按参数域应用常量 LIMIT/OFFSET；DISTINCT 先于分页 | 非常量相关 LIMIT/OFFSET 按 DuckDB 拒绝；[跨批次验证](../../pkg/gosql/subquery_domain_test.go) |
 | 采样 | TABLESAMPLE 单输入、USING SAMPLE 整个 FROM；reservoir 行数/百分比、Bernoulli 行采样、system 批采样、种子 | 独立源先采样再关联过滤可用；采样算子需接收关联参数时按 DuckDB 拒绝；[用例](../../pkg/gosql/sql_compatibility_test.go) |
-| 窗口 | ROW_NUMBER；COUNT(*)/SUM 的 OVER ()，或显式 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING | COUNT/SUM 无显式 frame 时仅支持 OVER ()；一般 RANGE/GROUPS/frame 未实现；[测试](../../pkg/gosql/phase5_test.go) |
+| 窗口 | ROW_NUMBER；COUNT(*)/SUM 的 OVER ()，或显式 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING | COUNT/SUM 无显式 frame 时仅支持 OVER ()；一般 RANGE/GROUPS/frame 未实现；[测试](../../pkg/gosql/window_sampling_test.go) |
 | SELECT 参数 | database/sql 的 ?、连续编号 $1/$2、sql.Named 对应 $name，预编译语法复用 | 不混用样式；参数不能替换标识符；DDL/COPY 参数和事务未实现；[测试](../../pkg/gosql/database_sql_statement_test.go) |
 
 相关子查询和 LATERAL 的完整实现说明见[子查询 lowering](subquery-lowering.md)。表函数参数仍按固定参数绑定，不包含按 LATERAL 参数动态调用文件读取器。

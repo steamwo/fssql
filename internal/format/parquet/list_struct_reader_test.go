@@ -10,7 +10,7 @@ import (
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-func phase1RLELevels(levels []int, bitWidth int) []byte {
+func listStructRLELevels(levels []int, bitWidth int) []byte {
 	byteWidth := (bitWidth + 7) / 8
 	out := make([]byte, 0, len(levels)*(1+byteWidth))
 	for _, level := range levels {
@@ -22,9 +22,9 @@ func phase1RLELevels(levels []int, bitWidth int) []byte {
 	return out
 }
 
-func phase1ListStructPage(rep, def []int, maxRep, maxDef int, values ...int32) []byte {
-	repData := phase1RLELevels(rep, levelBitWidth(maxRep))
-	defData := phase1RLELevels(def, levelBitWidth(maxDef))
+func listStructPage(rep, def []int, maxRep, maxDef int, values ...int32) []byte {
+	repData := listStructRLELevels(rep, levelBitWidth(maxRep))
+	defData := listStructRLELevels(def, levelBitWidth(maxDef))
 	body := make([]byte, 4+len(repData)+4+len(defData)+4*len(values))
 	off := 0
 	binary.LittleEndian.PutUint32(body[off:off+4], uint32(len(repData)))
@@ -43,7 +43,7 @@ func phase1ListStructPage(rep, def []int, maxRep, maxDef int, values ...int32) [
 	return append(append([]byte(nil), header...), body...)
 }
 
-func phase1ListStructSchema(t *testing.T) *SchemaTree {
+func listStructSchema(t *testing.T) *SchemaTree {
 	t.Helper()
 	rootChildren := int32(1)
 	listChildren := int32(1)
@@ -73,7 +73,7 @@ func phase1ListStructSchema(t *testing.T) *SchemaTree {
 }
 
 func TestListStructColumnReaderAndScannerPreserveNestedNullSemantics(t *testing.T) {
-	tree := phase1ListStructSchema(t)
+	tree := listStructSchema(t)
 	items := tree.Root.Children[0]
 	leafA := tree.Find("items", "list", "element", "a")
 	leafB := tree.Find("items", "list", "element", "b")
@@ -81,8 +81,8 @@ func TestListStructColumnReaderAndScannerPreserveNestedNullSemantics(t *testing.
 		t.Fatal("LIST<STRUCT> leaves not found")
 	}
 	rep := []int{0, 0, 0, 1, 1, 0}
-	pageA := phase1ListStructPage(rep, []int{0, 1, 2, 3, 3, 3}, leafA.MaxRep, leafA.MaxDef, 1, 2, 3)
-	pageB := phase1ListStructPage(rep, []int{0, 1, 2, 3, 4, 4}, leafB.MaxRep, leafB.MaxDef, 20, 30)
+	pageA := listStructPage(rep, []int{0, 1, 2, 3, 3, 3}, leafA.MaxRep, leafA.MaxDef, 1, 2, 3)
+	pageB := listStructPage(rep, []int{0, 1, 2, 3, 4, 4}, leafB.MaxRep, leafB.MaxDef, 20, 30)
 	offsetB := int64(len(pageA))
 	data := append(append([]byte(nil), pageA...), pageB...)
 	rg := RowGroup{NumRows: 4, Columns: []ColumnChunk{

@@ -69,7 +69,7 @@ func TestS3ParquetPageSkippingReducesRangeBytes(t *testing.T) {
 		_, _ = w.Write(data[start : end+1])
 	}))
 	defer server.Close()
-	driver := newPhase1S3Driver(t, server, time.Second, 1)
+	driver := newS3FaultDriver(t, server, time.Second, 1)
 	count := int32(2)
 	required := parquet.Required
 	physical := parquet.TypeInt32

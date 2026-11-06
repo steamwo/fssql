@@ -80,7 +80,7 @@ func (p *Parser) parsePredicate(left ast.Expr, minBP int) (ast.Expr, bool, error
 		}
 	}
 	span := ast.Span{Start: left.NodeSpan().Start, End: p.previous().Span.End}
-	var result ast.Expr = phase4Call(name, span, args...)
+	var result ast.Expr = scalarCall(name, span, args...)
 	if not {
 		result = &ast.UnaryExpr{Span: span, Op: "NOT", Expr: result}
 	}

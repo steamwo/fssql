@@ -55,11 +55,11 @@ func TestExtractHashJoinKeysRejectsOutOfRangeColumn(t *testing.T) {
 func TestDomainHashJoinNullSafeKeys(t *testing.T) {
 	a := domainNullSafeEqual(joinKeyColumn(0), joinKeyColumn(2))
 	b := domainNullSafeEqual(joinKeyColumn(1), joinKeyColumn(3))
-	keys, err := ExtractHashJoinKeys(phase5And(a, b), 2, 2)
+	keys, err := ExtractHashJoinKeys(andExpression(a, b), 2, 2)
 	if err != nil || !keys.NullsEqual || len(keys.Left) != 2 {
 		t.Fatalf("keys=%+v err=%v", keys, err)
 	}
-	if _, err := ExtractHashJoinKeys(phase5And(a, joinKeyBinary("=", joinKeyColumn(1), joinKeyColumn(3))), 2, 2); err == nil {
+	if _, err := ExtractHashJoinKeys(andExpression(a, joinKeyBinary("=", joinKeyColumn(1), joinKeyColumn(3))), 2, 2); err == nil {
 		t.Fatal("mixed equality modes must fail closed")
 	}
 	// IS NOT NULL in an otherwise similar OR expression is not key equality.

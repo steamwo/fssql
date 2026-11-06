@@ -66,7 +66,7 @@ func NewHMACSHA256ScalarFunction(key []byte) (ScalarFunction, error) {
 }
 
 func registerScalarFunctions(base *function.Catalog, definitions []ScalarFunction) (*function.Catalog, expression.ScalarRegistry, error) {
-	catalog:=base;if catalog==nil{catalog=function.NewPhase4Catalog()}
+	catalog:=base;if catalog==nil{catalog=function.NewScalarCatalog()}
 	registry:=make(expression.ScalarRegistry,len(definitions));seen:=make(map[string]struct{},len(definitions))
 	for i,definition:=range definitions{
 		name:=strings.TrimSpace(definition.Name);if !validFunctionIdentifier(name){return nil,nil,fmt.Errorf("gosql: invalid scalar function name %q",definition.Name)};key:=strings.ToLower(name);if _,ok:=seen[key];ok{return nil,nil,fmt.Errorf("gosql: duplicate scalar function %q",name)};seen[key]=struct{}{}

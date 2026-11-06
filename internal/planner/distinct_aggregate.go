@@ -24,7 +24,7 @@ func markDistinctArgument(input *LogicalPlan, groups []*binder.BoundExpression, 
 	keys = append(keys, SortKey{Expr: value})
 	args = append(args, value)
 	sorted := &LogicalPlan{Kind: LogicalSort, Children: []*LogicalPlan{input}, Output: clonePlannerColumns(input.Output), Sort: keys}
-	projection := phase5PassThrough(input.Output)
+	projection := passThrough(input.Output)
 	projection = append(projection, &binder.BoundExpression{Kind: binder.BoundFunction, Type: column.Type, Nullable: true, FunctionID: function.DistinctValueID, FunctionKind: function.Scalar, Children: args})
 	output := clonePlannerColumns(input.Output)
 	output = append(output, Column{Name: fmt.Sprintf("__distinct_%d", len(output)), Type: column.Type, Nullable: true})

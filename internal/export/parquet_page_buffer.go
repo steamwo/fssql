@@ -182,7 +182,14 @@ func encodeParquetPlain(out *parquetPageBuffer, vec *vector.Vector, typ coretype
 			binary.LittleEndian.PutUint64(scratch[:8], math.Float64bits(v))
 			if err := out.Append(scratch[:8]); err != nil { return err }
 		case coretypes.Decimal:
-			if typ.Decimal.Width <= 18 {
+			if typ.Decimal.Width <= 9 {
+				v, _ := vec.Int64(row)
+				if v < math.MinInt32 || v > math.MaxInt32 {
+					return errors.New("export: DECIMAL INT32 overflow")
+				}
+				binary.LittleEndian.PutUint32(scratch[:4], uint32(int32(v)))
+				if err := out.Append(scratch[:4]); err != nil { return err }
+			} else if typ.Decimal.Width <= 18 {
 				v, _ := vec.Int64(row)
 				binary.LittleEndian.PutUint64(scratch[:8], uint64(v))
 				if err := out.Append(scratch[:8]); err != nil { return err }

@@ -533,7 +533,7 @@ func (w *ParquetWriter) fileMetadata() (parquet.FileMetaData, error) {
 		}
 		flat = append(flat, e)
 	}
-	return parquet.FileMetaData{Version: 1, Schema: flat, NumRows: w.totalRows, RowGroups: append([]parquet.RowGroup(nil), w.rowGroups...), CreatedBy: "fssql phase6 controlled parquet writer"}, nil
+	return parquet.FileMetaData{Version: 1, Schema: flat, NumRows: w.totalRows, RowGroups: append([]parquet.RowGroup(nil), w.rowGroups...), CreatedBy: "fssql controlled parquet writer"}, nil
 }
 
 func (w *ParquetWriter) writeBytes(ctx context.Context, p []byte) error {

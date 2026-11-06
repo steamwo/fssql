@@ -25,7 +25,7 @@ func castHugeIntScalar(value ScalarValue, target types.LogicalType) (ScalarValue
 		integer = rescaleDecimalInteger(types.Int128Big(value.Int128), value.Type.Decimal.Scale, 0)
 	case value.Type.IsUnsignedInteger():
 		integer = new(big.Int).SetUint64(value.Uint64)
-	case phase4CastSignedIntegerType(value.Type):
+	case castSignedIntegerType(value.Type):
 		integer = big.NewInt(value.Int64)
 	case value.Type.ID == types.Float || value.Type.ID == types.Double:
 		if math.IsNaN(value.Float64) || math.IsInf(value.Float64, 0) {
@@ -60,12 +60,12 @@ func castHugeIntScalar(value ScalarValue, target types.LogicalType) (ScalarValue
 		}
 		out.Int128 = wide
 	case target.IsUnsignedInteger():
-		if !integer.IsUint64() || integer.Uint64() > phase4CastUnsignedMax(target.ID) {
+		if !integer.IsUint64() || integer.Uint64() > castUnsignedMax(target.ID) {
 			return ScalarValue{}, fmt.Errorf("CAST integer overflow")
 		}
 		out.Uint64 = integer.Uint64()
-	case phase4CastSignedIntegerType(target):
-		if !integer.IsInt64() || !phase4CastSignedFits(target.ID, integer.Int64()) {
+	case castSignedIntegerType(target):
+		if !integer.IsInt64() || !castSignedFits(target.ID, integer.Int64()) {
 			return ScalarValue{}, fmt.Errorf("CAST integer overflow")
 		}
 		out.Int64 = integer.Int64()

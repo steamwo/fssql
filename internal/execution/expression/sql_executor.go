@@ -127,7 +127,7 @@ func (e *Executor) executeSQLUnary(expr *binder.BoundExpression, chunk *vector.D
 	if len(expr.Children) != 1 {
 		return nil, fmt.Errorf("SQL expression executor: unary %q requires one child", expr.Op)
 	}
-	if (phase4CastSignedIntegerType(expr.Type) && expr.Type.ID != types.Integer) || expr.Type.ID == types.HugeInt {
+	if (castSignedIntegerType(expr.Type) && expr.Type.ID != types.Integer) || expr.Type.ID == types.HugeInt {
 		return e.executeSQLExactIntegerUnary(expr, chunk)
 	}
 	child, err := e.ExecuteSQL(expr.Children[0], chunk)
@@ -223,7 +223,7 @@ func (e *Executor) executeSQLCast(expr *binder.BoundExpression, chunk *vector.Da
 	}
 	childExpr := expr.Children[0]
 	if childExpr.Type.IsUnsignedInteger() || expr.Type.IsUnsignedInteger() || childExpr.Type.ID != types.Integer || (expr.Type.ID != types.BigInt && expr.Type.ID != types.Double) {
-		return e.executePhase4SQL(expr, chunk)
+		return e.executeSQL(expr, chunk)
 	}
 	child, err := e.ExecuteSQL(childExpr, chunk)
 	if err != nil {

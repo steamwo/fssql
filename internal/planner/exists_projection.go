@@ -26,9 +26,9 @@ func pruneExistsProjection(plan *LogicalPlan, needed map[int]bool) *LogicalPlan 
 	case LogicalFilter:
 		collect(plan.Predicate)
 	case LogicalSort:
-		_, sample := IsPhase5SampleSort(plan.Sort)
-		_, cte := IsPhase5CTESort(plan.Sort)
-		_, window := IsPhase5GlobalWindowSort(plan.Sort)
+		_, sample := IsSampleSort(plan.Sort)
+		_, cte := IsCTESort(plan.Sort)
+		_, window := IsGlobalWindowSort(plan.Sort)
 		if len(needed) == 0 && !sample && !cte && !window {
 			return pruneExistsProjection(plan.Children[0], needed)
 		}
@@ -46,7 +46,7 @@ func pruneExistsProjection(plan *LogicalPlan, needed map[int]bool) *LogicalPlan 
 		}
 		out.Aggregates = append([]AggregateSpec(nil), plan.Aggregates...)
 		input := plan.Children[0]
-		projection := phase5PassThrough(input.Output)
+		projection := passThrough(input.Output)
 		columns := clonePlannerColumns(input.Output)
 		for i, spec := range plan.Aggregates {
 			if needed[len(plan.GroupBy)+i] {

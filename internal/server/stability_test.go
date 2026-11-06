@@ -17,7 +17,7 @@ import (
 	"github.com/steamwo/fssql/internal/resource"
 )
 
-const phase5StabilityIterations = 256
+const queryStabilityIterations = 256
 
 // stabilityResultChunk 创建一个完全由 Query MemoryScope 管理的单值结果块。
 func stabilityResultChunk(scope *memory.Scope, buffers *memory.BufferManager, value int64) (*vector.DataChunk, error) {
@@ -65,8 +65,8 @@ func assertStabilityOwnershipZero(t *testing.T, service *QueryService, scheduler
 	}
 }
 
-// TestPhase5LongRunningStability 反复执行成功与取消 Query，验证长期运行后没有 Managed Memory、Lease、Registry、runtime 或 goroutine 持续泄漏。
-func TestPhase5LongRunningStability(t *testing.T) {
+// TestLongRunningStability 反复执行成功与取消 Query，验证长期运行后没有 Managed Memory、Lease、Registry、runtime 或 goroutine 持续泄漏。
+func TestLongRunningStability(t *testing.T) {
 	baselineGoroutines := runtime.NumGoroutine()
 	buffers := memory.NewBufferManager(nil)
 	engine := fakeQueryEngine{plan: func(_ *querypkg.Context, sql string) (PreparedQuery, error) {
@@ -93,7 +93,7 @@ func TestPhase5LongRunningStability(t *testing.T) {
 		MaxRetainedQueries:   16,
 	})
 
-	for iteration := 0; iteration < phase5StabilityIterations; iteration++ {
+	for iteration := 0; iteration < queryStabilityIterations; iteration++ {
 		if iteration%8 == 0 {
 			response, err := service.Submit(context.Background(), defaultSubmitRequest(fmt.Sprintf("SELECT cancel_%d", iteration)))
 			if err != nil {

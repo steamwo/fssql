@@ -60,7 +60,7 @@ func subqueryColumn(columns []Column, index int) *binder.BoundExpression {
 	return &binder.BoundExpression{Kind: binder.BoundColumn, Type: c.Type, Nullable: c.Nullable, ColumnIndex: index}
 }
 func appendSubqueryValues(input *LogicalPlan, values []*binder.BoundExpression) (*LogicalPlan, []int) {
-	projection := phase5PassThrough(input.Output)
+	projection := passThrough(input.Output)
 	output := clonePlannerColumns(input.Output)
 	indexes := make([]int, len(values))
 	for i, value := range values {
@@ -82,7 +82,7 @@ func subqueryJoin(input, right *LogicalPlan, leftKeys, rightKeys []int, kind Joi
 		if predicate == nil {
 			predicate = eq
 		} else {
-			predicate = phase5And(predicate, eq)
+			predicate = andExpression(predicate, eq)
 		}
 	}
 	output := clonePlannerColumns(input.Output)
@@ -144,7 +144,7 @@ func extractCorrelation(q *binder.BoundQuery) (correlationKeys, error) {
 			if keys.residual == nil {
 				keys.residual = expr
 			} else {
-				keys.residual = phase5And(keys.residual, expr)
+				keys.residual = andExpression(keys.residual, expr)
 			}
 			return nil
 		}

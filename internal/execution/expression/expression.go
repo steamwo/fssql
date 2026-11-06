@@ -30,7 +30,7 @@ const (
 	IsNull
 	Case
 	ScalarCall
-	SQLPhase4
+	SQLFallback
 )
 
 type BoundExpression struct {
@@ -95,12 +95,12 @@ func (e *Executor) Execute(expr *BoundExpression, chunk *vector.DataChunk) (*vec
 		return e.caseExpr(expr, chunk)
 	case ScalarCall:
 		if expr.SQL == nil { return nil, errors.New("scalar call missing SQL expression") }
-		if function.IsWindowID(expr.SQL.FunctionID) { return e.executePhase5Window(expr.SQL, chunk) }
-		if isPhase4CastFunction(expr.SQL) { return e.executePhase4CastFunction(expr.SQL, chunk) }
+		if function.IsWindowID(expr.SQL.FunctionID) { return e.executeWindow(expr.SQL, chunk) }
+		if isCastFunction(expr.SQL) { return e.executeRegisteredCast(expr.SQL, chunk) }
 		return e.executeScalarFunction(expr.SQL, chunk)
-	case SQLPhase4:
-		if expr.SQL == nil { return nil, errors.New("phase4 SQL node missing expression") }
-		return e.executePhase4SQL(expr.SQL, chunk)
+	case SQLFallback:
+		if expr.SQL == nil { return nil, errors.New("SQL SQL node missing expression") }
+		return e.executeSQL(expr.SQL, chunk)
 	default:
 		return nil, fmt.Errorf("unsupported expression kind %d", expr.Kind)
 	}

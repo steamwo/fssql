@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"time"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -36,6 +37,9 @@ const (
 	kindBoolean
 	kindBigInt
 	kindDouble
+	kindDate
+	kindTimestamp
+	kindTimestampTZ
 	kindVarchar
 )
 
@@ -198,6 +202,15 @@ func observeKind(raw, nullLiteral []byte) inferredKind {
 	if value, err := strconv.ParseFloat(string(raw), 64); err == nil && !math.IsInf(value, 0) {
 		return kindDouble
 	}
+	if _, err := time.Parse("2006-01-02", string(raw)); err == nil {
+		return kindDate
+	}
+	if _, err := parseTimestamp(raw, types.TimestampTZType()); err == nil {
+		return kindTimestampTZ
+	}
+	if _, err := parseTimestamp(raw, types.LogicalType{ID: types.TimestampType}); err == nil {
+		return kindTimestamp
+	}
 	return kindVarchar
 }
 
@@ -211,6 +224,9 @@ func mergeKind(current, observed inferredKind) inferredKind {
 	if (current == kindBigInt && observed == kindDouble) || (current == kindDouble && observed == kindBigInt) {
 		return kindDouble
 	}
+	if (current == kindDate && observed == kindTimestamp) || (current == kindTimestamp && observed == kindDate) {
+		return kindTimestamp
+	}
 	return kindVarchar
 }
 
@@ -222,6 +238,12 @@ func kindLogicalType(kind inferredKind) types.LogicalType {
 		return types.LogicalType{ID: types.BigInt}
 	case kindDouble:
 		return types.LogicalType{ID: types.Double}
+	case kindDate:
+		return types.LogicalType{ID: types.DateType}
+	case kindTimestamp:
+		return types.LogicalType{ID: types.TimestampType}
+	case kindTimestampTZ:
+		return types.TimestampTZType()
 	default:
 		return types.LogicalType{ID: types.Varchar}
 	}

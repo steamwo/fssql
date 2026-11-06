@@ -13,8 +13,8 @@ import (
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
-// TestPhase5ProtocolStaticCapabilityMatrix 固定各远端协议的静态能力上界，防止驱动未来误报未实现能力。
-func TestPhase5ProtocolStaticCapabilityMatrix(t *testing.T) {
+// TestProtocolStaticCapabilityMatrix 固定各远端协议的静态能力上界，防止驱动未来误报未实现能力。
+func TestProtocolStaticCapabilityMatrix(t *testing.T) {
 	s3Driver, err := s3.NewDriver(s3.Config{
 		Endpoint: "https://s3.example.com", Region: "us-east-1",
 		CredentialScope: "secret:s3", CredentialVersion: "1", SecurityProfile: "strict",

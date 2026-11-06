@@ -220,7 +220,7 @@ upper := gosql.ScalarFunction{
 
 `NewHMACSHA256ScalarFunction(key)` returns the deterministic VARCHAR function `data_plane_hmac_sha256`, with lowercase hexadecimal output and NULL propagation. An empty key is rejected; the helper copies key bytes into the DB-scoped function definition. Register the returned definition in `Config.ScalarFunctions`.
 
-Runnable source/UDF usage and lifecycle cases are covered by [table function tests](../pkg/gosql/table_function_test.go), [UDF tests](../pkg/gosql/phase4_udf_test.go) and [HMAC tests](../pkg/gosql/phase4_test.go).
+Runnable source/UDF usage and lifecycle cases are covered by [table function tests](../pkg/gosql/table_function_test.go), [UDF tests](../pkg/gosql/scalar_udf_error_test.go) and [HMAC tests](../pkg/gosql/scalar_sql_test.go).
 
 ### Managed-memory observation
 
