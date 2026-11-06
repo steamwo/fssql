@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/steamwo/fssql/internal/format/compression"
 )
 
 func Decompress(codec CompressionCodec, src []byte, expected int) ([]byte, error) {
@@ -21,23 +23,29 @@ func Decompress(codec CompressionCodec, src []byte, expected int) ([]byte, error
 			return nil, err
 		}
 		defer zr.Close()
-		limit := int64(expected) + 1
-		if expected < 0 {
-			limit = 64 << 20
-		}
-		out, err := io.ReadAll(io.LimitReader(zr, limit))
-		if err != nil {
-			return nil, err
-		}
-		if expected >= 0 && len(out) != expected {
-			return nil, fmt.Errorf("parquet: gzip size %d want %d", len(out), expected)
-		}
-		return out, nil
+		return readAllExact("gzip", zr, expected)
+	case CodecZSTD:
+		return readAllExact("zstd", compression.NewZstdReader(bytes.NewReader(src)), expected)
 	case CodecSnappy:
 		return decodeSnappyBlock(src, expected)
 	default:
 		return nil, fmt.Errorf("parquet: unsupported compression codec %d", codec)
 	}
+}
+
+func readAllExact(name string, r io.Reader, expected int) ([]byte, error) {
+	limit := int64(expected) + 1
+	if expected < 0 {
+		limit = 64 << 20
+	}
+	out, err := io.ReadAll(io.LimitReader(r, limit))
+	if err != nil {
+		return nil, err
+	}
+	if expected >= 0 && len(out) != expected {
+		return nil, fmt.Errorf("parquet: %s size %d want %d", name, len(out), expected)
+	}
+	return out, nil
 }
 
 func decodeSnappyBlock(src []byte, expected int) ([]byte, error) {

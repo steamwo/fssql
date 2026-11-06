@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/format/compression"
 )
 
 func DecompressManaged(scope *memory.Scope, bm *memory.BufferManager, codec CompressionCodec, src []byte, expected int) (*memory.Buffer, error) {
@@ -56,11 +57,28 @@ func DecompressManaged(scope *memory.Scope, bm *memory.BufferManager, codec Comp
 		if err := decodeSnappyInto(out.Bytes(), src); err != nil {
 			return nil, err
 		}
+	case CodecZSTD:
+		if err := readExactDecoded("zstd", compression.NewZstdReader(bytes.NewReader(src)), out.Bytes()); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("parquet: unsupported compression codec %d", codec)
 	}
 	keep = true
 	return out, nil
+}
+
+func readExactDecoded(name string, r io.Reader, dst []byte) error {
+	n, err := io.ReadFull(r, dst)
+	if err != nil {
+		return fmt.Errorf("parquet: %s short decode %d/%d: %w", name, n, len(dst), err)
+	}
+	var extra [1]byte
+	extraN, extraErr := r.Read(extra[:])
+	if extraN != 0 || (extraErr != nil && extraErr != io.EOF) {
+		return fmt.Errorf("parquet: %s decoded more than expected", name)
+	}
+	return nil
 }
 
 func decodeSnappyInto(dst, src []byte) error {

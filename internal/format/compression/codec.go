@@ -28,6 +28,7 @@ type zstdCodec struct{}
 func Identity() Codec                                        { return identityCodec{} }
 func Gzip() Codec                                            { return gzipCodec{} }
 func Zstd() Codec                                            { return zstdCodec{} }
+func NewZstdReader(r io.Reader) io.Reader                    { return internalzstd.NewReader(r) }
 func (identityCodec) Name() string                           { return "identity" }
 func (identityCodec) Capability() scan.CompressionCapability { return scan.CompressionIdentity }
 func (gzipCodec) Name() string                               { return "gzip" }
