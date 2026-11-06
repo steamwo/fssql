@@ -81,6 +81,7 @@ SQL 已实现非递归 CTE、集合谓词、嵌套标量子查询、参数域去
 - [相关子查询与 LATERAL 的实现和支持范围](docs/architecture/subquery-lowering.md)
 - [架构约束](ARCHITECTURE.md)
 - [项目测试规范与 DuckDB 对标方案](docs/testing-standard.md)
+- [引擎优化与改进计划及诊断证据](docs/optimization-review-2026-11-06.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
 
 仓库按 `pkg/gosql`（公共入口）、`internal`（引擎实现）、`cmd`（命令行工具）、`test`（跨模块测试）和 `examples`（示例）组织。外部项目应通过公共包访问引擎。

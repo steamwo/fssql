@@ -1,0 +1,47 @@
+[
+  {
+    "Case": "hmac",
+    "Samples": 7,
+    "MedianMs": 629.6,
+    "MADPercent": 15.05,
+    "AllocatedMiB": 168.56,
+    "Allocs": 1503449,
+    "ManagedAfterMax": 0.0
+  },
+  {
+    "Case": "lower",
+    "Samples": 7,
+    "MedianMs": 300.89,
+    "MADPercent": 4.22,
+    "AllocatedMiB": 104.51,
+    "Allocs": 603497,
+    "ManagedAfterMax": 0.0
+  },
+  {
+    "Case": "projection",
+    "Samples": 7,
+    "MedianMs": 69.43,
+    "MADPercent": 12.03,
+    "AllocatedMiB": 30.52,
+    "Allocs": 2237,
+    "ManagedAfterMax": 0.0
+  },
+  {
+    "Case": "sort",
+    "Samples": 7,
+    "MedianMs": 472.05,
+    "MADPercent": 12.38,
+    "AllocatedMiB": 39.82,
+    "Allocs": 5014,
+    "ManagedAfterMax": 0.0
+  },
+  {
+    "Case": "window",
+    "Samples": 7,
+    "MedianMs": 674.87,
+    "MADPercent": 9.94,
+    "AllocatedMiB": 135.88,
+    "Allocs": 410397,
+    "ManagedAfterMax": 0.0
+  }
+]

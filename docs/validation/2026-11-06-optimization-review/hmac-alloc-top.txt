@@ -1,0 +1,24 @@
+File: audit.exe
+Build ID: D:\WORK_FILE\zwyb_file\edge-agent-go\.cache\fssql-optimization-audit\audit.exe2026-11-06 16:54:34.9085842 +0800 CST
+Type: alloc_objects
+Time: 2026-11-06 16:57:00 CST
+Showing nodes accounting for 13369614, 99.61% of 13422627 total
+Dropped 52 nodes (cum <= 67113)
+Showing top 16 nodes out of 22
+      flat  flat%   sum%        cum   cum%
+   2659860 19.82% 19.82%    4429547 33.00%  crypto/internal/fips140/hmac.New[go.shape.interface { BlockSize int; Reset; Size int; Sum []uint8; Write  }]
+   1802349 13.43% 33.24%    1802349 13.43%  encoding/hex.EncodeToString (inline)
+   1769687 13.18% 46.43%    1769687 13.18%  crypto/internal/fips140/sha256.New (inline)
+   1228837  9.15% 55.58%    1228837  9.15%  crypto/internal/fips140/sha256.(*Digest).Sum
+    962677  7.17% 62.76%   13378130 99.67%  github.com/steamwo/fssql/internal/execution/expression.(*Executor).executeScalarFunction
+    930681  6.93% 69.69%     930681  6.93%  github.com/steamwo/fssql/pkg/gosql.publicScalarValue
+    897910  6.69% 76.38%    8358643 62.27%  github.com/steamwo/fssql/pkg/gosql.NewHMACSHA256ScalarFunction.func1
+    878249  6.54% 82.92%    1566398 11.67%  github.com/steamwo/fssql/internal/execution/expression.scalarFromVector
+    846661  6.31% 89.23%   10840539 80.76%  github.com/steamwo/fssql/pkg/gosql.registerScalarFunctions.func2
+    704554  5.25% 94.48%     704554  5.25%  github.com/steamwo/fssql/pkg/gosql.internalScalarValue
+    688149  5.13% 99.61%     688149  5.13%  github.com/steamwo/fssql/internal/core/vector.(*Vector).Bytes
+         0     0% 99.61%    4429547 33.00%  crypto/hmac.New
+         0     0% 99.61%    1228837  9.15%  crypto/internal/fips140/hmac.(*HMAC).Sum
+         0     0% 99.61%    1769687 13.18%  crypto/internal/fips140hash.UnwrapNew[go.shape.interface { BlockSize int; Reset; Size int; Sum []uint8; Write  }].func1
+         0     0% 99.61%    1769687 13.18%  crypto/sha256.New
+         0     0% 99.61%   13378130 99.67%  github.com/steamwo/fssql/internal/execution/expression.(*Executor).Execute
