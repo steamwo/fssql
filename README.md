@@ -76,6 +76,7 @@ SQL 已实现非递归 CTE、集合谓词、嵌套标量子查询、参数域去
 - [相关子查询与 LATERAL 的实现和支持范围](docs/architecture/subquery-lowering.md)
 - [架构约束](ARCHITECTURE.md)
 - [项目测试规范与 DuckDB 对标方案](docs/testing-standard.md)
+- [2026-11-07 与 DuckDB 2.0.0 的全方位性能与能力对比](docs/validation/2026-11-07-full-duckdb-comparison/report.md)：262/262 差分用例一致；28 个计时场景（本地与 MinIO）共 812 条正式样本，总体 `time_ratio` 中位 3.86，核心场景仍未达到 ≤2 目标
 - [引擎优化与改进计划及诊断证据](docs/optimization-review-2026-11-06.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
 

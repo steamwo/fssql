@@ -201,6 +201,79 @@ func TestMigrationCSVDefaultNullDate(t *testing.T) {
 	}
 }
 
+// TestMigrationCSVQuotedNullInferenceMatchesExecution 验证自动推断与执行共用引号 NULL 语义。
+func TestMigrationCSVQuotedNullInferenceMatchesExecution(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "quoted-empty.csv")
+	if err := os.WriteFile(path, []byte("v\r\n1\r\n\"\""), 0600); err != nil {
+		t.Fatal(err)
+	}
+	uri, err := FileURI(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := OpenSQLDB(Config{LocalFiles: &LocalFileConfig{RootDir: root}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tests := []struct {
+		name     string
+		options  string
+		wantType string
+		want     []sql.NullString
+	}{
+		{
+			name:     "auto_disallow_quoted_nulls",
+			options:  "header=true,allow_quoted_nulls=false",
+			wantType: "VARCHAR",
+			want:     []sql.NullString{{String: "1", Valid: true}, {String: "", Valid: true}},
+		},
+		{
+			name:     "explicit_disallow_quoted_nulls",
+			options:  "header=true,auto_detect=false,allow_quoted_nulls=false,columns={'v':'VARCHAR'}",
+			wantType: "VARCHAR",
+			want:     []sql.NullString{{String: "1", Valid: true}, {String: "", Valid: true}},
+		},
+		{
+			name:     "default_allow_quoted_nulls",
+			options:  "header=true",
+			wantType: "BIGINT",
+			want:     []sql.NullString{{String: "1", Valid: true}, {}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rows, err := db.Query("SELECT v FROM read_csv('" + uri + "'," + tc.options + ")")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			columnTypes, err := rows.ColumnTypes()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(columnTypes) != 1 || columnTypes[0].DatabaseTypeName() != tc.wantType {
+				t.Fatalf("column types=%+v want=%s", columnTypes, tc.wantType)
+			}
+			var got []sql.NullString
+			for rows.Next() {
+				var value sql.NullString
+				if err := rows.Scan(&value); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, value)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("values=%+v want=%+v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMigrationWindowPartitionEvaluatesOnce 验证含 NULL 的分区计算在排序与窗口执行之间只求值一次
 func TestMigrationWindowPartitionEvaluatesOnce(t *testing.T) {
 	var calls atomic.Int64

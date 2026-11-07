@@ -9,6 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steamwo/fssql/internal/core/memory"
+	querypkg "github.com/steamwo/fssql/internal/query"
 )
 
 func TestMaterializedCrossStatementSnapshot(t *testing.T) {
@@ -252,5 +255,43 @@ func TestMaterializedFailureAndDBClose(t *testing.T) {
 	_, err = db.Materialize(context.Background(), "SELECT 1")
 	if err == nil {
 		t.Fatal("closed DB accepted materialization")
+	}
+}
+
+func TestMaterializedCleanupRetryDoesNotReleaseReferenceTwice(t *testing.T) {
+	owner := querypkg.New(context.Background(), memory.NewManager(1024))
+	failure := errors.New("snapshot cleanup failed")
+	calls := 0
+	if err := owner.AddCleanup(func() error {
+		calls++
+		if calls == 1 {
+			return failure
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := &Materialized{
+		state:  &typedSourceState{q: owner},
+		refs:   1,
+		closed: true,
+	}
+	if err := m.release(); !errors.Is(err, failure) {
+		t.Fatalf("first release error = %v, want cleanup failure", err)
+	}
+	if m.refs != 0 || m.cleaned {
+		t.Fatalf("failed release state: refs=%d cleaned=%v", m.refs, m.cleaned)
+	}
+	if err := m.release(); err != nil {
+		t.Fatalf("release retry failed: %v", err)
+	}
+	if m.refs != 0 || !m.cleaned || calls != 2 {
+		t.Fatalf("successful retry state: refs=%d cleaned=%v calls=%d", m.refs, m.cleaned, calls)
+	}
+	if err := m.release(); err != nil {
+		t.Fatal(err)
+	}
+	if m.refs != 0 || calls != 2 {
+		t.Fatalf("completed release repeated cleanup: refs=%d calls=%d", m.refs, calls)
 	}
 }

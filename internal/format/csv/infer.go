@@ -81,6 +81,7 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	row := 0
 	col := 0
 	dataRows := 0
+	quotedField := false
 	stop := false
 
 	appendByte := func(b byte) error {
@@ -100,21 +101,23 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	}
 	finishField := func() error {
 		raw := scratchBytes[:used]
+		nullLiteral := csvFieldNullLiteral(opts.NullLiteral, quotedField)
 		if row == 0 {
 			if opts.Header {
 				names = append(names, string(raw))
 				kinds = append(kinds, kindUnknown)
 			} else {
-				kinds = append(kinds, observeKind(raw, opts.NullLiteral))
+				kinds = append(kinds, observeKind(raw, nullLiteral))
 			}
 		} else {
 			if col >= len(kinds) {
 				return fmt.Errorf("csv: row %d has more than %d columns", row+1, len(kinds))
 			}
-			kinds[col] = mergeKind(kinds[col], observeKind(raw, opts.NullLiteral))
+			kinds[col] = mergeKind(kinds[col], observeKind(raw, nullLiteral))
 		}
 		used = 0
 		col++
+		quotedField = false
 		return nil
 	}
 	finishRecord := func() error {
@@ -137,6 +140,10 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	}
 
 	for i := 0; i < len(input) && !stop; i++ {
+		// 在 lexer 消耗首字节前记录引号状态，供字段级 NULL 判定使用。
+		if m.State() == StateFieldStart {
+			quotedField = input[i] == opts.Lex.Quote
+		}
 		event, stepErr := m.Step(input[i])
 		if stepErr != nil {
 			return InferredSchema{}, stepErr
@@ -162,7 +169,7 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 		if err := m.Finish(); err != nil {
 			return InferredSchema{}, err
 		}
-		if col > 0 || used > 0 || (row == 0 && len(input) > 0) {
+		if col > 0 || used > 0 || m.State() != StateFieldStart || (row == 0 && len(input) > 0) {
 			if err := finishField(); err != nil {
 				return InferredSchema{}, err
 			}
@@ -187,6 +194,14 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 		fields[i] = types.StructField{Name: names[i], Type: kindLogicalType(kinds[i])}
 	}
 	return InferredSchema{Fields: fields, SampleRows: dataRows}, nil
+}
+
+// csvFieldNullLiteral 统一推断与执行的字段 NULL 字面量规则。
+func csvFieldNullLiteral(encoded []byte, quoted bool) []byte {
+	if quoted && !csvQuotedNullAllowed(encoded) {
+		return nil
+	}
+	return effectiveCSVNullLiteral(encoded)
 }
 
 func observeKind(raw, nullLiteral []byte) inferredKind {

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""DuckDB 侧的文件互操作参考 runner。
+"""文件互操作参考 runner。
 
 用法：
   python duckdb_file_runner.py read <csv|json|ndjson|parquet> <path>
   python duckdb_file_runner.py write <directory>
+  python duckdb_file_runner.py write-parquet-zstd <duckdb|pyarrow> <path>
 
 read 读取一个文件并输出规范化值；write 用 DuckDB 写出 CSV/NDJSON/Parquet
 （DuckDB 2.0 的 FORMAT JSON 实际也是逐行 NDJSON），再读回并输出值。
+write-parquet-zstd 用指定生成器写出真实 ZSTD 文件并返回读回值、版本和 codec。
 输出 JSON 到 stdout；任何失败写入 error 字段并以非零状态退出。
 """
 
@@ -146,6 +148,56 @@ def main():
             connection,
             "SELECT %s FROM read_parquet(%s) ORDER BY id" % (TYPED_SELECT, sql_string(path)),
         )
+        print(json.dumps(result))
+        return
+
+    if mode == "write-parquet-zstd":
+        if len(sys.argv) != 4:
+            raise ValueError("write-parquet-zstd requires <duckdb|pyarrow> <path>")
+        producer, path = sys.argv[2], sys.argv[3]
+        if producer not in ("duckdb", "pyarrow"):
+            raise ValueError("unsupported Parquet producer %s" % producer)
+
+        # 两种生成器共用同一 typed fixture；PyArrow 只负责独立编码，避免维护两份期望值。
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        connection.execute(FIXTURE_SQL)
+        if producer == "duckdb":
+            connection.execute(
+                "COPY (SELECT * FROM interop_fixture ORDER BY id) TO %s (FORMAT PARQUET, COMPRESSION ZSTD)"
+                % sql_string(path)
+            )
+            version = duckdb.__version__
+        else:
+            table = connection.sql("SELECT * FROM interop_fixture ORDER BY id").to_arrow_table()
+            pq.write_table(
+                table,
+                path,
+                compression="zstd",
+                row_group_size=2,
+                use_dictionary=True,
+                version="2.6",
+                data_page_version="1.0",
+            )
+            version = pa.__version__
+
+        # 不信任写入选项名称；逐 row group、逐列核实生成文件的真实 codec。
+        metadata = pq.ParquetFile(path).metadata
+        codecs = sorted(
+            {
+                metadata.row_group(group).column(column).compression
+                for group in range(metadata.num_row_groups)
+                for column in range(metadata.num_columns)
+            }
+        )
+        if codecs != ["ZSTD"]:
+            raise AssertionError("Parquet compression=%r, want ['ZSTD']" % codecs)
+        result = query_rows(
+            connection,
+            "SELECT %s FROM read_parquet(%s) ORDER BY id" % (SELECT_COLUMNS, sql_string(path)),
+        )
+        result.update({"producer": producer, "version": version, "compression": codecs})
         print(json.dumps(result))
         return
 

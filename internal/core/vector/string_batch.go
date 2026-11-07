@@ -37,6 +37,29 @@ func (w *StringBatchWriter) Append(row int, src []byte) error {
 	return w.AppendParts(row, src, nil)
 }
 
+// Reserve 为后续追加的外部字符串精确预留堆字节，不收缩已有容量。
+func (w *StringBatchWriter) Reserve(size int) error {
+	if w == nil || w.heap == nil {
+		return errors.New("string batch writer is closed")
+	}
+	if size < 0 {
+		return errors.New("negative string batch heap reservation")
+	}
+	const maxInt = int(^uint(0) >> 1)
+	if size > maxInt-w.used {
+		return errors.New("string batch heap size overflow")
+	}
+	need := w.used + size
+	if need <= len(w.heapData) {
+		return nil
+	}
+	if err := w.heap.buf.Resize(need, nil); err != nil {
+		return err
+	}
+	w.heapData = w.heap.buf.Bytes()
+	return nil
+}
+
 // AppendParts copies two byte slices directly into the owned destination,
 // avoiding an intermediate concatenation allocation.
 func (w *StringBatchWriter) AppendParts(row int, left, right []byte) error {

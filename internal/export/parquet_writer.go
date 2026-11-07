@@ -303,22 +303,38 @@ func (w *ParquetWriter) allocateRowGroup() error {
 	return nil
 }
 
+// parquetRowGroupOrdinal 仅为加密模块 AAD 保留必需的 int16 row-group ordinal。
+func parquetRowGroupOrdinal(encrypted bool, rowGroupCount int) (*int16, error) {
+	if !encrypted {
+		return nil, nil
+	}
+	if rowGroupCount > math.MaxInt16 {
+		return nil, errors.New("export: Parquet row-group ordinal exceeds int16")
+	}
+	ordinal := int16(rowGroupCount)
+	return &ordinal, nil
+}
+
 func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) error {
 	if w.rowCount == 0 {
 		return nil
 	}
-	if len(w.rowGroups) > math.MaxInt16 {
-		return errors.New("export: Parquet row-group ordinal exceeds int16")
+	ordinal, err := parquetRowGroupOrdinal(w.opts.Encryption != nil, len(w.rowGroups))
+	if err != nil {
+		return err
 	}
-	ordinal := int16(len(w.rowGroups))
-	group := parquet.RowGroup{Columns: make([]parquet.ColumnChunk, len(w.schema)), NumRows: int64(w.rowCount), Ordinal: &ordinal}
+	group := parquet.RowGroup{Columns: make([]parquet.ColumnChunk, len(w.schema)), NumRows: int64(w.rowCount), Ordinal: ordinal}
 	groupStart := w.offset
+	rowGroupOrdinal := int16(0)
+	if ordinal != nil {
+		rowGroupOrdinal = *ordinal
+	}
 	var totalUncompressed, totalCompressed int64
 	for col := range w.schema {
 		if col > math.MaxInt16 {
 			return errors.New("export: Parquet column ordinal exceeds int16")
 		}
-		chunk, uncompressed, compressed, err := w.writeColumnChunk(ctx, col, ordinal)
+		chunk, uncompressed, compressed, err := w.writeColumnChunk(ctx, col, rowGroupOrdinal)
 		if err != nil {
 			return err
 		}

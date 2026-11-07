@@ -38,6 +38,7 @@ type ScalarValue struct {
 	Bytes   []byte
 }
 
+// ScalarRuntime 保存注册标量函数的不可变执行元数据与当前回调。
 type ScalarRuntime struct {
 	Deterministic bool
 	NullHandling  ScalarNullHandling
@@ -46,6 +47,7 @@ type ScalarRuntime struct {
 
 type ScalarRegistry map[function.ID]ScalarRuntime
 
+// executeScalarFunction 执行内置或注册标量函数；所有注册 UDF 均保留逐行 Eval 桥接语义。
 func (e *Executor) executeScalarFunction(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if expr == nil || expr.FunctionKind != function.Scalar { return nil, fmt.Errorf("scalar execution requires scalar BoundFunction") }
 	if expr.FunctionID == function.DistinctValueID { return e.executeDistinctValue(expr,chunk) }

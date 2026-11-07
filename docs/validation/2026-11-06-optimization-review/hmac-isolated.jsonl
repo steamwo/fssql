@@ -1,9 +1,0 @@
-{"case":"csv_quoted_empty","error":"csv: row 2 column 1: invalid BIGINT \"\"","explicit_schema":false,"values":null}
-{"case":"csv_quoted_empty","error":"","explicit_schema":true,"values":["1",""]}
-{"case":"hmac","iteration":0,"rows":100000,"seconds":0.7495611,"allocated_bytes":176743488,"allocs":1503451,"gc_cycles":62,"managed_after":0}
-{"case":"hmac","iteration":1,"rows":100000,"seconds":0.7934992,"allocated_bytes":176744176,"allocs":1503455,"gc_cycles":64,"managed_after":0}
-{"case":"hmac","iteration":2,"rows":100000,"seconds":0.7181763,"allocated_bytes":176743344,"allocs":1503450,"gc_cycles":63,"managed_after":0}
-{"case":"hmac","iteration":3,"rows":100000,"seconds":0.8950235,"allocated_bytes":176744880,"allocs":1503464,"gc_cycles":65,"managed_after":0}
-{"case":"hmac","iteration":4,"rows":100000,"seconds":0.7791659,"allocated_bytes":176743712,"allocs":1503453,"gc_cycles":63,"managed_after":0}
-{"case":"hmac","iteration":5,"rows":100000,"seconds":0.6614487,"allocated_bytes":176743152,"allocs":1503448,"gc_cycles":63,"managed_after":0}
-{"case":"hmac","iteration":6,"rows":100000,"seconds":0.8006224,"allocated_bytes":176744048,"allocs":1503453,"gc_cycles":65,"managed_after":0}

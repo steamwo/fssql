@@ -96,6 +96,37 @@ func TestInferSchemaNoHeaderNamesAndNullOnlyVarchar(t *testing.T) {
 	}
 }
 
+// TestInferSchemaQuotedNullSemantics 验证推断保留引号状态并与执行侧 NULL 配置一致。
+func TestInferSchemaQuotedNullSemantics(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		nullLiteral []byte
+		want        types.LogicalTypeID
+	}{
+		{name: "quoted_empty_number_crlf_eof", input: "1\r\n\"\"", nullLiteral: []byte(noQuotedNullPrefix), want: types.Varchar},
+		{name: "quoted_empty_date", input: "2026-01-02\n\"\"\n", nullLiteral: []byte(noQuotedNullPrefix), want: types.Varchar},
+		{name: "quoted_empty_text", input: "text\n\"\"\n", nullLiteral: []byte(noQuotedNullPrefix), want: types.Varchar},
+		{name: "unquoted_empty_number", input: "1\n\n", nullLiteral: []byte(noQuotedNullPrefix), want: types.BigInt},
+		{name: "null_literal", input: "1\nNULL\n", nullLiteral: []byte("NULL"), want: types.BigInt},
+		{name: "quoted_null_literal_default", input: "1\n\"NULL\"\n", nullLiteral: []byte("NULL"), want: types.BigInt},
+		{name: "quoted_number", input: "1\n\"2\"\n", nullLiteral: []byte(noQuotedNullPrefix), want: types.BigInt},
+		{name: "quoted_empty_default", input: "1\n\"\"\n", nullLiteral: []byte(yesQuotedNullPrefix), want: types.BigInt},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, scope, bm := testMemory(1 << 20)
+			got, err := InferSchema([]byte(tc.input), InferenceOptions{Final: true, NullLiteral: tc.nullLiteral}, scope, bm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SampleRows != 2 || len(got.Fields) != 1 || got.Fields[0].Type.ID != tc.want {
+				t.Fatalf("schema=%+v rows=%d want type=%d rows=2", got.Fields, got.SampleRows, tc.want)
+			}
+		})
+	}
+}
+
 func TestInferSchemaNormalizesHeaderNames(t *testing.T) {
 	_, scope, bm := testMemory(1 << 20)
 	got, err := InferSchema([]byte("name,name,,name_1\na,b,c,d\n"), InferenceOptions{Header: true, Final: true}, scope, bm)

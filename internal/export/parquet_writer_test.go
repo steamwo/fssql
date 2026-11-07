@@ -6,11 +6,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
+	"github.com/steamwo/fssql/internal/format/parquet"
 )
 
 // TestParquetWriterRowGroupAndPageBoundariesAreIndependent 验证 row-group/page 边界不跟随输入 DataChunk 边界。
@@ -61,8 +63,50 @@ func TestParquetWriterRowGroupAndPageBoundariesAreIndependent(t *testing.T) {
 	if footerLen <= 0 || footerLen > len(data)-12 {
 		t.Fatalf("invalid footer length %d file=%d", footerLen, len(data))
 	}
+	metadata, err := parquet.DecodeFileMetaData(data[len(data)-8-footerLen : len(data)-8])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metadata.RowGroups) != 2 {
+		t.Fatalf("row groups=%d, want 2", len(metadata.RowGroups))
+	}
+	for i, group := range metadata.RowGroups {
+		if group.Ordinal != nil {
+			t.Fatalf("unencrypted row group %d ordinal=%d, want omitted", i, *group.Ordinal)
+		}
+	}
 	if scope.Used() != 0 {
 		t.Fatalf("managed memory leak: %d", scope.Used())
+	}
+}
+
+// TestParquetRowGroupOrdinalBoundary 验证未加密路径不受 int16 限制且加密 AAD 保留明确边界。
+func TestParquetRowGroupOrdinalBoundary(t *testing.T) {
+	for _, count := range []int{0, math.MaxInt16, math.MaxInt16 + 1} {
+		ordinal, err := parquetRowGroupOrdinal(false, count)
+		if err != nil || ordinal != nil {
+			t.Fatalf("unencrypted count=%d ordinal=%v err=%v, want omitted", count, ordinal, err)
+		}
+	}
+	for _, tc := range []struct {
+		count   int
+		want    int16
+		wantErr bool
+	}{
+		{count: 0, want: 0},
+		{count: math.MaxInt16, want: math.MaxInt16},
+		{count: math.MaxInt16 + 1, wantErr: true},
+	} {
+		ordinal, err := parquetRowGroupOrdinal(true, tc.count)
+		if (err != nil) != tc.wantErr {
+			t.Fatalf("encrypted count=%d err=%v, wantErr=%v", tc.count, err, tc.wantErr)
+		}
+		if tc.wantErr {
+			continue
+		}
+		if ordinal == nil || *ordinal != tc.want {
+			t.Fatalf("encrypted count=%d ordinal=%v, want %d", tc.count, ordinal, tc.want)
+		}
 	}
 }
 

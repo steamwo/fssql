@@ -10,12 +10,13 @@ import (
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
+// BenchmarkBuiltinStringBatch2048 测量 2048 行真实 ExecuteSQL 字符串批路径的稳态开销。
 func BenchmarkBuiltinStringBatch2048(b *testing.B) {
 	for _, tc := range []struct {
 		name   string
 		id     function.ID
 		binary bool
-	}{{"length", function.LengthID, false}, {"strpos", function.StrposID, true}, {"concat", function.ConcatID, true}} {
+	}{{"length", function.LengthID, false}, {"strpos", function.StrposID, true}, {"concat", function.ConcatID, true}, {"lower", function.LowerID, false}} {
 		b.Run(tc.name, func(b *testing.B) {
 			manager := memory.NewManager(8 << 20)
 			scope := manager.NewScope()
@@ -42,7 +43,7 @@ func BenchmarkBuiltinStringBatch2048(b *testing.B) {
 				b.Fatal(err)
 			}
 			result := types.LogicalType{ID: types.BigInt}
-			if tc.id == function.ConcatID {
+			if tc.id == function.ConcatID || tc.id == function.LowerID {
 				result = text
 			}
 			expr := &binder.BoundExpression{Kind: binder.BoundFunction, Type: result, FunctionID: tc.id, FunctionKind: function.Scalar, Children: []*binder.BoundExpression{{Kind: binder.BoundColumn, Type: text, ColumnIndex: 0}}}
@@ -60,6 +61,7 @@ func BenchmarkBuiltinStringBatch2048(b *testing.B) {
 				out.Release()
 			}
 			b.StopTimer()
+			b.ReportMetric(float64(manager.Peak()), "managed-peak-B")
 			chunk.Release()
 			if scope.Used() != 0 {
 				b.Fatalf("managed leak=%d", scope.Used())

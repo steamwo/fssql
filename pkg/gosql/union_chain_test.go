@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
 
@@ -56,13 +57,13 @@ func TestUnionAllLongChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer materialized.Close()
-	rows := 0
+	var rows atomic.Int64
 	_, err = db.QueryChunks(context.Background(), materialized.SQL(), func(chunk *Chunk) error {
-		rows += chunk.RowCount()
+		rows.Add(int64(chunk.RowCount()))
 		return nil
 	})
-	if err != nil || rows != terms {
-		t.Fatalf("materialized rows=%d want %d err=%v", rows, terms, err)
+	if err != nil || rows.Load() != terms {
+		t.Fatalf("materialized rows=%d want %d err=%v", rows.Load(), terms, err)
 	}
 	if err := materialized.Close(); err != nil {
 		t.Fatal(err)

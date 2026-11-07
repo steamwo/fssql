@@ -192,15 +192,20 @@ func (s *typedSourceState) readBatch(ctx context.Context) (*vector.DataChunk, bo
 	return chunk, true, nil
 }
 
+// closeReaderLocked 仅记录已成功的读取器关闭，失败时保留给查询清理重试。
 func (s *typedSourceState) closeReaderLocked() error {
 	if s.readerClosed {
 		return nil
 	}
-	s.readerClosed = true
 	if !s.readerOpened || s.reader == nil {
+		s.readerClosed = true
 		return nil
 	}
-	return s.reader.Close()
+	if err := s.reader.Close(); err != nil {
+		return err
+	}
+	s.readerClosed = true
+	return nil
 }
 
 func (s *typedSourceState) closeReader() error {
@@ -334,32 +339,37 @@ func (s *typedSourceState) materializedChunk(ctx context.Context, index int) (*v
 	return vector.DeserializeChunk(s.resident[index].Bytes(), s.q.Memory, s.buffers)
 }
 
+// Close 释放尚未完成的读取器和溢写资源，已成功部分不会在重试中重复关闭。
 func (s *typedSourceState) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
 	s.closed = true
 	readerErr := s.closeReaderLocked()
+	resident := s.resident
+	s.resident = nil
+	s.residentBytes = 0
+	store := s.store
 	s.mu.Unlock()
 
-	for _, encoded := range s.resident {
+	for _, encoded := range resident {
 		if encoded != nil {
 			encoded.Release()
 		}
 	}
-	s.resident = nil
-	s.residentBytes = 0
 	var storeErr error
-	if s.store != nil {
-		storeErr = s.store.Close()
-		s.store = nil
+	if store != nil {
+		storeErr = store.Close()
+		if storeErr == nil {
+			s.mu.Lock()
+			if s.store == store {
+				s.store = nil
+				s.pages = nil
+			}
+			s.mu.Unlock()
+		}
 	}
-	s.pages = nil
 	return errors.Join(readerErr, storeErr)
 }
 

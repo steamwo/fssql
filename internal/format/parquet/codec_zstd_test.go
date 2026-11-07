@@ -3,6 +3,7 @@ package parquet
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
@@ -54,5 +55,18 @@ func TestDecompressManagedZstd(t *testing.T) {
 	}
 	if m.Used() != 0 {
 		t.Fatalf("managed leak=%d", m.Used())
+	}
+
+	limitedManager := memory.NewManager(int64(len(zstdFixtureWant) - 1))
+	limitedScope := limitedManager.NewScope()
+	limitedOut, limitedErr := DecompressManaged(limitedScope, bm, CodecZSTD, fixture, len(zstdFixtureWant))
+	if limitedOut != nil {
+		limitedOut.Release()
+	}
+	if !errors.Is(limitedErr, memory.ErrLimitExceeded) {
+		t.Fatalf("expected memory limit, got %v", limitedErr)
+	}
+	if managedAfter := limitedManager.Used(); managedAfter != 0 {
+		t.Fatalf("managed_after=%d, want 0", managedAfter)
 	}
 }

@@ -159,17 +159,26 @@ func (m *Materialized) Close() error {
 	m.closed = true
 	return m.cleanupLocked()
 }
+
+// cleanupLocked 仅在整个底层查询清理成功后标记完成，失败可由 Close 或 release 重试。
 func (m *Materialized) cleanupLocked() error {
 	if !m.closed || m.refs != 0 || m.cleaned {
 		return nil
 	}
+	if err := m.state.q.Close(); err != nil {
+		return err
+	}
 	m.cleaned = true
-	return m.state.q.Close()
+	return nil
 }
+
+// release 在清理重试时保留已减少的引用计数，避免重复释放租约。
 func (m *Materialized) release() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.refs--
+	if m.refs > 0 {
+		m.refs--
+	}
 	return m.cleanupLocked()
 }
 func (r *materializedRegistry) close() error {

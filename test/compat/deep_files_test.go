@@ -341,6 +341,89 @@ func TestDuckDBFileInterop(t *testing.T) {
 	}
 }
 
+// TestParquetZSTDFileInterop 验证 DuckDB/PyArrow 的真实 ZSTD 文件经公共 fssql 完整扫描后逐值一致。
+func TestParquetZSTDFileInterop(t *testing.T) {
+	if os.Getenv("FSSQL_REQUIRE_DUCKDB") != "1" {
+		t.Skip("set FSSQL_REQUIRE_DUCKDB=1 in the acceptance gate")
+	}
+	registry := loadDeviationRegistry(t)
+	resetDiffEvidence(t)
+	dir := t.TempDir()
+	db, err := gosql.OpenSQLDB(gosql.Config{
+		LocalFiles:             &gosql.LocalFileConfig{RootDir: dir},
+		TempDir:                filepath.Join(dir, "spill"),
+		ManifestDir:            filepath.Join(dir, "manifests"),
+		MemoryLimitBytes:       64 << 20,
+		TempLimitBytes:         128 << 20,
+		SpillMemoryBudgetBytes: 2 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	expected := expectedInteropValues()
+
+	for _, producer := range []string{"duckdb", "pyarrow"} {
+		t.Run(producer, func(t *testing.T) {
+			path := filepath.Join(dir, producer+"_zstd.parquet")
+			output := runDuckDBFileRunner(t, "write-parquet-zstd", producer, path)
+			var written struct {
+				Values      []string `json:"values"`
+				Columns     int      `json:"columns"`
+				Error       string   `json:"error"`
+				Producer    string   `json:"producer"`
+				Version     string   `json:"version"`
+				Compression []string `json:"compression"`
+			}
+			if err := json.Unmarshal(output, &written); err != nil {
+				t.Fatalf("decode %s ZSTD write: %v: %s", producer, err, output)
+			}
+			if written.Error != "" {
+				t.Fatalf("%s ZSTD write: %s", producer, written.Error)
+			}
+			if written.Producer != producer || written.Version == "" {
+				t.Fatalf("producer metadata=%q version=%q", written.Producer, written.Version)
+			}
+			if producer == "duckdb" && written.Version != registry.Reference.Version {
+				t.Fatalf("DuckDB version=%q registry=%q", written.Version, registry.Reference.Version)
+			}
+			if !reflect.DeepEqual(written.Compression, []string{"ZSTD"}) {
+				t.Fatalf("%s compression=%v, want [ZSTD]", producer, written.Compression)
+			}
+			if written.Columns != 7 || !reflect.DeepEqual(written.Values, expected) {
+				t.Fatalf("%s read-back: columns=%d\nvalues=%v\nexpected=%v", producer, written.Columns, written.Values, expected)
+			}
+
+			uri, err := gosql.FileURI(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sqlText := fssqlFileReadSQL("parquet", uri)
+			ours, columns, err := queryValuesWithColumns(ctx, db, sqlText)
+			if err != nil {
+				t.Fatalf("fssql read %s ZSTD Parquet: %v", producer, err)
+			}
+			match := columns == written.Columns && reflect.DeepEqual(ours, written.Values)
+			recordDiffEvidence(t, diffEvidence{
+				Suite:         "parquet-zstd",
+				Case:          producer,
+				SQL:           sqlText,
+				FSSQLValues:   ours,
+				DuckDBValues:  written.Values,
+				FSSQLColumns:  columns,
+				DuckDBColumns: written.Columns,
+				Match:         match,
+			})
+			if columns != 7 || !reflect.DeepEqual(ours, expected) || !match {
+				t.Fatalf("fssql read %s ZSTD: columns=%d\nvalues=%v\nexpected=%v", producer, columns, ours, expected)
+			}
+			logDiffValues(t, "parquet-zstd/"+producer, ours, written.Values)
+			t.Logf("producer=%s version=%s compression=%v values=%d", producer, written.Version, written.Compression, len(ours))
+		})
+	}
+}
+
 // typedFixtureSQL 提供 DECIMAL(18,2)、DECIMAL(38,6)、UBIGINT、TIMESTAMP_NS
 // 和 BLOB 行；HUGEINT 不包含在内，因为 Parquet 导出映射当前明确拒绝它。
 func typedFixtureSQL() string {

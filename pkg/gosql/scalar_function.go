@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"strings"
 	"time"
 
@@ -37,8 +38,8 @@ type ScalarValue struct {
 	Time    time.Time
 }
 
-// ScalarFunction is immutable DB-scoped metadata plus a scalar callback. It is
-// registered during Open; no callback or secret is written to SQL/plan state.
+// ScalarFunction 是不可变的 DB 作用域元数据与标量回调。
+// Open 注册时不会把回调或密钥写入 SQL/计划状态。
 type ScalarFunction struct {
 	Name          string
 	Arguments     []Type
@@ -48,23 +49,50 @@ type ScalarFunction struct {
 	Eval          func([]ScalarValue) (ScalarValue, error)
 }
 
-// NewHMACSHA256ScalarFunction creates the replacement masking UDF. Input is the
-// UTF-8 byte sequence of one VARCHAR and output is lowercase hexadecimal HMAC.
-// The key is copied into this definition and remains scoped to the DB config.
+// NewHMACSHA256ScalarFunction 创建替换遮蔽 UDF，输入一个 VARCHAR 的原始字节并输出小写十六进制 HMAC。
+// key 会复制到定义中，且仅用于当前 DB 配置。
 func NewHMACSHA256ScalarFunction(key []byte) (ScalarFunction, error) {
-	if len(key) == 0 { return ScalarFunction{}, fmt.Errorf("gosql: HMAC key is required") }
+	if len(key) == 0 {
+		return ScalarFunction{}, fmt.Errorf("gosql: HMAC key is required")
+	}
 	owned := append([]byte(nil), key...)
+	// 每个工厂定义最多保留一个已 Reset 的空闲 hash；获取和归还均不阻塞并发调用。
+	states := make(chan hash.Hash, 1)
+	states <- hmac.New(sha256.New, owned)
 	return ScalarFunction{
-		Name: "data_plane_hmac_sha256",
-		Arguments: []Type{{ID:"VARCHAR"}}, Result: Type{ID:"VARCHAR"},
-		NullHandling: ScalarNullPropagate, Deterministic: true,
-		Eval: func(values []ScalarValue) (ScalarValue,error) {
-			if len(values)!=1 || !values[0].Valid { return ScalarValue{Type:Type{ID:"VARCHAR"},Valid:false},nil }
-			mac:=hmac.New(sha256.New,owned);_,_=mac.Write([]byte(values[0].String));return ScalarValue{Type:Type{ID:"VARCHAR"},Valid:true,String:hex.EncodeToString(mac.Sum(nil))},nil
+		Name:          "data_plane_hmac_sha256",
+		Arguments:     []Type{{ID: "VARCHAR"}},
+		Result:        Type{ID: "VARCHAR"},
+		NullHandling:  ScalarNullPropagate,
+		Deterministic: true,
+		Eval: func(values []ScalarValue) (ScalarValue, error) {
+			if len(values) != 1 || !values[0].Valid {
+				return ScalarValue{Type: Type{ID: "VARCHAR"}, Valid: false}, nil
+			}
+			var mac hash.Hash
+			select {
+			case mac = <-states:
+			default:
+				mac = hmac.New(sha256.New, owned)
+			}
+			defer func() {
+				mac.Reset()
+				select {
+				case states <- mac:
+				default:
+				}
+			}()
+			_, _ = mac.Write([]byte(values[0].String))
+			// digest 和 encoded 均为调用局部缓冲，结果字符串在返回前独立复制。
+			var digest [sha256.Size]byte
+			var encoded [sha256.Size * 2]byte
+			hex.Encode(encoded[:], mac.Sum(digest[:0]))
+			return ScalarValue{Type: Type{ID: "VARCHAR"}, Valid: true, String: string(encoded[:])}, nil
 		},
-	},nil
+	}, nil
 }
 
+// registerScalarFunctions 注册公共标量定义，并通过统一运行时适配器保留当前 Eval 回调语义。
 func registerScalarFunctions(base *function.Catalog, definitions []ScalarFunction) (*function.Catalog, expression.ScalarRegistry, error) {
 	catalog:=base;if catalog==nil{catalog=function.NewScalarCatalog()}
 	registry:=make(expression.ScalarRegistry,len(definitions));seen:=make(map[string]struct{},len(definitions))
@@ -77,7 +105,23 @@ func registerScalarFunctions(base *function.Catalog, definitions []ScalarFunctio
 		argCopy:=append([]types.LogicalType(nil),args...);resultCopy:=result
 		next,err:=catalog.With(function.Definition{ID:id,Name:name,Kind:function.Scalar,MinArgs:len(args),MaxArgs:len(args),Bind:func(in function.BindInput)(function.BindResult,error){if len(in.Arguments)!=len(argCopy){return function.BindResult{},fmt.Errorf("scalar function expects %d arguments",len(argCopy))};return function.BindResult{ReturnType:resultCopy,Arguments:append([]types.LogicalType(nil),argCopy...)},nil}});if err!=nil{return nil,nil,fmt.Errorf("gosql: register scalar function %s: %w",name,err)};catalog=next
 		nullMode:=expression.ScalarNullPropagate;if definition.NullHandling==ScalarNullCall{nullMode=expression.ScalarNullCall}
-		defCopy:=definition;registry[id]=expression.ScalarRuntime{Deterministic:definition.Deterministic,NullHandling:nullMode,Eval:func(values []expression.ScalarValue)(expression.ScalarValue,error){public:=make([]ScalarValue,len(values));for j,v:=range values{public[j]=publicScalarValue(v)};got,err:=defCopy.Eval(public);if err!=nil{return expression.ScalarValue{},err};return internalScalarValue(got,resultCopy)}}
+		defCopy := definition
+		runtime := expression.ScalarRuntime{
+			Deterministic: definition.Deterministic,
+			NullHandling:  nullMode,
+			Eval: func(values []expression.ScalarValue) (expression.ScalarValue, error) {
+				public := make([]ScalarValue, len(values))
+				for j, v := range values {
+					public[j] = publicScalarValue(v)
+				}
+				got, err := defCopy.Eval(public)
+				if err != nil {
+					return expression.ScalarValue{}, err
+				}
+				return internalScalarValue(got, resultCopy)
+			},
+		}
+		registry[id] = runtime
 	}
 	return catalog,registry,nil
 }

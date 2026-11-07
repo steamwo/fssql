@@ -37,6 +37,28 @@ CORE_CASES = [
     {"name": "multi_file", "sql": "SELECT COUNT(*), SUM(value) FROM read_parquet('{parts}')", "rows": 1},
 ]
 
+# EXTENDED_CASES 是 core 之外的补充计时场景，覆盖早停、过滤选择性、
+# 高基数分组、窗口、字符串、JOIN 变体和文本/JSON 来源。
+EXTENDED_CASES = [
+    {"name": "limit_early", "sql": "SELECT id, value FROM read_parquet('{data}') LIMIT 100", "rows": 100, "preserve_order": False},
+    {"name": "filter_10pct", "sql": "SELECT id, value FROM read_parquet('{data}') WHERE id % 10 = 0", "rows": 100000, "preserve_order": False},
+    {"name": "distinct", "sql": "SELECT DISTINCT grp FROM read_parquet('{data}') ORDER BY grp", "rows": 1000},
+    {"name": "group_high_card", "sql": "SELECT id, COUNT(*), SUM(value) FROM read_parquet('{data}') GROUP BY id", "rows": 1000000, "memory": 256 << 20, "spill": 128 << 20, "preserve_order": False},
+    {"name": "window_partition", "sql": "SELECT id, ROW_NUMBER() OVER (PARTITION BY grp ORDER BY value) AS rn FROM read_parquet('{data}') WHERE id < 100000", "rows": 100000, "preserve_order": False},
+    {"name": "string_length", "sql": "SELECT id, length(payload) AS len FROM read_parquet('{data}') WHERE id < 100000", "rows": 100000, "preserve_order": False},
+    {"name": "string_substr", "sql": "SELECT id, substr(payload, 1, 8) AS head FROM read_parquet('{data}') WHERE id < 100000", "rows": 100000, "preserve_order": False},
+    {"name": "left_join", "sql": "SELECT COUNT(*), COUNT(d.grp) FROM read_parquet('{data}') f LEFT JOIN read_parquet('{dim_small}') d ON f.grp = d.grp", "rows": 1},
+    {"name": "semi_join", "sql": "SELECT COUNT(*) FROM read_parquet('{data}') f SEMI JOIN read_parquet('{dim_small}') d ON f.grp = d.grp", "rows": 1},
+    {"name": "anti_join", "sql": "SELECT COUNT(*) FROM read_parquet('{data}') f ANTI JOIN read_parquet('{dim_small}') d ON f.grp = d.grp", "rows": 1},
+    {"name": "count_only", "sql": "SELECT COUNT(*) FROM read_parquet('{data}')", "rows": 1},
+    {"name": "null_aggregate", "sql": "SELECT COUNT(*), COUNT(nullable_value), SUM(nullable_value), AVG(nullable_value), MIN(nullable_value), MAX(nullable_value) FROM read_parquet('{data}')", "rows": 1},
+    {"name": "filter_expr", "sql": "SELECT id, value * 2 + 1 AS doubled FROM read_parquet('{data}') WHERE id < 100000", "rows": 100000, "preserve_order": False},
+    {"name": "topn_varchar", "sql": "SELECT id, payload FROM read_parquet('{data}') ORDER BY payload, id LIMIT 100", "rows": 100},
+    {"name": "csv_scan", "fssql": "SELECT column0, column2 FROM read_csv('{csv}') WHERE column0 >= 999000", "duckdb": "SELECT column0, column2 FROM read_csv('{csv}', header=false) WHERE column0 >= 999000", "rows": 1000, "memory": 256 << 20, "spill": 128 << 20, "preserve_order": False},
+    {"name": "ndjson_scan", "fssql": "SELECT id, value FROM read_ndjson('{ndjson}') WHERE id >= 999000", "duckdb": "SELECT id, value FROM read_json_auto('{ndjson}') WHERE id >= 999000", "rows": 1000, "memory": 256 << 20, "spill": 128 << 20, "preserve_order": False},
+    {"name": "json_array", "sql": "SELECT id, grp, value FROM read_json('{json}') WHERE grp < 50", "rows": 500, "preserve_order": False},
+]
+
 # FUNCTION_CASES 只做一次功能可用性与行数核对，不进入计时统计。
 FUNCTION_CASES = [
     {"name": "distinct", "sql": "SELECT DISTINCT grp FROM read_parquet('{data}') ORDER BY grp", "rows": 1000},
@@ -228,7 +250,7 @@ def measure_duckdb(settings, case, source, sql, tempdir):
         cpu_after = process_cpu_seconds()
         return {
             "engine": "duckdb", "source": source, "case": case["name"],
-            "seconds": seconds, "rows": rows,
+            "seconds": seconds, "rows": rows, "expected_rows": case["rows"],
             "cpu_seconds": (cpu_after - cpu_before) if cpu_before is not None and cpu_after is not None else None,
             "rss_base_bytes": sampler.base or None, "rss_peak_bytes": sampler.peak or None,
             "memory_limit_bytes": case.get("memory", 64 << 20),
@@ -257,6 +279,7 @@ def run_fssql(repo, binary, settings, case, source, root, case_path, out_path):
     record = json.loads(out_path.read_text(encoding="utf-8").splitlines()[0])
     record["engine"] = "fssql"
     record["case"] = case["name"]
+    record["expected_rows"] = case["rows"]
     return record
 
 
@@ -319,16 +342,20 @@ def summarize(records):
             median = statistics.median(times)
             deviations = [abs(value - median) for value in times]
             mad = statistics.median(deviations)
+            expected = samples[0].get("expected_rows")
             row["engines"][engine] = {
                 "n": len(times), "median": median, "mad": mad,
                 "mad_ratio": (mad / median) if median else None,
                 "min": min(times), "max": max(times),
-                "rows": samples[0]["rows"],
+                "rows": samples[0]["rows"], "expected_rows": expected,
+                "rows_match": expected is None or samples[0]["rows"] == expected,
             }
         if "fssql" in row["engines"] and "duckdb" in row["engines"]:
             row["time_ratio"] = row["engines"]["fssql"]["median"] / row["engines"]["duckdb"]["median"]
-            row["valid"] = all(row["engines"][name]["mad_ratio"] is not None and
-                               row["engines"][name]["mad_ratio"] <= 0.10 for name in ("fssql", "duckdb"))
+            row["rows_match"] = all(row["engines"][name]["rows_match"] for name in ("fssql", "duckdb"))
+            row["valid"] = row["rows_match"] and all(
+                row["engines"][name]["mad_ratio"] is not None and
+                row["engines"][name]["mad_ratio"] <= 0.10 for name in ("fssql", "duckdb"))
         summary.append(row)
     return summary
 
@@ -338,15 +365,16 @@ def main():
     parser.add_argument("--samples", type=int, default=7)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--sources", default="local,s3")
-    parser.add_argument("--cases", default="core", choices=["core", "all", "functional"])
+    parser.add_argument("--cases", default="core", choices=["core", "extended", "functional", "all", "full"])
     parser.add_argument("--only", default="", help="comma-separated case names for a smoke run")
     parser.add_argument("--seed", type=int, default=20261104)
     parser.add_argument("--append", action="store_true", help="append to existing samples.jsonl")
     parser.add_argument("--tag", default="", help="output suffix for an independent evidence set")
+    parser.add_argument("--evidence", default="", help="evidence directory relative to repo root")
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[2]
-    evidence = repo / "artifacts/local-validation/2026-11-04/duckdb-compare"
+    evidence = (repo / args.evidence) if args.evidence else repo / "artifacts/local-validation/2026-11-04/duckdb-compare"
     evidence.mkdir(parents=True, exist_ok=True)
     (evidence / "tmp").mkdir(exist_ok=True)
     (evidence / "raw").mkdir(exist_ok=True)
@@ -358,20 +386,27 @@ def main():
     sources = [value for value in args.sources.split(",") if value]
     only = {value for value in args.only.split(",") if value}
     core_cases = [case for case in CORE_CASES if not only or case["name"] in only]
+    extended_cases = [case for case in EXTENDED_CASES if not only or case["name"] in only]
     function_cases = [case for case in FUNCTION_CASES if not only or case["name"] in only]
+    timed_cases = []
+    if args.cases in ("core", "all", "full"):
+        timed_cases.extend(core_cases)
+    if args.cases in ("extended", "full"):
+        timed_cases.extend(extended_cases)
+    timing = args.cases in ("core", "extended", "all", "full")
     rng = random.Random(args.seed)
     binary = build_binary(repo, evidence)
     samples_path = evidence / (("samples-%s.jsonl" % args.tag) if args.tag else "samples.jsonl")
     functional_path = evidence / (("functional-%s.jsonl" % args.tag) if args.tag else "functional.jsonl")
     summary_path = evidence / (("summary-%s.json" % args.tag) if args.tag else "summary.json")
 
-    if args.cases in ("core", "all"):
+    if timing:
         with samples_path.open("a" if args.append else "w", encoding="utf-8", newline="\n") as output:
             for source in sources:
                 paths = source_paths(root, bucket, source)
-                for case in core_cases:
-                    fssql_sql = case["sql"].format(**paths)
-                    duck_sql = duckdb_sql(fssql_sql)
+                for case in timed_cases:
+                    fssql_sql = (case.get("fssql") or case["sql"]).format(**paths)
+                    duck_sql = duckdb_sql((case.get("duckdb") or case["sql"]).format(**paths))
                     for round_index in range(args.warmups + args.samples):
                         measured = round_index >= args.warmups
                         for engine in sample_engines(["fssql", "duckdb"], rng):
@@ -391,7 +426,7 @@ def main():
                                 print("%s %s %s %.3fs" % (source, case["name"], engine,
                                                           record.get("seconds", -1)), flush=True)
 
-    if args.cases in ("functional", "all"):
+    if args.cases in ("functional", "all", "full"):
         with functional_path.open("w", encoding="utf-8", newline="\n") as output:
             for source in sources:
                 paths = source_paths(root, bucket, source)

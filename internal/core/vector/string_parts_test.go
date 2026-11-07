@@ -75,3 +75,58 @@ func TestStringBatchAppendPartsRespectsMemoryLimit(t *testing.T) {
 		t.Fatalf("managed leak=%d", scope.Used())
 	}
 }
+
+// TestStringBatchReserveExactAndOverflow 验证预留容量精确且溢出检查不改动受管占用。
+func TestStringBatchReserveExactAndOverflow(t *testing.T) {
+	manager := memory.NewManager(1024)
+	scope := manager.NewScope()
+	buffers := memory.NewBufferManager(nil)
+	v, err := NewFlat(scope, buffers, types.LogicalType{ID: types.Varchar}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := v.NewStringBatchWriter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Reserve(96); err != nil {
+		t.Fatal(err)
+	}
+	if got := v.heap.buf.Len(); got != 96 {
+		t.Fatalf("heap capacity=%d want=96", got)
+	}
+	values := []string{strings.Repeat("a", 40), strings.Repeat("b", 56)}
+	for row, value := range values {
+		if err := writer.Append(row, []byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writer.Commit()
+	if got := v.heap.buf.Len(); got != 96 {
+		t.Fatalf("heap grew after exact reservation: %d", got)
+	}
+	for row, want := range values {
+		if got, _ := v.String(row); got != want {
+			t.Fatalf("row=%d value=%q want=%q", row, got, want)
+		}
+	}
+	managedBefore := scope.Used()
+	second, err := v.NewStringBatchWriter()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Reserve(-1); err == nil {
+		t.Fatal("negative reservation succeeded")
+	}
+	if err := second.Reserve(int(^uint(0) >> 1)); err == nil {
+		t.Fatal("overflowing reservation succeeded")
+	}
+	if got := scope.Used(); got != managedBefore {
+		t.Fatalf("failed reservation changed managed memory: got=%d want=%d", got, managedBefore)
+	}
+	second.Commit()
+	v.Release()
+	if got := scope.Used(); got != 0 {
+		t.Fatalf("managed leak=%d", got)
+	}
+}
