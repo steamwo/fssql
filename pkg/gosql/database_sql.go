@@ -18,6 +18,7 @@ import (
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/execution/result"
 	"github.com/steamwo/fssql/internal/query"
+	"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/session"
 	"github.com/steamwo/fssql/internal/sql/parser"
 )
@@ -38,13 +39,13 @@ type sqlConnector struct{ db *DB }
 func (c *sqlConnector) Close() error { return c.db.Close() }
 
 func (c *sqlConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	if c == nil || c.db == nil || c.db.closed.Load() {
+	if c == nil || c.db == nil || (c.db.closed.Load()||(c.db.owner!=nil&&c.db.owner.closed.Load())) {
 		return nil, errors.New("gosql: SQL connector is closed")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &sqlConn{db: c.db}, nil
+	return newSQLConnection(c.db)
 }
 func (c *sqlConnector) Driver() driver.Driver { return sqlDriver{db: c.db} }
 
@@ -54,7 +55,7 @@ func (d sqlDriver) Open(string) (driver.Conn, error) {
 	if d.db == nil || d.db.closed.Load() {
 		return nil, errors.New("gosql: SQL driver is closed")
 	}
-	return &sqlConn{db: d.db}, nil
+	return newSQLConnection(d.db)
 }
 
 type sqlConn struct {
@@ -70,7 +71,7 @@ func (c *sqlConn) Close() error {
 	c.mu.Lock()
 	c.closed = true
 	c.mu.Unlock()
-	return nil
+	return c.db.engine.CloseSession()
 }
 func (c *sqlConn) Begin() (driver.Tx, error) {
 	return c.BeginTx(context.Background(), driver.TxOptions{})
@@ -90,7 +91,7 @@ func (c *sqlConn) Ping(ctx context.Context) error {
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
-	if closed || c.db == nil || c.db.closed.Load() {
+	if closed || c.db == nil || (c.db.closed.Load()||(c.db.owner!=nil&&c.db.owner.closed.Load())) {
 		return errors.New("gosql: SQL connection is closed")
 	}
 	return ctx.Err()
@@ -154,7 +155,7 @@ func (c *sqlConn) check() error {
 	c.mu.Lock()
 	closed := c.closed
 	c.mu.Unlock()
-	if closed || c.db == nil || c.db.closed.Load() {
+	if closed || c.db == nil || (c.db.closed.Load()||(c.db.owner!=nil&&c.db.owner.closed.Load())) {
 		return errors.New("gosql: SQL connection is closed")
 	}
 	return nil
@@ -362,9 +363,11 @@ func sqlDriverValue(v *vector.Vector, row int) (driver.Value, error) {
 		return x, nil
 	case types.DateType:
 		days, _ := v.Int32(row)
+		if sign:=semantics.DateInfinity(int64(days));sign!=0{return semantics.InfinityText(sign),nil}
 		return time.Unix(int64(days)*86400, 0).UTC(), nil
 	case types.TimestampType:
 		raw, _ := v.Int64(row)
+		if sign:=semantics.TimestampInfinity(raw);sign!=0{return semantics.InfinityText(sign),nil}
 		switch v.Type.Timestamp.Unit {
 		case types.TimestampNanos:
 			seconds := raw / 1_000_000_000

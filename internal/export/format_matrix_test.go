@@ -17,8 +17,16 @@ func TestFileWriterFactoryFormatCompressionMatrix(t *testing.T) {
 		format      FileFormat
 		compression string
 		// allowed 表示该组合是否属于 Phase 4 已授权能力。
-		allowed bool
+		allowed         bool
+		wantCompression string
 	}{
+		{name: "csv_default", format: FormatCSV, allowed: true, wantCompression: "identity"},
+		{name: "json_default", format: FormatJSON, allowed: true, wantCompression: "identity"},
+		{name: "ndjson_default", format: FormatNDJSON, allowed: true, wantCompression: "identity"},
+		{name: "parquet_default", format: FormatParquet, allowed: true, wantCompression: "snappy"},
+		{name: "parquet_blank", format: FormatParquet, compression: "  ", allowed: true, wantCompression: "snappy"},
+		{name: "parquet_none", format: FormatParquet, compression: "none", allowed: true, wantCompression: "identity"},
+		{name: "parquet_snappy", format: FormatParquet, compression: "snappy", allowed: true},
 		{name: "csv_identity", format: FormatCSV, compression: "identity", allowed: true},
 		{name: "csv_gzip", format: FormatCSV, compression: "gzip", allowed: true},
 		{name: "csv_zstd", format: FormatCSV, compression: "zstd", allowed: true},
@@ -49,7 +57,7 @@ func TestFileWriterFactoryFormatCompressionMatrix(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, err = NewFileWriterFactory(FileWriterConfig{
+			factory, err := NewFileWriterFactory(FileWriterConfig{
 				Schema:      []Column{{Name: "id", Type: types.LogicalType{ID: types.Integer}}},
 				Format:      tc.format,
 				Compression: tc.compression,
@@ -59,6 +67,9 @@ func TestFileWriterFactoryFormatCompressionMatrix(t *testing.T) {
 			}
 			if !tc.allowed && err == nil {
 				t.Fatal("disallowed combination accepted")
+			}
+			if tc.wantCompression != "" && factory != nil && factory.config.Compression != tc.wantCompression {
+				t.Fatalf("compression=%q, want %q", factory.config.Compression, tc.wantCompression)
 			}
 			if driver.opens != 0 || pool.Active() != 0 || scope.Used() != 0 {
 				t.Fatalf("constructor side effect opens=%d active=%d memory=%d", driver.opens, pool.Active(), scope.Used())

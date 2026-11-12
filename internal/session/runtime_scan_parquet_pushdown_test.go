@@ -123,3 +123,37 @@ func TestParquetPushdownAcceptsTemporalLiteralCasts(t *testing.T) {
 		t.Fatal("invalid timestamp text accepted")
 	}
 }
+
+func TestParquetPushdownKeepsTryCastResidual(t *testing.T) {
+	catalog := function.NewQueryCatalog()
+	def, ok := catalog.Lookup("__fssql_try_cast_timestamp")
+	if !ok {
+		t.Fatal("missing TRY_CAST")
+	}
+	literal := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Varchar}, Literal: "not a timestamp"}
+	expr := &binder.BoundExpression{Kind: binder.BoundFunction, FunctionKind: function.Scalar, FunctionID: def.ID, Type: types.LogicalType{ID: types.TimestampType}, Children: []*binder.BoundExpression{literal}}
+	if _, ok := parquetCastChild(expr); ok {
+		t.Fatal("TRY_CAST treated as throwing CAST")
+	}
+	if _, ok := parquetLiteral(expr); ok {
+		t.Fatal("TRY_CAST was folded by CAST pushdown")
+	}
+}
+
+func TestParquetTimestampOffsetLiteralSemantics(t *testing.T) {
+	text := "2024-07-01T00:00:00.123456789+08:30"
+	base := time.Date(2024, 7, 1, 0, 0, 0, 123456789, time.UTC)
+	for _, typ := range []types.LogicalType{types.TimestampNSType(), types.TimestampTZType()} {
+		want := base.UnixNano()
+		if typ.Timestamp.AdjustedToUTC {
+			want = base.Add(-8*time.Hour - 30*time.Minute).UnixMicro()
+		}
+		got, ok := parquetTemporalLiteral(text, typ)
+		if !ok || got != want {
+			t.Fatalf("type=%v got=%d want=%d ok=%v", typ, got, want, ok)
+		}
+	}
+	if _, ok := parquetTemporalLiteral("2263-01-01", types.TimestampNSType()); ok {
+		t.Fatal("overflow accepted for pruning")
+	}
+}

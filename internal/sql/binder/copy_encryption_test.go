@@ -26,6 +26,9 @@ func TestCopyEncryptionBinding(t *testing.T) {
 		if options.Encryption.Algorithm != fmt.Sprintf("AES-%d-GCM", n*8) || !bytes.Equal(options.Encryption.Key(), key) {
 			t.Fatal("raw key was transformed")
 		}
+		if options.Compression != "snappy" {
+			t.Fatalf("encrypted Parquet default compression=%q", options.Compression)
+		}
 		for _, formatted := range []string{fmt.Sprintf("%+v", options), fmt.Sprintf("%#v", options.Encryption), fmt.Sprintf("%+v", stmt)} {
 			if strings.Contains(formatted, encoded) || strings.Contains(formatted, string(key)) {
 				t.Fatal("key exposed in formatting")

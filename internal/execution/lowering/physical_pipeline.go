@@ -116,7 +116,7 @@ func containsPhysicalJoin(plan *planner.PhysicalPlan) bool {
 	if plan == nil {
 		return false
 	}
-	if plan.Kind == planner.PhysicalHashJoin || plan.Kind == planner.PhysicalCrossJoin || plan.Kind == planner.PhysicalUnionAll {
+	if plan.Kind == planner.PhysicalHashJoin || plan.Kind == planner.PhysicalCrossJoin || plan.Kind == planner.PhysicalUnionAll || plan.Kind==planner.PhysicalApply {
 		return true
 	}
 	for _, child := range plan.Children {
@@ -226,6 +226,8 @@ func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan
 	switch plan.Kind {
 	case planner.PhysicalUnionAll:
 		return b.lowerUnion(ctx, plan, sink)
+	case planner.PhysicalApply:
+		return b.buildJoinAware(ctx,plan.Children[0],&tableApplySink{executor:b.Executor,plan:plan,downstream:sink})
 	case planner.PhysicalFilter:
 		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
 		if err != nil {

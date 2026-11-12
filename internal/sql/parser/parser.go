@@ -191,7 +191,6 @@ func (p *Parser) parseTablePrimary() (ast.TableExpr, error) {
 	start := p.peek().Span.Start
 	var out ast.TableExpr
 	lateral:=p.acceptWord("lateral")
-	if lateral&&p.peek().Kind!=lexer.LParen{return nil,p.errorf("LATERAL requires a derived table")}
 	if p.accept(lexer.LParen) {
 		q, ok, err := p.parseSelectStatement(); if err != nil { return nil, err }; if !ok { return nil, p.errorf("derived table requires SELECT") }
 		if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }
@@ -213,7 +212,9 @@ func (p *Parser) parseTablePrimary() (ast.TableExpr, error) {
 			}
 			call.Span = ast.Span{Start: start, End: p.previous().Span.End}; if !expressionHasParameter(call) { if err := foldStaticTableArguments(call); err != nil { return nil, err } }
 			t := &ast.TableFunction{Call: call}; t.Alias = p.parseOptionalAlias(); t.Span = ast.Span{Start: start, End: p.previous().Span.End}; out = t
+			if p.accept(lexer.LParen){if t.Alias==nil{return nil,p.errorf("table column aliases require a relation alias")};alias:=*t.Alias;t.Alias=nil;columns:=[]ast.Identifier{};for{id,err:=p.parseIdentifier();if err!=nil{return nil,err};columns=append(columns,id);if !p.accept(lexer.Comma){break}};if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err};span:=ast.Span{Start:start,End:p.previous().Span.End};out=&ast.DerivedTable{Span:span,Alias:alias,Columns:columns,Lateral:lateral,Query:&ast.SelectStmt{Span:span,Projection:[]ast.SelectItem{{Star:true}},From:t}}}
 		} else {
+			if lateral{return nil,p.errorf("LATERAL requires a query or table function")}
 			t := &ast.TableName{Name: name}; t.Alias = p.parseOptionalAlias(); t.Span = ast.Span{Start: start, End: p.previous().Span.End}; out = t
 		}
 	}
@@ -252,12 +253,26 @@ func (p *Parser) parseExpr(minBP int) (ast.Expr, error) {
 			left = &ast.IsNullExpr{Span: ast.Span{Start: start, End: p.previous().Span.End}, Expr: left, Not: not}; continue
 		}
 		lbp, rbp, op, ok := infixBinding(p.peek().Kind); if !ok || lbp < minBP { return left, nil }; p.pos++
+		if lbp == 30 && (p.peekWord("any") || p.peekWord("all") || p.peekWord("some")) {
+			all:=p.peekWord("all");p.pos++
+			if err:=p.expect(lexer.LParen,"(");err!=nil{return nil,err}
+			query,ok,err:=p.parseSelectStatement();if err!=nil{return nil,err};if !ok{return nil,p.errorf("quantified comparison requires SELECT")}
+			if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err}
+			if all { op=map[string]string{"=":"<>","<>":"=","!=":"=","<":">=","<=":">",">":"<=",">=":"<"}[op] }
+			left=&ast.InSubqueryExpr{Span:ast.Span{Start:left.NodeSpan().Start,End:p.previous().Span.End},Value:left,Query:query,Comparison:op,Not:all};continue
+		}
 		right, err := p.parseExpr(rbp); if err != nil { return nil, err }; span := ast.Span{Start: left.NodeSpan().Start, End: right.NodeSpan().End}
 		if op == "||" { left = scalarCall("__fssql_concat", span, left, right) } else { left = &ast.BinaryExpr{Span: span, Left: left, Op: op, Right: right} }
 	}
 }
 
 func (p *Parser) parsePrefix() (ast.Expr, error) {
+ if p.peek().Kind==lexer.LBracket {
+  start:=p.peek().Span.Start;p.pos++;args:=[]ast.Expr{}
+  if !p.accept(lexer.RBracket){for{arg,err:=p.parseExpr(0);if err!=nil{return nil,err};args=append(args,arg);if !p.accept(lexer.Comma){break}};if err:=p.expect(lexer.RBracket,"]");err!=nil{return nil,err}}
+  return scalarCall("list_value",ast.Span{Start:start,End:p.previous().Span.End},args...),nil
+ }
+
 	t := p.peek()
 	switch t.Kind {
 	case lexer.Parameter:
@@ -278,7 +293,7 @@ func (p *Parser) parsePrefix() (ast.Expr, error) {
 	case lexer.Identifier, lexer.QuotedIdentifier:
 		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text,"exists") { start:=t.Span.Start;p.pos++;if err:=p.expect(lexer.LParen,"(");err!=nil{return nil,err};q,ok,err:=p.parseSelectStatement();if err!=nil{return nil,err};if !ok{return nil,p.errorf("EXISTS requires SELECT")};if err:=p.expect(lexer.RParen,")");err!=nil{return nil,err};return &ast.SubqueryExpr{Span:ast.Span{Start:start,End:p.previous().Span.End},Query:q,Exists:true},nil }
 		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "case") { return p.parseCase() }
-		if t.Kind == lexer.Identifier && strings.EqualFold(t.Text, "cast") { return p.parseCast() }
+		if t.Kind == lexer.Identifier && (strings.EqualFold(t.Text, "cast") || strings.EqualFold(t.Text, "try_cast")) { return p.parseCast() }
 		name, err := p.parseQualifiedName(); if err != nil { return nil, err }
 		if !p.accept(lexer.LParen) { return &ast.NameExpr{Span: name.Span, Name: name}, nil }
 		call := &ast.CallExpr{Function: name}
@@ -346,7 +361,9 @@ func (p *Parser) parseWindowOrderTerms() ([]ast.OrderTerm, error) {
 }
 
 func (p *Parser) parseCast() (ast.Expr, error) {
-	start := p.peek().Span.Start; p.pos++; if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }; value, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.KeywordAs, "AS"); err != nil { return nil, err }; castName, err := p.parseCastType(); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return scalarCall("__fssql_cast_"+castName, ast.Span{Start: start, End: p.previous().Span.End}, value), nil
+	prefix := "__fssql_cast_"
+	if strings.EqualFold(p.peek().Text, "try_cast") { prefix = "__fssql_try_cast_" }
+	start := p.peek().Span.Start; p.pos++; if err := p.expect(lexer.LParen, "("); err != nil { return nil, err }; value, err := p.parseExpr(0); if err != nil { return nil, err }; if err := p.expect(lexer.KeywordAs, "AS"); err != nil { return nil, err }; castName, err := p.parseCastType(); if err != nil { return nil, err }; if err := p.expect(lexer.RParen, ")"); err != nil { return nil, err }; return scalarCall(prefix+castName, ast.Span{Start: start, End: p.previous().Span.End}, value), nil
 }
 
 func (p *Parser) parseCastType() (string, error) {

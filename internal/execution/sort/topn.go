@@ -282,6 +282,7 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 	}
 	firstKey := t.cfg.Keys[0]
 	firstView, fixedFirst := c.Columns[firstKey.Column].BorrowFixedWidth()
+	firstBytes, bytesFirst := c.Columns[firstKey.Column].BorrowBytes()
 	var threshold, firstData []byte
 	var firstValid bool
 	for r := 0; r < c.Cardinality; r++ {
@@ -294,7 +295,7 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 		if len(t.entries) == t.cfg.N {
 			if threshold == nil {
 				threshold = t.entries[0].Bytes()
-				if fixedFirst {
+				if fixedFirst || bytesFirst {
 					var err error
 					firstData, firstValid, err = t.layout.ColumnData(threshold, firstKey.Column)
 					if err != nil {
@@ -304,8 +305,14 @@ func (t *TopN) Consume(ctx context.Context, c *vector.DataChunk) error {
 			}
 			var cmp int
 			var err error
-			if fixedFirst {
-				data, valid := firstView.Value(r)
+			if fixedFirst || bytesFirst {
+				var data []byte
+				var valid bool
+				if fixedFirst {
+					data, valid = firstView.Value(r)
+				} else {
+					data, valid = firstBytes.Value(r)
+				}
 				cmp, err = compareFixedInputKey(t.cfg.InputTypes[firstKey.Column], firstKey, data, valid, firstData, firstValid)
 				if err == nil && cmp == 0 {
 					cmp, err = compareInputRow(t.layout, t.cfg.Keys[1:], c, r, threshold)

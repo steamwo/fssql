@@ -29,9 +29,29 @@ const (
 	TimezoneID
 	RandomID
 	CastID
+	UpperID
+	AbsID
+	RoundID
+	DatePartID
+	RegexpMatchesID
+	RegexpFullMatchID
+	RegexpReplaceID
+	RegexpExtractID
+	RegexpExtractAllID
+	RegexpSplitID
+	RegexpEscapeID
+	StringSplitID
+	ListExtractID
+	ArrayLengthID
+	ListValueID
+	RangeID
+	GenerateSeriesID
+	UnnestID
+	StructExtractID
 )
 const (
 	FirstCastFunctionID ID = 3000
+	FirstTryCastFunctionID ID = 4000
 	FirstDynamicScalarID ID = 5000
 	FirstDynamicTableID ID = 6000
 )
@@ -59,6 +79,7 @@ func NewScalarCatalog() *Catalog {
 	must(Definition{ID:DateTruncID,Name:"date_trunc",Kind:Scalar,MinArgs:2,MaxArgs:2,Bind:bindDateTrunc})
 	must(Definition{ID:TimezoneID,Name:"timezone",Kind:Scalar,MinArgs:2,MaxArgs:2,Bind:bindTimezone})
 	must(Definition{ID:RandomID,Name:"random",Kind:Scalar,MinArgs:0,MaxArgs:0,Bind:func(BindInput)(BindResult,error){return BindResult{ReturnType:types.LogicalType{ID:types.Double}},nil}})
+	registerCompatibilityScalars(c)
 	registerCasts(c);return c
 }
 func bindFixed(result types.LogicalType,args ...types.LogicalType)BindFunc{return func(in BindInput)(BindResult,error){if len(in.Arguments)!=len(args){return BindResult{},fmt.Errorf("expected %d arguments",len(args))};return BindResult{ReturnType:result,Arguments:append([]types.LogicalType(nil),args...)},nil}}
@@ -76,4 +97,3 @@ func bindTimezone(in BindInput)(BindResult,error){if len(in.Arguments)!=2||in.Ar
 func commonType(args []ArgumentType,numericOnly bool)(types.LogicalType,error){var current types.LogicalType;have:=false;for _,arg:=range args{if arg.SQLNull{continue};if !have{current=arg.Type;have=true;continue};if current.Same(arg.Type){continue};if current.IsNumeric()&&arg.Type.IsNumeric(){var err error;current,err=commonNumeric(current,arg.Type);if err!=nil{return types.LogicalType{},err};continue};return types.LogicalType{},fmt.Errorf("incompatible scalar argument types %d and %d",current.ID,arg.Type.ID)};if !have{return types.LogicalType{},fmt.Errorf("cannot infer scalar type from only NULL arguments")};if numericOnly&&!current.IsNumeric(){return types.LogicalType{},fmt.Errorf("numeric function requires numeric input")};return current,nil}
 func commonNumeric(a,b types.LogicalType)(types.LogicalType,error){if a.ID==types.Double||b.ID==types.Double{return types.LogicalType{ID:types.Double},nil};if a.ID==types.Float||b.ID==types.Float{return types.LogicalType{ID:types.Double},nil};if a.ID==types.Decimal||b.ID==types.Decimal{scale:=uint8(0);intDigits:=uint8(1);for _,t:=range []types.LogicalType{a,b}{if t.ID==types.Decimal{if t.Decimal.Scale>scale{scale=t.Decimal.Scale};d:=t.Decimal.Width-t.Decimal.Scale;if d>intDigits{intDigits=d}}else{d:=numericIntegerDigits(t);if d>intDigits{intDigits=d}}};width:=intDigits+scale;if width>38{width=38};return types.NewDecimal(width,scale)};if a.ID==types.HugeInt||b.ID==types.HugeInt{return types.LogicalType{ID:types.HugeInt},nil};if a.Unsigned!=b.Unsigned{return types.LogicalType{},fmt.Errorf("mixed signed/unsigned arithmetic requires explicit CAST")};order:=map[types.LogicalTypeID]int{types.TinyInt:1,types.SmallInt:2,types.Integer:3,types.BigInt:4};id:=a.ID;if order[b.ID]>order[id]{id=b.ID};return types.LogicalType{ID:id,Unsigned:a.Unsigned},nil}
 func numericIntegerDigits(t types.LogicalType)uint8{switch t.ID{case types.TinyInt:return 3;case types.SmallInt:return 5;case types.Integer:return 10;case types.BigInt:return 20;case types.HugeInt:return 38;default:return 1}}
-func registerCasts(c *Catalog){next:=FirstCastFunctionID;register:=func(name string,target types.LogicalType){id:=next;next++;if err:=c.Register(Definition{ID:id,Name:"__fssql_cast_"+name,Kind:Scalar,MinArgs:1,MaxArgs:1,Bind:func(in BindInput)(BindResult,error){if len(in.Arguments)!=1{return BindResult{},fmt.Errorf("CAST expects one argument")};if in.Arguments[0].SQLNull{return BindResult{ReturnType:target,Arguments:[]types.LogicalType{target}},nil};return BindResult{ReturnType:target,Arguments:[]types.LogicalType{in.Arguments[0].Type}},nil}});err!=nil{panic(err)}};register("boolean",types.LogicalType{ID:types.Boolean});register("tinyint",types.LogicalType{ID:types.TinyInt});register("smallint",types.LogicalType{ID:types.SmallInt});register("integer",types.LogicalType{ID:types.Integer});register("bigint",types.LogicalType{ID:types.BigInt});register("utinyint",types.UTinyIntType());register("usmallint",types.USmallIntType());register("uinteger",types.UIntegerType());register("ubigint",types.UBigIntType());register("float",types.LogicalType{ID:types.Float});register("double",types.LogicalType{ID:types.Double});register("varchar",types.LogicalType{ID:types.Varchar});register("blob",types.BlobType());register("date",types.LogicalType{ID:types.DateType});register("timestamp",types.LogicalType{ID:types.TimestampType});register("timestamp_ns",types.TimestampNSType());register("timestamptz",types.TimestampTZType());for width:=uint8(1);width<=38;width++{for scale:=uint8(0);scale<=width;scale++{t,_:=types.NewDecimal(width,scale);register(fmt.Sprintf("decimal_%d_%d",width,scale),t)}};register("hugeint",types.LogicalType{ID:types.HugeInt})}

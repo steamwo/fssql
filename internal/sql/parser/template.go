@@ -88,11 +88,6 @@ func Compile(sql string) (*Template, error) {
 	if p.peek().Kind != lexer.EOF {
 		return nil, p.errorf("unexpected token %q", p.peek().Raw)
 	}
-	if len(result.keys) != 0 {
-		if _, ok := stmt.(*ast.SelectStmt); !ok {
-			return nil, fmt.Errorf("sql parameters are currently supported for SELECT statements only")
-		}
-	}
 	result.statement = stmt
 	return result, nil
 }
@@ -134,7 +129,7 @@ func (t *Template) Bind(values []ast.Expr, names []string) (ast.Statement, error
 	if len(values) == 0 {
 		return t.statement, nil
 	}
-	return bindTemplateSelect(t.statement.(*ast.SelectStmt), ordered)
+	return (&templateBinder{values:ordered}).statement(t.statement)
 }
 
 func expressionHasParameter(expr ast.Expr) bool {

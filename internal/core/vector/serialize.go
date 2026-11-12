@@ -15,10 +15,12 @@ const (
 	serializedFlagAdjustedUTC
 	serializedFlagUnitNanos
 	serializedFlagUnitMillis
+	serializedFlagNullType
 )
 
 func serializedTypeFlags(t types.LogicalType) byte {
 	var flags byte
+	if t.NullType{flags|=serializedFlagNullType}
 	if t.Unsigned {
 		flags |= serializedFlagUnsigned
 	}
@@ -39,6 +41,7 @@ func serializedTypeFlags(t types.LogicalType) byte {
 
 func logicalTypeFromSerialized(id types.LogicalTypeID, flags byte, decimal types.DecimalInfo) (types.LogicalType, error) {
 	t := types.LogicalType{ID: id, Decimal: decimal}
+	if flags&serializedFlagNullType!=0{if id!=types.Integer{return types.LogicalType{},fmt.Errorf("serialized NULL type must use integer storage")};t.NullType=true}
 	if flags&serializedFlagUnsigned != 0 {
 		switch id {
 		case types.TinyInt, types.SmallInt, types.Integer, types.BigInt:

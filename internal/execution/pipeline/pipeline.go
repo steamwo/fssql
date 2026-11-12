@@ -110,6 +110,7 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 						return scheduler.DONE, nil
 					}
 				}
+				if finishing,ok:=p.Sink.(interface{Finished()bool});ok&&finishing.Finished(){return scheduler.DONE,nil}
 				chunk, ok, err := p.Source.Next(ctx)
 				if err != nil {
 					return scheduler.FAILED, err
@@ -193,6 +194,7 @@ const (
 
 func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Observer) error {
 	state := map[*Pipeline]dagState{}
+	handled := map[*Pipeline]bool{}
 	var mu sync.Mutex
 	var visit func(*Pipeline) error
 	visit = func(p *Pipeline) error {
@@ -212,19 +214,15 @@ func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Obse
 		for _, d := range p.Dependencies {
 			var err error
 			if skip {
-				err = AbortUnstarted(d)
+				err = abortUnstarted(d, handled)
 			} else {
 				err = visit(d)
 			}
 			if err != nil {
-				// 当前 Pipeline 尚未运行；若它已经持有 join/runtime 等 ownership，必须在 dependency 错误返回前释放。
-				var abortErr error
-				if p.Abort != nil {
-					abortErr = p.Abort()
-				}
-				return errors.Join(err, abortErr)
+				return err
 			}
 		}
+		handled[p] = true
 		if err := p.Run(ctx, workers, obs); err != nil {
 			return err
 		}
@@ -233,5 +231,10 @@ func RunDAG(ctx context.Context, root *Pipeline, workers int, obs scheduler.Obse
 		mu.Unlock()
 		return nil
 	}
-	return visit(root)
+	if err := visit(root); err != nil {
+		// Includes unvisited siblings, whose blocking/source state was opened
+		// during lowering even though an earlier dependency prevented execution.
+		return errors.Join(err, abortUnstarted(root, handled))
+	}
+	return nil
 }

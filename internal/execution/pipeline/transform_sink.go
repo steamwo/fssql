@@ -15,6 +15,8 @@ type TransformSink struct {
 	Downstream Sink                // Downstream 接收最终 transformed chunk。
 }
 
+func(s *TransformSink)Finished()bool{for _,t:=range s.Transforms{if f,ok:=t.(FinishingTransform);ok&&f.Finished(){return true}};if f,ok:=s.Downstream.(interface{Finished()bool});ok{return f.Finished()};return false}
+
 var _ Sink = (*TransformSink)(nil)
 var _ CloseableSink = (*TransformSink)(nil)
 var _ OwnershipTakingSink = (*TransformSink)(nil)

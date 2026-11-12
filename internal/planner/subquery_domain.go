@@ -119,6 +119,7 @@ func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPl
 		return nil, nil, err
 	}
 	if expr.Op == "IN" {
+		if len(params)==0{params=append(params,domainInt(0))}
 		params = append(params, expr.Children[0])
 	}
 	input, leftKeys := appendSubqueryValues(input, params)
@@ -181,7 +182,8 @@ func (p *QueryPlanner) lowerDomainSubquery(ctx context.Context, input *LogicalPl
 		values = append(values, &binder.BoundExpression{Kind: binder.BoundFunction, Type: value.Type, Nullable: true, FunctionID: function.MinID, FunctionKind: function.Aggregate, Children: []*binder.BoundExpression{value}}, aggregateSubqueryExpr(function.CountID, nil))
 		if expr.Op == "IN" {
 			values = append(values, aggregateSubqueryExpr(function.CountID, value))
-			match := domainCase(domainBinary("=", subqueryColumn(result.Output, keys[len(keys)-1]), value), domainInt(1))
+			op:=expr.Comparison;if op=="" {op="="}
+			match := domainCase(domainBinary(op, subqueryColumn(result.Output, keys[len(keys)-1]), value), domainInt(1))
 			values = append(values, &binder.BoundExpression{Kind: binder.BoundFunction, Type: match.Type, Nullable: true, FunctionID: function.MaxID, FunctionKind: function.Aggregate, Children: []*binder.BoundExpression{match}})
 		}
 	}

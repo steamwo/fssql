@@ -1,0 +1,437 @@
+[
+  {
+    "id": "SET-UNION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l UNION SELECT v FROM r"
+  },
+  {
+    "id": "SET-UNION-DISTINCT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l UNION DISTINCT SELECT v FROM r"
+  },
+  {
+    "id": "SET-UNION-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l UNION ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-INTERSECT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l INTERSECT SELECT v FROM r"
+  },
+  {
+    "id": "SET-INTERSECT-DISTINCT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l INTERSECT DISTINCT SELECT v FROM r"
+  },
+  {
+    "id": "SET-INTERSECT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l INTERSECT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-EXCEPT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l EXCEPT SELECT v FROM r"
+  },
+  {
+    "id": "SET-EXCEPT-DISTINCT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l EXCEPT DISTINCT SELECT v FROM r"
+  },
+  {
+    "id": "SET-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l EXCEPT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-PRECEDENCE",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION SELECT 2 INTERSECT SELECT 2"
+  },
+  {
+    "id": "SET-ASSOCIATIVITY",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION SELECT 2 EXCEPT SELECT 2"
+  },
+  {
+    "id": "SET-GROUPED",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "(SELECT 1 AS v UNION SELECT 2) INTERSECT SELECT 2"
+  },
+  {
+    "id": "SET-RIGHT-GROUPED",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION (SELECT 2 EXCEPT SELECT 2)"
+  },
+  {
+    "id": "SET-BRANCH-LIMIT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION (SELECT 2 LIMIT 0)"
+  },
+  {
+    "id": "SET-LEFT-LIMIT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "(SELECT 1 AS v UNION SELECT 2 ORDER BY v LIMIT 1) UNION SELECT 3"
+  },
+  {
+    "id": "SET-OUTER-LIMIT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "((SELECT 1 AS v UNION SELECT 2 ORDER BY v LIMIT 1)) LIMIT 0"
+  },
+  {
+    "id": "SET-DISTINCT-BARRIER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "(SELECT 1 AS v UNION SELECT 1) UNION ALL SELECT 1"
+  },
+  {
+    "id": "SET-ALL-BARRIER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION ALL SELECT 1 UNION SELECT 1"
+  },
+  {
+    "id": "SET-ROOT-ORDER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT CAST(NULL AS INTEGER) UNION ALL SELECT NULL), r AS (SELECT 1 AS v UNION ALL SELECT 1 UNION ALL SELECT 3 UNION ALL SELECT CAST(NULL AS INTEGER)) SELECT v FROM l UNION SELECT v FROM r ORDER BY v NULLS FIRST LIMIT 3 OFFSET 1",
+    "ordered": true
+  },
+  {
+    "id": "SET-RIGHT-NAME",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 2 AS a UNION SELECT 1 AS b ORDER BY b",
+    "ordered": true
+  },
+  {
+    "id": "SET-MIXED-INTEGER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST('-1' AS BIGINT) AS v UNION SELECT CAST('18446744073709551615' AS UBIGINT)"
+  },
+  {
+    "id": "SET-DECIMAL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST('12345678901234567890.12' AS DECIMAL(38,2)) AS v INTERSECT ALL SELECT CAST('12345678901234567890.12' AS DECIMAL(38,2))"
+  },
+  {
+    "id": "SET-TEMPORAL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST('2026-11-11' AS DATE) AS v UNION SELECT CAST('2026-11-11 00:00:00' AS TIMESTAMP)"
+  },
+  {
+    "id": "SET-MULTI-COLUMN",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST(NULL AS INTEGER) AS a, 'NULL' AS b INTERSECT SELECT CAST(NULL AS INTEGER), 'NULL'"
+  },
+  {
+    "id": "SET-MULTI-MISMATCH",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST(NULL AS INTEGER) AS a, 'NULL' AS b EXCEPT SELECT CAST(NULL AS INTEGER), ''"
+  },
+  {
+    "id": "SET-CTE",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS v UNION SELECT 2), u AS (SELECT v FROM t EXCEPT SELECT 2) SELECT * FROM u"
+  },
+  {
+    "id": "SET-SCALAR",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT (SELECT 1 INTERSECT SELECT 2) AS v"
+  },
+  {
+    "id": "SET-CORRELATED",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3) SELECT v, EXISTS(SELECT t.v INTERSECT SELECT 2) AS found FROM t ORDER BY v",
+    "ordered": true
+  },
+  {
+    "id": "SET-CORRELATED-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS v UNION ALL SELECT 2) SELECT v, (SELECT count(*) FROM (SELECT t.v AS x UNION ALL SELECT t.v INTERSECT ALL SELECT 2) s) AS n FROM t ORDER BY v",
+    "ordered": true
+  },
+  {
+    "id": "SET-EMPTY-UNION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v WHERE FALSE UNION SELECT 2 WHERE FALSE"
+  },
+  {
+    "id": "SET-SHAPE-UNION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION SELECT 2,3",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-EMPTY-INTERSECT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v WHERE FALSE INTERSECT SELECT 2 WHERE FALSE"
+  },
+  {
+    "id": "SET-SHAPE-INTERSECT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v INTERSECT SELECT 2,3",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-EMPTY-EXCEPT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v WHERE FALSE EXCEPT SELECT 2 WHERE FALSE"
+  },
+  {
+    "id": "SET-SHAPE-EXCEPT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v EXCEPT SELECT 2,3",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-EMPTY-INTERSECT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v WHERE FALSE INTERSECT ALL SELECT 2 WHERE FALSE"
+  },
+  {
+    "id": "SET-SHAPE-INTERSECT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v INTERSECT ALL SELECT 2,3",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-EMPTY-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v WHERE FALSE EXCEPT ALL SELECT 2 WHERE FALSE"
+  },
+  {
+    "id": "SET-SHAPE-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v EXCEPT ALL SELECT 2,3",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-FLOAT-UNION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('-0' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('0' AS DOUBLE)) SELECT v FROM l UNION SELECT v FROM r"
+  },
+  {
+    "id": "SET-FLOAT-INTERSECT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('-0' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('0' AS DOUBLE)) SELECT v FROM l INTERSECT SELECT v FROM r"
+  },
+  {
+    "id": "SET-FLOAT-EXCEPT",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('-0' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('0' AS DOUBLE)) SELECT v FROM l EXCEPT SELECT v FROM r"
+  },
+  {
+    "id": "SET-FLOAT-INTERSECT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('-0' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('0' AS DOUBLE)) SELECT v FROM l INTERSECT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-FLOAT-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('-0' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('0' AS DOUBLE)) SELECT v FROM l EXCEPT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-CAST-BARRIER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "(SELECT CAST('9007199254740992' AS HUGEINT) AS v UNION SELECT CAST('9007199254740993' AS HUGEINT)) UNION ALL SELECT CAST('3' AS DOUBLE)",
+    "ordered": false
+  },
+  {
+    "id": "SET-CAST-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "(SELECT CAST('9007199254740992' AS HUGEINT) AS v UNION SELECT CAST('9007199254740993' AS HUGEINT)) EXCEPT ALL SELECT CAST('9007199254740992' AS DOUBLE)",
+    "ordered": false
+  },
+  {
+    "id": "SET-BOOLEAN-NUMERIC",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT TRUE AS v UNION SELECT CAST('1.5' AS DOUBLE)",
+    "ordered": false
+  },
+  {
+    "id": "SET-TEMPORAL-NS",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT CAST('2026-11-11' AS DATE) AS v UNION SELECT CAST('2026-11-11 00:00:00.123456789' AS TIMESTAMP_NS)",
+    "ordered": false
+  },
+  {
+    "id": "SET-CORRELATED-NULL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT CAST(NULL AS INTEGER) AS v UNION ALL SELECT 1) SELECT v, EXISTS(SELECT t.v INTERSECT SELECT CAST(NULL AS INTEGER)) AS found FROM t ORDER BY v NULLS FIRST",
+    "ordered": true
+  },
+  {
+    "id": "SET-ALIAS-CHAIN",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 3 AS a UNION SELECT 2 AS b UNION SELECT 1 AS c ORDER BY b",
+    "ordered": true
+  },
+  {
+    "id": "SET-NAN-PARTITION-INTERSECT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE)) SELECT v FROM l INTERSECT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-NAN-PARTITION-EXCEPT-ALL",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "WITH l AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('NaN' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE) UNION ALL SELECT CAST('1' AS DOUBLE)), r AS (SELECT CAST('NaN' AS DOUBLE) AS v UNION ALL SELECT CAST('1' AS DOUBLE)) SELECT v FROM l EXCEPT ALL SELECT v FROM r"
+  },
+  {
+    "id": "SET-AMBIGUOUS-ORDER",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 3 AS a,1 AS b UNION SELECT 2 AS b,4 AS a ORDER BY a",
+    "ordered": true
+  },
+  {
+    "id": "SET-ORDER-EXPRESSION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION ALL SELECT 2 ORDER BY v+1",
+    "ordered": true
+  },
+  {
+    "id": "SET-DISTINCT-ORDER-EXPRESSION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 3 AS v UNION SELECT 2 ORDER BY v+1",
+    "ordered": true
+  },
+  {
+    "id": "SET-RIGHT-ALIAS-EXPRESSION",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 3 AS a UNION SELECT 2 AS b ORDER BY b+1",
+    "error_category": "binder"
+  },
+  {
+    "id": "SET-DISTINCT-COMPUTED-ORDER-DUPLICATES",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "sql": "SELECT 1 AS v UNION ALL SELECT 1 UNION SELECT 1 ORDER BY v+1",
+    "ordered": true
+  },
+  {
+    "id": "SET-BATCH-COUNTS",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "ordered": true,
+    "sql": "WITH t AS (SELECT id,grp FROM {batch}) SELECT grp,count(*) AS n FROM (SELECT grp FROM t EXCEPT ALL SELECT grp FROM t WHERE id<2048) s GROUP BY grp ORDER BY grp"
+  },
+  {
+    "id": "SET-IMPLICIT-ALIAS-CHAIN",
+    "source": "synthetic",
+    "capability": "set-operations",
+    "priority": "P1",
+    "ordered": true,
+    "sql": "WITH t AS (SELECT 2 AS b) SELECT 3 AS a UNION SELECT b FROM t UNION SELECT 1 AS c ORDER BY b"
+  }
+]

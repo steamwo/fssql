@@ -32,7 +32,7 @@ type ParquetWriteOptions struct {
 	RowGroupRows   int
 	PageRows       int
 	PageBufferSize int
-	// Compression is an internal page codec. Supported values are identity and snappy.
+	// Compression is an internal page codec. It defaults to snappy; identity disables compression.
 	Compression string
 	// Encryption enables encrypted-footer Parquet Modular Encryption when non-nil.
 	Encryption *ParquetEncryptionConfig
@@ -82,7 +82,9 @@ func NewParquetWriter(schema []Column, opts ParquetWriteOptions, scope *memory.S
 		return nil, fmt.Errorf("export: parquet page rows %d exceed row-group rows %d", opts.PageRows, opts.RowGroupRows)
 	}
 	opts.Compression = strings.ToLower(strings.TrimSpace(opts.Compression))
-	if opts.Compression == "" || opts.Compression == "none" {
+	if opts.Compression == "" {
+		opts.Compression = "snappy"
+	} else if opts.Compression == "none" {
 		opts.Compression = "identity"
 	}
 	if opts.Compression != "identity" && opts.Compression != "snappy" {

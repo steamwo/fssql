@@ -44,6 +44,7 @@ type BoundExpression struct {
 }
 
 type Executor struct {
+	TimeZoneName string
 	Scope *memory.Scope
 	Buffers *memory.BufferManager
 	RuntimeConstants map[int]*vector.Vector

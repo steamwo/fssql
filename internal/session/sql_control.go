@@ -89,7 +89,9 @@ func applyCreateView(ctx context.Context, statement *Statement, value *binder.Bo
 		Columns: catalogColumns(value.Columns),
 	}
 	var createErr error
-	if value.Replace {
+	if value.Temporary {
+		if value.Replace {r,ok:=tx.(interface{ReplaceTemporaryView(context.Context,catalog.View)error});if !ok{return fmt.Errorf("session catalog does not support temporary view replacement")};createErr=r.ReplaceTemporaryView(ctx,view)}else{r,ok:=tx.(interface{CreateTemporaryView(context.Context,catalog.View)error});if !ok{return fmt.Errorf("session catalog does not support temporary views")};createErr=r.CreateTemporaryView(ctx,view)}
+	} else if value.Replace {
 		replacer, ok := tx.(interface{ ReplaceView(context.Context, catalog.View) error })
 		if !ok { return fmt.Errorf("session: catalog does not support atomic view replacement") }
 		createErr = replacer.ReplaceView(ctx,view)

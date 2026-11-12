@@ -95,6 +95,7 @@ func (r *PlanningSourceResolver) ResolveRelation(ctx context.Context, name ast.Q
 		if entry.ExternalTable == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid external-table metadata for %s.%s", object.Schema, object.Name)
 		}
+		object=entry.ExternalTable.Name
 		provenance = planningRelationProvenance{kind: planningExternalTable, function: entry.ExternalTable.TableFunction, source: entry.ExternalTable.Source}
 		// Catalog object identity 是 query relation identity 的一部分，避免两个对象指向同一 snapshot 时 sidecar 冲突。
 		resolved.ID = fmt.Sprintf("external:%s.%s:%s", object.Schema, object.Name, resolved.ID)

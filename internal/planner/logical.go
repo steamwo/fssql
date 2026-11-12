@@ -22,6 +22,7 @@ const (
 	LogicalLimit
 	LogicalOneRow // LogicalOneRow 为 SELECT 无 FROM 提供单行零列关系；追加在末尾避免改变既有 kind 数值。
 	LogicalUnionAll
+	LogicalApply
 )
 
 // JoinType 是 planner 层的 SQL join 语义，不包含具体执行算法。
@@ -100,6 +101,8 @@ func (p *LogicalPlan) Validate() error {
 		return fmt.Errorf("logical plan is nil")
 	}
 	switch p.Kind {
+	case LogicalApply:
+		if len(p.Children)!=1||p.Scan==nil||len(p.Projection)==0{return fmt.Errorf("table apply requires input, function and arguments")}
 	case LogicalUnionAll:
 		if len(p.Children) != 2 {
 			return fmt.Errorf("UNION ALL requires two inputs")

@@ -348,7 +348,7 @@ go tool cover -func=.cache/test-coverage.out
 
 ### 9.2 Stable SQL 真实 DuckDB 差分
 
-先准备虚拟环境，按锁定依赖安装，校验版本。当前 Go runner 硬编码调用 `python3`，PATH 中必须提供对应虚拟环境的 `python3`；Windows 上只有 `python` 时不能假定该入口可直接运行，需明确配置兼容入口或在后续 runner 中补解释器配置。
+先准备虚拟环境，按锁定依赖安装，校验版本。Go runner 优先使用 `FSSQL_PYTHON` 指定的解释器，未设置时使用 `python3`；Windows 上可将该变量指向已安装 DuckDB 2.0.0 的虚拟环境解释器。
 
 PowerShell：
 
@@ -364,6 +364,27 @@ FSSQL_REQUIRE_DUCKDB=1 go test -count=1 -v ./test/compat -run '^TestDuckDBDiffer
 ```
 
 当前 `stable.slt` runner 采用扁平文本比较，尚不满足本文完整类型/行边界/纳秒比较规范；必须扩展后才可覆盖全部新类型和函数。已有通过只对当前 corpus 和比较范围有效。
+
+新增能力可使用 `TestDuckDBTypedWorkload` 的严格差分路径：
+
+```powershell
+$env:FSSQL_REQUIRE_DUCKDB = '1'
+$env:FSSQL_PYTHON = 'python'
+$env:FSSQL_DIFF_EVIDENCE = Join-Path $PWD '.cache/typed-diff.jsonl'
+go test -count=1 -v ./test/compat -run '^TestDuckDBTypedWorkload$'
+```
+
+默认语料为 `test/compat/typed_workload.json`，当前均为合成 SQL；`FSSQL_TYPED_WORKLOAD` 可指定另一份语料文件，建议使用绝对路径。每项需要唯一 `id`、`source`、`capability`、`priority` 和自包含 `sql`；`ordered` 表示 SQL 保证结果顺序，`error_category` 表示预期失败类别。默认两侧都应成功。查询中的 `{batch}` 表示已有的等价 4097 行 fixture：fssql 使用 Go 表函数，DuckDB 使用带明确类型的 SQL 输入。此入口仅针对查询，不提供多语句初始化或参数载荷。
+
+严格路径比较列名、完整类型、逐行逐列值与 NULL；无序结果按保留重复行的多重集合比较。DuckDB 在 SQL 内转换精确数值及时间，避免 Python datetime 截断纳秒；浮点使用 17 位规范文本，NaN/Infinity 单独规范化，正负零视为数值相等。错误用例必须命中指定的 parser/binder/conversion/overflow 类别，未知错误不视为兼容。比较器反例测试不依赖 DuckDB；真实引擎不可用时验收会失败。
+
+JSONL 证据包含两侧完整类型与行、语料来源/能力/优先级、参考版本、Go/平台、测试二进制与语料 SHA256、资源配置。控制台输出总数及通过/失败数。它补充原有 corpus，不将合成测试通过率转换为生产 SQL 覆盖率。
+
+`TestDuckDBTypedNumericCasts` 使用同一严格比较器及 `typed_numeric_cast_workload.json`，覆盖 round、TRY_CAST、DECIMAL 返回类型、精确文本转换、转换失败、子表达式错误及 4097 行跨批次。运行两套严格语料可使用 `-run '^TestDuckDBTyped(Workload|NumericCasts)$'`；`FSSQL_TYPED_WORKLOAD` 会覆盖任一入口的默认语料，因此运行仓库基线时应取消该变量。
+
+`TestDuckDBTypedSetOperations` 使用 `typed_set_workload.json` 验证 UNION/INTERSECT/EXCEPT 的 DISTINCT/ALL、NULL/NaN、列类型、优先级、括号、CTE/相关子查询、排序别名与表达式、类型转换和内层修饰符边界，以及 4097 行跨批次分组计数。运行三套严格语料可使用 `-run '^TestDuckDBTyped(Workload|NumericCasts|SetOperations)$'`。公共 API 的 `TestSetOperations*` 另在小内存策略、强制 spill 和 4 worker 下验证执行、预编译复用、错误与中途取消后的回收；DAG 清理回归检查未启动的兄弟分支会释放资源，并避免重复关闭已完成依赖。
+
+`TestDuckDBTypedTemporal` 使用 `typed_temporal_workload.json` 验证时间文本的精度、偏移处理、非法输入、纳秒范围、标量 date_part 的返回类型、ISO 年周、动态部件名、UTC 时区和 4097 行执行。数值语料另覆盖 FLOAT/DOUBLE→DECIMAL 与 HUGEINT→BOOLEAN。运行四套严格语料可使用 `-run '^TestDuckDBTyped(Workload|NumericCasts|SetOperations|Temporal)$'`。`TestTemporalCompatibility*` 验证预编译参数复用、返回类型、失败路径与资源回收；`TestParquetTimestampOffsetLiteralSemantics` 检查时间偏移与溢出在谓词翻译中的一致性。
 
 深度差分入口（窗口、采样、连接、聚合、函数、类型转换、三值逻辑、子查询、跨 4097 行批次，以及 CSV/JSON/NDJSON/Parquet 双向互操作）：
 
@@ -479,3 +500,10 @@ known-limitations.md
 - [ ] 缺陷登记、限制、性能基线变更及有效豁免可追溯。
 
 文档审阅由对应模块维护者负责，新增语义和基线变化需一名非实现者复核。发布结论以当次完整证据为准，不能沿用过期报告或仅引用本规范作为已验证证明。
+
+
+### 集中兼容性回归
+
+`TestDuckDBTypedBulk` / `typed_bulk_workload.json` 集中覆盖 BY NAME、ANY/ALL/SOME、动态 range/generate_series/unnest、正则与嵌套提取、NULL 逻辑类型、数值文本、IANA/BC/无限时间及 CSV 候选/格式。CSV fixture 的内容 SHA256 写入证据；参考与本地使用同一内容。DECIMAL 比较仅规范化省略的整数位零（.1 → 0.1），保留全部有效数字、scale 和类型；VARCHAR 不做此转换。
+
+`TestBulk*` 公共 API 测试覆盖 TEMP 及快照令牌的会话隔离、参数化 DDL/COPY、时区/线程设置、拥有型嵌套值、错误/取消回收。Core 另覆盖嵌套字典复制后释放原数据，以及 SQLNULL 类型序列化。新增范围应与旧四套 typed、stable/deep 和互操作一起运行，测试启动后保持代码和语料固定；任何失败必须修复并重跑受影响范围，最后记录冻结组合结果。

@@ -37,6 +37,13 @@ func CopyValue(src *Vector, srcRow int, dst *Vector, dstRow int) error {
 		return nil
 	}
 	switch src.Type.ID {
+	case types.List:
+		return copyListValue(src,srcRow,dst,dstRow)
+	case types.Struct:
+		base,index:=src.NestedRow(srcRow)
+		if len(base.children)!=len(src.Type.Fields){return errors.New("invalid STRUCT children")}
+		if len(dst.children)==0{children:=make([]*Vector,len(src.Type.Fields));for i,f:=range src.Type.Fields{v,err:=NewFlat(dst.scope,dst.bm,f.Type,dst.count);if err!=nil{for _,c:=range children{if c!=nil{c.Release()}};return err};children[i]=v};dst.SetChildren(children...)}
+		for i,child:=range base.children{if err:=CopyValue(child,index,dst.children[i],dstRow);err!=nil{return err}};dst.validity.SetValid(dstRow,true)
 	case types.Boolean:
 		x, _ := src.Bool(srcRow)
 		dst.SetBool(dstRow, x)
@@ -76,4 +83,12 @@ func CopyValue(src *Vector, srcRow int, dst *Vector, dstRow int) error {
 		return errors.New("copy unsupported vector type")
 	}
 	return nil
+}
+
+func copyListValue(src *Vector,srcRow int,dst *Vector,dstRow int)error{
+	entry,_:=src.ListEntry(srcRow);base,_:=src.NestedRow(srcRow);if src.Type.Child==nil||len(base.children)!=1{return errors.New("invalid LIST child")}
+	need:=dst.listUsed+int(entry.Length);if uint64(need)>uint64(^uint32(0)){return errors.New("LIST child count overflow")}
+	if len(dst.children)==0||dst.children[0].Count()<need{capacity:=32;if len(dst.children)>0{capacity=dst.children[0].Count()*2};if capacity<need{capacity=need};child,err:=NewFlat(dst.scope,dst.bm,*src.Type.Child,capacity);if err!=nil{return err};if len(dst.children)>0{old:=dst.children[0];for i:=0;i<dst.listUsed;i++{if err:=CopyValue(old,i,child,i);err!=nil{child.Release();return err}};old.Release()};dst.SetChildren(child)}
+	for i:=0;i<int(entry.Length);i++{if err:=CopyValue(base.children[0],int(entry.Offset)+i,dst.children[0],dst.listUsed+i);err!=nil{return err}}
+	dst.SetListEntry(dstRow,ListEntry{Offset:uint32(dst.listUsed),Length:entry.Length});dst.listUsed=need;dst.validity.SetValid(dstRow,true);return nil
 }

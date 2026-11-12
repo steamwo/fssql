@@ -1,0 +1,261 @@
+[
+  {
+    "id": "TIMESTAMP-TEXT-TIMESTAMP",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02' AS TIMESTAMP) AS v0, CAST('2024-01-02T03:04:05.123456789123Z' AS TIMESTAMP) AS v1, CAST('2024-01-02 03:04:05+08' AS TIMESTAMP) AS v2, CAST('2024-01-02 03:04:05-0530' AS TIMESTAMP) AS v3, CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMP) AS v4, CAST('2024-01-02 03:04:05+08:30:15' AS TIMESTAMP) AS v5, CAST('2024-01-02 24:00:00' AS TIMESTAMP) AS v6, CAST('2024-01-02T03:04Z' AS TIMESTAMP) AS v7, CAST('1969-12-31T23:59:59.999999999Z' AS TIMESTAMP) AS v8"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-BAD-TIMESTAMP",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('2024-02-30' AS TIMESTAMP) AS v0, TRY_CAST('bad' AS TIMESTAMP) AS v1, TRY_CAST('2024-01-02t03:04:05z' AS TIMESTAMP) AS v2, TRY_CAST('2024-01-02 24:00:00.0001' AS TIMESTAMP) AS v3, TRY_CAST('2024-01-02 03:04:05+080030' AS TIMESTAMP) AS v4, TRY_CAST('2024-01-02 03:04:05+08:3000' AS TIMESTAMP) AS v5"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-TIMESTAMP_NS",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02' AS TIMESTAMP_NS) AS v0, CAST('2024-01-02T03:04:05.123456789123Z' AS TIMESTAMP_NS) AS v1, CAST('2024-01-02 03:04:05+08' AS TIMESTAMP_NS) AS v2, CAST('2024-01-02 03:04:05-0530' AS TIMESTAMP_NS) AS v3, CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMP_NS) AS v4, CAST('2024-01-02 03:04:05+08:30:15' AS TIMESTAMP_NS) AS v5, CAST('2024-01-02 24:00:00' AS TIMESTAMP_NS) AS v6, CAST('2024-01-02T03:04Z' AS TIMESTAMP_NS) AS v7, CAST('1969-12-31T23:59:59.999999999Z' AS TIMESTAMP_NS) AS v8"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-BAD-TIMESTAMP_NS",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('2024-02-30' AS TIMESTAMP_NS) AS v0, TRY_CAST('bad' AS TIMESTAMP_NS) AS v1, TRY_CAST('2024-01-02t03:04:05z' AS TIMESTAMP_NS) AS v2, TRY_CAST('2024-01-02 24:00:00.0001' AS TIMESTAMP_NS) AS v3, TRY_CAST('2024-01-02 03:04:05+080030' AS TIMESTAMP_NS) AS v4, TRY_CAST('2024-01-02 03:04:05+08:3000' AS TIMESTAMP_NS) AS v5"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-TIMESTAMPTZ",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02' AS TIMESTAMPTZ) AS v0, CAST('2024-01-02T03:04:05.123456789123Z' AS TIMESTAMPTZ) AS v1, CAST('2024-01-02 03:04:05+08' AS TIMESTAMPTZ) AS v2, CAST('2024-01-02 03:04:05-0530' AS TIMESTAMPTZ) AS v3, CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMPTZ) AS v4, CAST('2024-01-02 03:04:05+08:30:15' AS TIMESTAMPTZ) AS v5, CAST('2024-01-02 24:00:00' AS TIMESTAMPTZ) AS v6, CAST('2024-01-02T03:04Z' AS TIMESTAMPTZ) AS v7, CAST('1969-12-31T23:59:59.999999999Z' AS TIMESTAMPTZ) AS v8"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-BAD-TIMESTAMPTZ",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('2024-02-30' AS TIMESTAMPTZ) AS v0, TRY_CAST('bad' AS TIMESTAMPTZ) AS v1, TRY_CAST('2024-01-02t03:04:05z' AS TIMESTAMPTZ) AS v2, TRY_CAST('2024-01-02 24:00:00.0001' AS TIMESTAMPTZ) AS v3, TRY_CAST('2024-01-02 03:04:05+080030' AS TIMESTAMPTZ) AS v4, TRY_CAST('2024-01-02 03:04:05+08:3000' AS TIMESTAMPTZ) AS v5"
+  },
+  {
+    "id": "TIMESTAMP-NS-LOWER-BOUND",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('1677-09-21 00:12:43.145224192' AS TIMESTAMP_NS) AS lo, TRY_CAST('1677-09-21 00:12:43.145224193' AS TIMESTAMP_NS) AS sentinel, CAST('1677-09-21 00:12:43.145224194' AS TIMESTAMP_NS) AS next"
+  },
+  {
+    "id": "TIMESTAMP-TEXT-MIXED",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS id, '2024-01-02T03:04:05+08' AS v UNION ALL SELECT 2, 'bad' UNION ALL SELECT 3, NULL UNION ALL SELECT 4, '1969-12-31T23:59:59.999999999Z') SELECT id, TRY_CAST(v AS TIMESTAMP_NS) AS n, TRY_CAST(v AS TIMESTAMPTZ) AS z FROM t ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "DATE-PART-DATE-0",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v0, date_part('month',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v1, date_part('day',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v2, date_part('decade',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v3, date_part('century',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v4, date_part('millennium',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v5, date_part('quarter',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v6, date_part('era',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v7"
+  },
+  {
+    "id": "DATE-PART-DATE-1",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('hour',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v0, date_part('minute',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v1, date_part('second',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v2, date_part('microsecond',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v3, date_part('millisecond',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v4"
+  },
+  {
+    "id": "DATE-PART-DATE-2",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('dayofweek',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v0, date_part('isodow',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v1, date_part('dayofyear',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v2, date_part('week',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v3, date_part('isoyear',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v4, date_part('yearweek',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v5"
+  },
+  {
+    "id": "DATE-PART-DATE-3",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('epoch',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v0, date_part('julian',CAST('2021-01-03 11:59:44.123456789' AS DATE)) AS v1"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP-0",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v0, date_part('month',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v1, date_part('day',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v2, date_part('decade',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v3, date_part('century',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v4, date_part('millennium',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v5, date_part('quarter',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v6, date_part('era',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v7"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP-1",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('hour',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v0, date_part('minute',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v1, date_part('second',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v2, date_part('microsecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v3, date_part('millisecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v4"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP-2",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('dayofweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v0, date_part('isodow',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v1, date_part('dayofyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v2, date_part('week',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v3, date_part('isoyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v4, date_part('yearweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v5"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP-3",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('epoch',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v0, date_part('julian',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP)) AS v1"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP_NS-0",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v0, date_part('month',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v1, date_part('day',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v2, date_part('decade',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v3, date_part('century',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v4, date_part('millennium',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v5, date_part('quarter',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v6, date_part('era',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v7"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP_NS-1",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('hour',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v0, date_part('minute',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v1, date_part('second',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v2, date_part('microsecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v3, date_part('millisecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v4"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP_NS-2",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('dayofweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v0, date_part('isodow',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v1, date_part('dayofyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v2, date_part('week',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v3, date_part('isoyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v4, date_part('yearweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v5"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMP_NS-3",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('epoch',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v0, date_part('julian',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMP_NS)) AS v1"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMPTZ-0",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v0, date_part('month',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v1, date_part('day',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v2, date_part('decade',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v3, date_part('century',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v4, date_part('millennium',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v5, date_part('quarter',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v6, date_part('era',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v7"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMPTZ-1",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('hour',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v0, date_part('minute',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v1, date_part('second',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v2, date_part('microsecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v3, date_part('millisecond',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v4"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMPTZ-2",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('dayofweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v0, date_part('isodow',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v1, date_part('dayofyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v2, date_part('week',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v3, date_part('isoyear',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v4, date_part('yearweek',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v5"
+  },
+  {
+    "id": "DATE-PART-TIMESTAMPTZ-3",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('epoch',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v0, date_part('julian',CAST('2021-01-03 11:59:44.123456789' AS TIMESTAMPTZ)) AS v1"
+  },
+  {
+    "id": "DATE-PART-ALIASES",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('YEAR',CAST('2024-02-29' AS DATE)) AS y, date_part('dayofmonth',CAST('2024-02-29' AS DATE)) AS d, date_part('weekofyear',CAST('2024-02-29' AS DATE)) AS w, date_part('millenium',CAST('2024-02-29' AS DATE)) AS m, date_part('useconds',CAST('2024-02-29 12:13:14.123456' AS TIMESTAMP)) AS us"
+  },
+  {
+    "id": "DATE-PART-NULL",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part(NULL,CAST('2024-01-01' AS DATE)) AS p, date_part('year',CAST(NULL AS TIMESTAMP)) AS y, date_part('epoch',CAST(NULL AS TIMESTAMPTZ)) AS e"
+  },
+  {
+    "id": "DATE-PART-DYNAMIC",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS id, 'year' AS p UNION ALL SELECT 2, 'epoch' UNION ALL SELECT 3, 'julian' UNION ALL SELECT 4, NULL) SELECT id, date_part(p,CAST('1969-12-31 23:59:59.123456' AS TIMESTAMP)) AS v FROM t ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "DATE-PART-TZ-UTC",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('hour',CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMPTZ)) AS h, date_part('day',CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMPTZ)) AS d, date_part('timezone',CAST('2024-01-02 03:04:05+08:30' AS TIMESTAMPTZ)) AS z, date_part('timezone_hour',CAST('2024-01-02' AS TIMESTAMP)) AS zh"
+  },
+  {
+    "id": "DATE-PART-NS-NEGATIVE",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('1969-12-31 23:59:59.999999999' AS TIMESTAMP_NS)) AS y, date_part('microsecond',CAST('1969-12-31 23:59:59.999999500' AS TIMESTAMP_NS)) AS u, date_part('epoch',CAST('1969-12-31 23:59:59.999999500' AS TIMESTAMP_NS)) AS e, date_part('julian',CAST('1969-12-31 23:59:59.123456' AS TIMESTAMP)) AS j"
+  },
+  {
+    "id": "DATE-PART-BATCH",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT id, date_part('doy',CAST('2024-02-29' AS DATE)) AS d, date_part('microseconds',CAST(CASE WHEN grp=0 THEN '1969-12-31T23:59:59.999999999Z' ELSE '2024-01-01T00:00:00.123456789Z' END AS TIMESTAMP_NS)) AS u FROM {batch} ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "DATE-TIMESTAMP-TEXT",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02T03:04:05.123456789-05:30' AS DATE) AS d, CAST('2024-01-02 24:00:00' AS DATE) AS midnight, TRY_CAST('2024-01-02 25:00:00' AS DATE) AS bad"
+  },
+  {
+    "id": "TIMESTAMP-CAST-RANGE-ERROR",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2263-01-01' AS TIMESTAMP_NS)",
+    "error_category": "conversion"
+  },
+  {
+    "id": "TIMESTAMP-CAST-TEXT-ERROR",
+    "source": "synthetic",
+    "capability": "timestamp-text",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02 24:00:00.1' AS TIMESTAMPTZ)",
+    "error_category": "conversion"
+  },
+  {
+    "id": "DATE-PART-UNKNOWN-ERROR",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('invalid',CAST('2024-01-02' AS DATE))",
+    "error_category": "conversion"
+  },
+  {
+    "id": "DATE-PART-UNKNOWN-EMPTY",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('invalid',CAST('2024-01-02' AS DATE)) WHERE FALSE",
+    "error_category": "conversion"
+  },
+  {
+    "id": "DATE-PART-NULL-CONSTANT-TYPE",
+    "source": "synthetic",
+    "capability": "date_part",
+    "priority": "P1",
+    "sql": "SELECT date_part('invalid',CAST(NULL AS DATE)) AS d, date_part('year',CAST(NULL AS TIMESTAMP_NS)) AS n, date_part('month',CAST(NULL AS TIMESTAMPTZ)) AS z"
+  }
+]

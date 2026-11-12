@@ -46,6 +46,8 @@ type Scope struct {
 
 // BoundExpression 是 parser AST 与 planner 之间的强类型逻辑表达式 IR。
 type BoundExpression struct {
+	TimeZoneName string
+	Comparison string
 	Distinct     bool
 	Kind         ExpressionKind     // Kind 是 bound node 类别。
 	Span         ast.Span           // Span 保留源 SQL 位置用于诊断。
@@ -370,7 +372,7 @@ func (b *Binder) bindCall(e *ast.CallExpr) (*BoundExpression, error) {
 			return nil, err
 		}
 		children[i] = x
-		args[i] = function.ArgumentType{Type: x.Type, SQLNull: x.SQLNull}
+		args[i] = function.ArgumentType{Type: x.Type, SQLNull: x.SQLNull || x.Type.NullType}
 	}
 	_, r, err := b.Functions.BindCall(name, def.Kind, function.BindInput{Arguments: args, Star: e.Star, Distinct: e.Distinct})
 	if err != nil {
@@ -385,16 +387,31 @@ func (b *Binder) bindCall(e *ast.CallExpr) (*BoundExpression, error) {
 			return nil, b.errorAt(e.Span, err.Error())
 		}
 	}
+	if def.ID == function.RoundID && children[0].Type.ID == types.Decimal {
+		if len(children)==2 && datePartNullConstant(children[1]) { return &BoundExpression{Kind:BoundNull,Type:types.LogicalType{ID:types.Integer,NullType:true},Nullable:true,Span:e.Span},nil }
+		r.ReturnType, err = roundDecimalType(children)
+		if err != nil { return nil, b.errorAt(e.Span, err.Error()) }
+	}
+	if def.ID == function.DatePartID {
+		if children[0].Type.ID==types.List{r.ReturnType,err=datePartStructType(children)}else{r.ReturnType, err = datePartType(children[0],children[1])}
+		if err != nil { return nil, b.errorAt(e.Span, err.Error()) }
+	}
+	if def.ID==function.RegexpExtractID&&len(children)>=3&&children[2].Type.ID==types.List {r.ReturnType,err=regexpStructType(children[2]);if err!=nil{return nil,b.errorAt(e.Span,err.Error())}}
+	if def.ID==function.StructExtractID {r.ReturnType,err=structExtractType(children);if err!=nil{return nil,b.errorAt(e.Span,err.Error())}}
+	if err:=validateConstantRegex(def.ID,children);err!=nil{return nil,b.errorAt(e.Span,err.Error())}
 	distinct := e.Distinct && def.ID != function.MinID && def.ID != function.MaxID
 	depth := 0
 	if def.Kind == function.Aggregate {
 		depth = aggregateArgumentDepth(children)
 	}
-	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: def.ID != function.CountID && def.ID != function.NotDistinctID, FunctionID: def.ID, FunctionKind: def.Kind, Children: children, Distinct: distinct, Depth: depth}, nil
+	nullable:=def.ID != function.CountID && def.ID != function.NotDistinctID
+ if def.ID>=function.FirstCastFunctionID&&def.ID<function.FirstTryCastFunctionID&&len(children)==1{nullable=children[0].Nullable}
+	return &BoundExpression{Kind: BoundFunction, Span: e.Span, Type: r.ReturnType, Nullable: nullable, FunctionID: def.ID, FunctionKind: def.Kind, Children: children, Distinct: distinct, Depth: depth}, nil
 }
 
 // coerceComparable 为比较运算找到共同类型；NULL 可隐式转换到任意目标类型。
 func (b *Binder) coerceComparable(left, right *BoundExpression) (*BoundExpression, *BoundExpression, error) {
+ if left.Type.NullType{copyExpr:=*left;copyExpr.SQLNull=true;left=&copyExpr};if right.Type.NullType{copyExpr:=*right;copyExpr.SQLNull=true;right=&copyExpr}
 	if left.SQLNull && right.SQLNull {
 		t := types.LogicalType{ID: types.Boolean}
 		var err error
@@ -472,7 +489,7 @@ func (b *Binder) coerceNumericPair(left, right *BoundExpression) (*BoundExpressi
 
 // coerce 插入允许的 implicit cast；SQLNULL 可转换到任意目标类型。
 func (b *Binder) coerce(expr *BoundExpression, target types.LogicalType) (*BoundExpression, error) {
-	if expr.SQLNull {
+	if expr.SQLNull || expr.Type.NullType {
 		return &BoundExpression{Kind: BoundNull, Span: expr.Span, Type: target, Nullable: true}, nil
 	}
 	if sameType(expr.Type, target) {

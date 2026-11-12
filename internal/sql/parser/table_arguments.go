@@ -2,6 +2,7 @@ package parser
 
 import (
 	"fmt"
+"encoding/json"
 	"strings"
 
 	"github.com/steamwo/fssql/internal/sql/ast"
@@ -26,9 +27,10 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 	if len(call.Args) == 0 {
 		return fmt.Errorf("%s requires a source", name)
 	}
+ if value,ok:=staticString(call.Args[0]);ok{call.Args[0]=&ast.LiteralExpr{Span:call.Args[0].NodeSpan(),Kind:ast.LiteralString,Value:value}}
 	first, ok := call.Args[0].(*ast.LiteralExpr)
 	if !ok || first.Kind != ast.LiteralString {
-		return fmt.Errorf("%s source must be a string literal before named options", name)
+		return nil // Column-dependent file paths remain a binder error, matching DuckDB.
 	}
 	opts := make(map[string]string, len(call.Args)-1)
 	for _, raw := range call.Args[1:] {
@@ -44,6 +46,7 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 		if _, exists := opts[key]; exists {
 			return fmt.Errorf("read_csv option %s is repeated", key)
 		}
+  if key=="auto_type_candidates" {if list,ok:=bin.Right.(*ast.CallExpr);ok&&len(list.Function.Parts)==1&&list.Function.Parts[0].Name=="list_value"{names:=[]string{};for _,arg:=range list.Args{lit,ok:=unwrapParameter(arg).(*ast.LiteralExpr);if !ok||lit.Kind!=ast.LiteralString{return fmt.Errorf("auto_type_candidates requires constant type names")};names=append(names,lit.Value)};data,_:=json.Marshal(names);opts[key]=string(data);continue}}
 		lit, ok := bin.Right.(*ast.LiteralExpr)
 		if !ok {
 			return fmt.Errorf("read_csv option %s must be a literal", key)

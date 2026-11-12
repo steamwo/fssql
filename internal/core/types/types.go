@@ -62,6 +62,9 @@ type StructField struct {
 	Type LogicalType
 }
 type LogicalType struct {
+	// NullType marks a resolved SQLNULL result. Its physical integer storage is
+	// always invalid; it is distinct from an untyped binder NULL placeholder.
+	NullType bool
 	ID        LogicalTypeID
 	Decimal   DecimalInfo
 	Child     *LogicalType
@@ -128,7 +131,7 @@ func (t LogicalType) IsTimestampTZ() bool {
 	return t.ID == TimestampType && t.Timestamp.AdjustedToUTC
 }
 func (t LogicalType) Same(other LogicalType) bool {
-	if t.ID != other.ID || t.Decimal != other.Decimal || t.Unsigned != other.Unsigned || t.Binary != other.Binary || t.Timestamp != other.Timestamp {
+	if t.NullType != other.NullType || t.ID != other.ID || t.Decimal != other.Decimal || t.Unsigned != other.Unsigned || t.Binary != other.Binary || t.Timestamp != other.Timestamp {
 		return false
 	}
 	if (t.Child == nil) != (other.Child == nil) || len(t.Fields) != len(other.Fields) {

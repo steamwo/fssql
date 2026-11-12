@@ -71,6 +71,11 @@ func TestParquetWriterRowGroupAndPageBoundariesAreIndependent(t *testing.T) {
 		t.Fatalf("row groups=%d, want 2", len(metadata.RowGroups))
 	}
 	for i, group := range metadata.RowGroups {
+		for _, column := range group.Columns {
+			if column.MetaData == nil || column.MetaData.Codec != parquet.CodecSnappy {
+				t.Fatalf("row group %d: default compression is not Snappy", i)
+			}
+		}
 		if group.Ordinal != nil {
 			t.Fatalf("unencrypted row group %d ordinal=%d, want omitted", i, *group.Ordinal)
 		}

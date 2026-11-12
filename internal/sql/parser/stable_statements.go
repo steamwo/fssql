@@ -9,6 +9,7 @@ import (
 
 // parseStatement 按冻结 grammar 做 ordered choice；Pratt 仍只负责 expression。
 func (p *Parser) parseStatement() (ast.Statement, bool, error) {
+	if p.peekWord("set")||p.peekWord("reset") {return p.parseSetStatement()}
 	if s, ok, err := p.parseSelectStatement(); ok || err != nil {
 		return s, ok, err
 	}
@@ -110,16 +111,15 @@ func (p *Parser) parseCreateExternalTable(start ast.Position) (*ast.CreateExtern
 	if err := p.expect(lexer.LParen, "("); err != nil {
 		return nil, err
 	}
-	t := p.peek()
-	if t.Kind != lexer.String {
-		return nil, p.errorf("external table source must be a string literal")
-	}
-	p.pos++
-	source := &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralString, Value: t.Text}
+
+ var source *ast.LiteralExpr
+ var sourceParameter ast.Expr
+ if p.peek().Kind==lexer.Parameter {var err error;sourceParameter,err=p.parsePrefix();if err!=nil{return nil,err}}else{t:=p.peek();if t.Kind!=lexer.String{return nil,p.errorf("external table source must be VARCHAR")};p.pos++;source=&ast.LiteralExpr{Span:t.Span,Kind:ast.LiteralString,Value:t.Text}}
+
 	if err := p.expect(lexer.RParen, ")"); err != nil {
 		return nil, err
 	}
-	return &ast.CreateExternalTableStmt{Span: ast.Span{Start: start, End: p.previous().Span.End}, Name: name, Function: fn, Source: source}, nil
+	return &ast.CreateExternalTableStmt{Span: ast.Span{Start: start, End: p.previous().Span.End}, Name: name, Function: fn, Source: source,SourceParameter:sourceParameter}, nil
 }
 
 // parseCreateSecret 解析受限 option list；必需/重复/ACL 规则在 Binder 验证。
@@ -161,6 +161,7 @@ func (p *Parser) parseSecretOption() (ast.SecretOption, error) {
 	}
 	key := strings.ToLower(name.Name)
 	o := ast.SecretOption{Name: name, Kind: ast.SecretCredential}
+	if key!="type"&&p.peek().Kind==lexer.Parameter{value,err:=p.parsePrefix();if err!=nil{return ast.SecretOption{},err};o.StringParameter=value;switch key{case "subject":o.Kind=ast.SecretSubject;case "scheme":o.Kind=ast.SecretScheme;case "host":o.Kind=ast.SecretHost};o.Span=ast.Span{Start:start,End:p.previous().Span.End};return o,nil}
 	switch key {
 	case "type":
 		o.Kind = ast.SecretType
@@ -227,12 +228,9 @@ func (p *Parser) parseCopyStatement() (ast.Statement, bool, error) {
 	if !p.acceptWord("to") {
 		return nil, true, p.errorf("COPY supports TO only")
 	}
-	t := p.peek()
-	if t.Kind != lexer.String {
-		return nil, true, p.errorf("COPY destination must be a string literal")
-	}
-	p.pos++
-	s.Destination = &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralString, Value: t.Text}
+
+ if p.peek().Kind==lexer.Parameter {var err error;s.DestinationParameter,err=p.parsePrefix();if err!=nil{return nil,true,err}}else{t:=p.peek();if t.Kind!=lexer.String{return nil,true,p.errorf("COPY destination must be VARCHAR")};p.pos++;s.Destination=&ast.LiteralExpr{Span:t.Span,Kind:ast.LiteralString,Value:t.Text}}
+
 	if p.accept(lexer.LParen) {
 		if p.accept(lexer.RParen) {
 			return nil, true, p.errorf("COPY option list must not be empty")
@@ -289,6 +287,8 @@ func (p *Parser) parseCopyOption() (ast.CopyOption, error) {
 func (p *Parser) parseCopyScalar() (ast.Expr, error) {
 	t := p.peek()
 	switch t.Kind {
+	case lexer.Parameter:
+		return p.parsePrefix()
 	case lexer.Star:
 		p.pos++
 		return &ast.LiteralExpr{Span: t.Span, Kind: ast.LiteralString, Value: "*"}, nil

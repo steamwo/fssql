@@ -95,7 +95,14 @@ func TestStatementBinderCopyInferenceAndStableOptions(t *testing.T) {
 		{"COPY t TO 'out.csv' (HEADER OFF)", CopyCSV, "identity", false, ','},
 		{"COPY t TO 'out.csv' (HEADER 1)", CopyCSV, "identity", true, ','},
 		{"COPY (SELECT a FROM t) TO 'out.json.zst'", CopyJSON, "zstd", true, ','},
-		{"COPY t TO 'out.bin' (FORMAT parquet)", CopyParquet, "identity", true, ','},
+		{"COPY t TO 'out.parquet'", CopyParquet, "snappy", true, ','},
+		{"COPY t TO 'out.bin' (FORMAT parquet)", CopyParquet, "snappy", true, ','},
+		{"COPY t TO 'out.csv' (FORMAT parquet)", CopyParquet, "snappy", true, ','},
+		{"COPY t TO 'out.parquet' (FORMAT csv)", CopyCSV, "identity", true, ','},
+		{"COPY t TO 'out.parquet' (COMPRESSION none)", CopyParquet, "identity", true, ','},
+		{"COPY t TO 'out.parquet' (COMPRESSION identity)", CopyParquet, "identity", true, ','},
+		{"COPY t TO 'out.parquet' (COMPRESSION '')", CopyParquet, "identity", true, ','},
+		{"COPY t TO 'out.parquet' (COMPRESSION snappy)", CopyParquet, "snappy", true, ','},
 		{"COPY t TO 'out.ndjson' (COMPRESSION zstd)", CopyNDJSON, "zstd", true, ','},
 	}
 	for _, tc := range cases {

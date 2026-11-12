@@ -65,8 +65,21 @@ type QualifiedName struct {
 // NodeSpan 返回限定名称的源位置。
 func (n QualifiedName) NodeSpan() Span { return n.Span }
 
+type SetOperation uint8
+
+const (
+	UnionAll SetOperation = iota // Zero preserves existing UNION ALL AST callers.
+	UnionDistinct
+	IntersectDistinct
+	ExceptDistinct
+	IntersectAll
+	ExceptAll
+)
+
 // SelectStmt 表示 v1 Stable SELECT 查询骨架。
 type SelectStmt struct {
+	ByName bool
+	SetOperation SetOperation
 	UnionLeft  *SelectStmt
 	UnionRight *SelectStmt
 	Span       Span         // Span 覆盖完整 SELECT statement。
@@ -298,6 +311,7 @@ type SubqueryExpr struct {
 }
 
 type InSubqueryExpr struct {
+	Comparison string
 	Span  Span
 	Value Expr
 	Query *SelectStmt

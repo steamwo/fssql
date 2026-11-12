@@ -188,7 +188,6 @@ func TestDatabaseSQLParameterValidationAndTransactions(t *testing.T) {
 		{"SELECT ?", []any{sql.Named("a", 1)}}, {"SELECT ?, $1", []any{1}},
 		{"SELECT $0", []any{1}}, {"SELECT $2", []any{1, 2}},
 		{"SELECT ?", []any{time.Date(1000, 1, 1, 0, 0, 0, 0, time.UTC)}},
-		{"CREATE VIEW parameter_view AS SELECT ?", []any{1}},
 	}
 	for _, tc := range cases {
 		var value any

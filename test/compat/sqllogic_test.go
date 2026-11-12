@@ -176,6 +176,7 @@ func TestStableSQLLogicCorpus(t *testing.T) {
 
 type duckDBRequest struct {
 	Queries []string `json:"queries"`
+	Typed bool `json:"typed,omitempty"`
 	// Threads 非零时固定参考引擎线程数，供采样等顺序敏感用例使用。
 	Threads int `json:"threads,omitempty"`
 }

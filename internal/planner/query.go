@@ -120,6 +120,8 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		return nil, err
 	}
 	switch relation.Kind {
+	case binder.RelationApply:
+		return &LogicalPlan{Kind:LogicalApply,Children:[]*LogicalPlan{{Kind:LogicalOneRow}},Output:relationColumnsToPlanner(relation.Columns),Projection:relation.Projection,Scan:&ScanSpec{Function:relation.Source}},nil
 	case binder.RelationProject:
 		if len(relation.Children) != 1 {
 			return nil, fmt.Errorf("query planner: projected relation requires one input")
@@ -131,6 +133,11 @@ func (p *QueryPlanner) planRelation(ctx context.Context, relation *binder.BoundR
 		return &LogicalPlan{Kind: LogicalProject, Children: []*LogicalPlan{child}, Output: relationColumnsToPlanner(relation.Columns), Projection: relation.Projection}, nil
 	case binder.RelationUnion:
 		return p.planUnionRelation(ctx, relation)
+	case binder.RelationSetOperation:
+		if len(relation.Children)!=2 { return nil,fmt.Errorf("set operation requires two inputs") }
+		left,err:=p.planRelation(ctx,relation.Children[0]);if err!=nil{return nil,err}
+		right,err:=p.planRelation(ctx,relation.Children[1]);if err!=nil{return nil,err}
+		return planSetOperation(relation.SetOperation,left,right)
 	case binder.RelationSample:
 		if len(relation.Children) != 1 {
 			return nil, fmt.Errorf("query planner: sample requires one input")

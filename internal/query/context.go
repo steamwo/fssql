@@ -12,6 +12,7 @@ import (
 )
 
 type Context struct {
+	SessionID string // Frozen by the statement engine before source binding.
 	ctx    context.Context
 	cancel context.CancelFunc
 	Memory *memory.Scope

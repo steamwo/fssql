@@ -67,7 +67,7 @@ go run ./examples/quickstart
 
 SELECT 参数支持 `?`、`$1` 或 `$name`，预编译语句缓存解析结果；每次执行重新绑定参数并取得语句快照。事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回。LIST/STRUCT 公开类型元数据，但当前 `Chunk` 没有读取嵌套元素值的方法。
 
-SQL 已实现非递归 CTE、集合谓词、嵌套标量子查询、参数域去相关，以及显式/隐式 LATERAL 派生表关联。具体支持范围、拒绝边界和验证入口见[能力文档](docs/architecture/feature-contract.md)，不代表完整 DuckDB SQL 兼容或全部性能验收完成。
+SQL 已实现非递归 CTE、集合谓词、按位置的 UNION/INTERSECT/EXCEPT（含 ALL）、嵌套标量子查询、参数域去相关，以及显式/隐式 LATERAL 派生表关联。具体支持范围、拒绝边界和验证入口见[公共 API 文档](docs/public-api.md)，不代表完整 DuckDB SQL 兼容或全部性能验收完成。
 
 ## 文档与开发
 
@@ -79,6 +79,7 @@ SQL 已实现非递归 CTE、集合谓词、嵌套标量子查询、参数域去
 - [2026-11-07 与 DuckDB 2.0.0 的全方位性能与能力对比](docs/validation/2026-11-07-full-duckdb-comparison/report.md)：262/262 差分用例一致；28 个计时场景（本地与 MinIO）共 812 条正式样本，总体 `time_ratio` 中位 3.86，核心场景仍未达到 ≤2 目标
 - [引擎优化与改进计划及诊断证据](docs/optimization-review-2026-11-06.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
+- [DuckDB 兼容性完善方案与实施进度](docs/duckdb-compatibility-roadmap.md)
 
 仓库按 `pkg/gosql`（公共入口）、`internal`（引擎实现）、`cmd`（命令行工具）、`test`（跨模块测试）和 `examples`（示例）组织。外部项目应通过公共包访问引擎。
 

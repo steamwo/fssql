@@ -16,6 +16,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/function"
+	"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
@@ -28,6 +29,7 @@ const (
 // ScalarValue is the internal, lossless scalar boundary used by registered
 // Go UDFs. Variable-width payloads are copied at the public adapter boundary.
 type ScalarValue struct {
+	TimeZoneName string
 	Type    types.LogicalType
 	Valid   bool
 	Bool    bool
@@ -53,19 +55,22 @@ func (e *Executor) executeScalarFunction(expr *binder.BoundExpression, chunk *ve
 	if expr.FunctionID == function.DistinctValueID { return e.executeDistinctValue(expr,chunk) }
 	if expr.FunctionID == function.CaseWhenID { return e.executeCaseWhen(expr, chunk) }
 	if expr.FunctionID == function.CoalesceID { return e.executeCoalesce(expr, chunk) }
-	if expr.FunctionID >= function.FirstCastFunctionID && expr.FunctionID < function.FirstDynamicScalarID { return e.executeCastFunction(expr, chunk) }
+	if expr.FunctionID >= function.FirstTryCastFunctionID && expr.FunctionID < function.FirstDynamicScalarID { return e.executeTryCast(expr, chunk) }
+	if expr.FunctionID >= function.FirstCastFunctionID && expr.FunctionID < function.FirstTryCastFunctionID { return e.executeCastFunction(expr, chunk) }
 	args := make([]*vector.Vector, 0, len(expr.Children))
 	for _, child := range expr.Children {
 		v, err := e.ExecuteSQL(child, chunk); if err != nil { releaseScalarVectors(args); return nil, err }
 		args = append(args, v)
 	}
 	defer releaseScalarVectors(args)
+	if out,handled,err:=e.executeRegexpBatch(expr,args,chunk.Cardinality);handled{return out,err}
+	if out,handled,err:=e.executeNestedBuiltin(expr,args,chunk.Cardinality);handled{return out,err}
 	if expr.FunctionID == function.RepeatID { return e.executeManagedRepeat(args, chunk.Cardinality) }
 	if out, handled, err := e.executeStringBatch(expr, args, chunk.Cardinality); handled { return out, err }
 	out, err := vector.NewFlat(e.Scope, e.Buffers, expr.Type, chunk.Cardinality); if err != nil { return nil, err }
 	for row:=0; row<chunk.Cardinality; row++ {
 		values:=make([]ScalarValue,len(args)); anyNull:=false
-		for i,arg:=range args { values[i],err=scalarFromVector(arg,row); if err!=nil { out.Release(); return nil,err }; if !values[i].Valid { anyNull=true } }
+		for i,arg:=range args { values[i],err=scalarFromVector(arg,row);values[i].TimeZoneName=e.TimeZoneName; if err!=nil { out.Release(); return nil,err }; if !values[i].Valid { anyNull=true } }
 		var result ScalarValue
 		if runtime,ok:=e.Scalars[expr.FunctionID]; ok {
 			if runtime.Eval==nil { out.Release(); return nil,fmt.Errorf("scalar UDF %d has nil evaluator",expr.FunctionID) }
@@ -143,12 +148,17 @@ func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []Scalar
 	if id!=function.LeastID&&id!=function.GreatestID&&id!=function.NullIfID&&propagate(){return ScalarValue{Type:resultType,Valid:false},nil}
 	out:=ScalarValue{Type:resultType,Valid:true}
 	switch id{
+	case function.RegexpMatchesID,function.RegexpFullMatchID,function.RegexpReplaceID,function.RegexpExtractID,function.RegexpEscapeID:return regexScalar(id,resultType,args)
 	case function.ConcatID:out.Bytes=[]byte(string(args[0].Bytes)+string(args[1].Bytes))
 	case function.LengthID:out.Int64=int64(utf8.RuneCount(args[0].Bytes))
 	case function.SubstrID:out.Bytes=[]byte(substrRunes(string(args[0].Bytes),args[1].Int64,func() *int64{if len(args)<3{return nil};v:=args[2].Int64;return &v}()))
 	case function.StrposID:out.Int64=int64(strposRunes(string(args[0].Bytes),string(args[1].Bytes)))
 	case function.ReplaceID:out.Bytes=[]byte(strings.ReplaceAll(string(args[0].Bytes),string(args[1].Bytes),string(args[2].Bytes)))
 	case function.LowerID:out.Bytes=[]byte(strings.ToLower(string(args[0].Bytes)))
+	case function.UpperID:out.Bytes=[]byte(upperText(string(args[0].Bytes)))
+	case function.AbsID:return absScalar(args[0])
+	case function.RoundID:return roundScalar(resultType,args)
+	case function.DatePartID:return datePartScalar(resultType,string(args[0].Bytes),args[1])
 	case function.HexID:out.Bytes=[]byte(strings.ToUpper(hex.EncodeToString(args[0].Bytes)))
 	case function.FloorID:return floorScalar(resultType,args[0])
 	case function.ModID:return modScalar(resultType,args[0],args[1])
@@ -158,7 +168,7 @@ func evalBuiltinScalar(id function.ID,resultType types.LogicalType,args []Scalar
 	case function.StrftimeID:s,err:=formatTemporal(args[0],string(args[1].Bytes));if err!=nil{return ScalarValue{},err};out.Bytes=[]byte(s)
 	case function.StrptimeID:v,err:=parseTemporal(string(args[0].Bytes),string(args[1].Bytes),resultType);if err!=nil{return ScalarValue{},err};return v,nil
 	case function.DateTruncID:return truncateTemporal(string(args[0].Bytes),args[1],resultType)
-	case function.TimezoneID:if !strings.EqualFold(string(args[0].Bytes),"UTC"){return ScalarValue{},fmt.Errorf("timezone currently supports UTC only")};out.Int64=args[1].Int64
+	case function.TimezoneID:return castScalarInZone(args[1],resultType,string(args[0].Bytes))
 	case function.RandomID:var raw [8]byte;if _,err:=cryptorand.Read(raw[:]);err!=nil{return ScalarValue{},err};out.Float64=float64(binary.LittleEndian.Uint64(raw[:])>>11)/float64(uint64(1)<<53)
 	default:return ScalarValue{},fmt.Errorf("no builtin scalar runtime for function id %d",id)}
 	return out,nil
@@ -177,11 +187,12 @@ func modScalar(t types.LogicalType,a,b ScalarValue)(ScalarValue,error){out:=Scal
 func leastGreatestScalar(greatest bool,t types.LogicalType,args []ScalarValue)(ScalarValue,error){var best ScalarValue;have:=false;for _,a:=range args{if !a.Valid{continue};if !have{best=a;have=true;continue};cmp,err:=compareScalar(a,best);if err!=nil{return ScalarValue{},err};if (greatest&&cmp>0)||(!greatest&&cmp<0){best=a}};if !have{return ScalarValue{Type:t,Valid:false},nil};best.Type=t;return best,nil}
 func compareScalar(a,b ScalarValue)(int,error){t:=a.Type;if !t.Same(b.Type){return 0,fmt.Errorf("scalar compare type mismatch")};if t.IsUnsignedInteger(){if a.Uint64<b.Uint64{return -1,nil};if a.Uint64>b.Uint64{return 1,nil};return 0,nil};switch t.ID{case types.Boolean:if a.Bool==b.Bool{return 0,nil};if !a.Bool{return -1,nil};return 1,nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt,types.DateType,types.TimestampType:if a.Int64<b.Int64{return -1,nil};if a.Int64>b.Int64{return 1,nil};return 0,nil;case types.HugeInt,types.Decimal:return types.CompareInt128(a.Int128,b.Int128),nil;case types.Float,types.Double:if a.Float64<b.Float64{return -1,nil};if a.Float64>b.Float64{return 1,nil};return 0,nil;case types.Varchar:return strings.Compare(string(a.Bytes),string(b.Bytes)),nil};return 0,fmt.Errorf("compare unsupported type %d",t.ID)}
 
-func temporalTime(v ScalarValue)time.Time{if v.Type.ID==types.DateType{return time.Unix(v.Int64*86400,0).UTC()};switch v.Type.Timestamp.Unit{case types.TimestampNanos:return time.Unix(0,v.Int64).UTC();case types.TimestampMillis:return time.UnixMilli(v.Int64).UTC();default:return time.UnixMicro(v.Int64).UTC()}}
-func formatTemporal(v ScalarValue,format string)(string,error){return temporalTime(v).Format(goTimeLayout(format)),nil}
+func temporalTime(v ScalarValue)time.Time{var tm time.Time;if v.Type.ID==types.DateType{return time.Unix(v.Int64*86400,0).UTC()};switch v.Type.Timestamp.Unit{case types.TimestampNanos:tm=time.Unix(0,v.Int64);case types.TimestampMillis:tm=time.UnixMilli(v.Int64);default:tm=time.UnixMicro(v.Int64)};if v.Type.Timestamp.AdjustedToUTC&&v.TimeZoneName!=""{if loc,err:=time.LoadLocation(v.TimeZoneName);err==nil{return tm.In(loc)}};return tm.UTC()}
+
+func formatTemporal(v ScalarValue,format string)(string,error){if v.Type.ID==types.TimestampType&&semantics.TimestampInfinity(v.Int64)!=0{return semantics.InfinityText(semantics.TimestampInfinity(v.Int64)),nil};if v.Type.ID==types.DateType&&semantics.DateInfinity(v.Int64)!=0{return semantics.InfinityText(semantics.DateInfinity(v.Int64)),nil};return temporalTime(v).Format(goTimeLayout(format)),nil}
 func parseTemporal(value,format string,t types.LogicalType)(ScalarValue,error){tm,err:=time.ParseInLocation(goTimeLayout(format),value,time.UTC);if err!=nil{return ScalarValue{},err};out:=ScalarValue{Type:t,Valid:true};switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()};return out,nil}
 func goTimeLayout(f string)string{r:=strings.NewReplacer("%Y","2006","%m","01","%d","02","%H","15","%M","04","%S","05","%f","000000","%g","000","%z","-0700","%%","%");return r.Replace(f)}
-func truncateTemporal(unit string,v ScalarValue,t types.LogicalType)(ScalarValue,error){tm:=temporalTime(v);switch strings.ToLower(unit){case "second":tm=tm.Truncate(time.Second);case "minute":tm=tm.Truncate(time.Minute);case "hour":tm=tm.Truncate(time.Hour);case "day":tm=time.Date(tm.Year(),tm.Month(),tm.Day(),0,0,0,0,time.UTC);case "month":tm=time.Date(tm.Year(),tm.Month(),1,0,0,0,0,time.UTC);case "year":tm=time.Date(tm.Year(),1,1,0,0,0,0,time.UTC);default:return ScalarValue{},fmt.Errorf("unsupported date_trunc unit %q",unit)};out:=ScalarValue{Type:t,Valid:true};if t.ID==types.DateType{out.Int64=tm.Unix()/86400;return out,nil};switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()};return out,nil}
+func truncateTemporal(unit string,v ScalarValue,t types.LogicalType)(ScalarValue,error){if (v.Type.ID==types.TimestampType&&semantics.TimestampInfinity(v.Int64)!=0)||(v.Type.ID==types.DateType&&semantics.DateInfinity(v.Int64)!=0){v.Type=t;return v,nil};tm:=temporalTime(v);switch strings.ToLower(unit){case "second":tm=tm.Truncate(time.Second);case "minute":tm=tm.Truncate(time.Minute);case "hour":tm=tm.Truncate(time.Hour);case "day":tm=time.Date(tm.Year(),tm.Month(),tm.Day(),0,0,0,0,time.UTC);case "month":tm=time.Date(tm.Year(),tm.Month(),1,0,0,0,0,time.UTC);case "year":tm=time.Date(tm.Year(),1,1,0,0,0,0,time.UTC);default:return ScalarValue{},fmt.Errorf("unsupported date_trunc unit %q",unit)};out:=ScalarValue{Type:t,Valid:true};if t.ID==types.DateType{out.Int64=tm.Unix()/86400;return out,nil};switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()};return out,nil}
 
 func (e *Executor) executeCastFunction(expr *binder.BoundExpression,chunk *vector.DataChunk)(*vector.Vector,error){if len(expr.Children)!=1{return nil,fmt.Errorf("CAST requires one argument")};src,err:=e.ExecuteSQL(expr.Children[0],chunk);if err!=nil{return nil,err};defer src.Release();out,err:=vector.NewFlat(e.Scope,e.Buffers,expr.Type,chunk.Cardinality);if err!=nil{return nil,err};for row:=0;row<chunk.Cardinality;row++{v,err:=scalarFromVector(src,row);if err!=nil{out.Release();return nil,err};casted,err:=castScalar(v,expr.Type);if err!=nil{out.Release();return nil,err};if err:=writeScalarValue(out,row,expr.Type,casted);err!=nil{out.Release();return nil,err}};return out,nil}
 func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
@@ -221,7 +232,7 @@ func castScalar(v ScalarValue,target types.LogicalType)(ScalarValue,error){
 	}
 	switch target.ID{
 	case types.Float,types.Double:
-		if v.Type.IsUnsignedInteger(){out.Float64=float64(v.Uint64)}else if castSignedIntegerType(v.Type)||v.Type.ID==types.DateType||v.Type.ID==types.TimestampType{out.Float64=float64(v.Int64)}else if v.Type.ID==types.Float||v.Type.ID==types.Double{out.Float64=v.Float64}else{return ScalarValue{},fmt.Errorf("unsupported CAST %d -> floating point",v.Type.ID)}
+		if v.Type.ID==types.Boolean{if v.Bool{out.Float64=1}}else if v.Type.IsUnsignedInteger(){out.Float64=float64(v.Uint64)}else if castSignedIntegerType(v.Type)||v.Type.ID==types.DateType||v.Type.ID==types.TimestampType{out.Float64=float64(v.Int64)}else if v.Type.ID==types.Float||v.Type.ID==types.Double{out.Float64=v.Float64}else{return ScalarValue{},fmt.Errorf("unsupported CAST %d -> floating point",v.Type.ID)}
 		return out,nil
 	case types.DateType:
 		switch{case v.Type.ID==types.TimestampType:days,err:=timestampToDate(v.Int64,v.Type.Timestamp.Unit);if err!=nil{return ScalarValue{},err};out.Int64=days;case castSignedIntegerType(v.Type):out.Int64=v.Int64;case v.Type.IsUnsignedInteger():if v.Uint64>2147483647{return ScalarValue{},fmt.Errorf("DATE overflow")};out.Int64=int64(v.Uint64);default:return ScalarValue{},fmt.Errorf("unsupported CAST %d -> DATE",v.Type.ID)}
@@ -250,22 +261,28 @@ func castFloatToUnsigned(f float64,id types.LogicalTypeID)(uint64,error){
 func timestampUnitsPerSecond(unit types.TimestampUnit)(int64,error){switch unit{case types.TimestampMillis:return 1000,nil;case types.TimestampMicros:return 1000000,nil;case types.TimestampNanos:return 1000000000,nil;default:return 0,fmt.Errorf("invalid timestamp unit %d",unit)}}
 func checkedMulScale(x,factor int64)(int64,error){if factor<=0{return 0,fmt.Errorf("invalid timestamp scale")};if x>0&&x>math.MaxInt64/factor{return 0,fmt.Errorf("TIMESTAMP overflow")};if x<0&&x<math.MinInt64/factor{return 0,fmt.Errorf("TIMESTAMP overflow")};return x*factor,nil}
 func floorDiv(x,d int64)int64{q:=x/d;r:=x%d;if r!=0&&x<0{q--};return q}
-func convertTimestampUnit(raw int64,from,to types.TimestampUnit)(int64,error){fu,err:=timestampUnitsPerSecond(from);if err!=nil{return 0,err};tu,err:=timestampUnitsPerSecond(to);if err!=nil{return 0,err};if fu==tu{return raw,nil};if tu>fu{return checkedMulScale(raw,tu/fu)};return floorDiv(raw,fu/tu),nil}
-func dateToTimestamp(days int64,unit types.TimestampUnit)(int64,error){u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return checkedMulScale(days,86400*u)}
-func timestampToDate(raw int64,unit types.TimestampUnit)(int64,error){u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return floorDiv(raw,86400*u),nil}
+func convertTimestampUnit(raw int64,from,to types.TimestampUnit)(int64,error){if semantics.TimestampInfinity(raw)!=0{return raw,nil};fu,err:=timestampUnitsPerSecond(from);if err!=nil{return 0,err};tu,err:=timestampUnitsPerSecond(to);if err!=nil{return 0,err};if fu==tu{return raw,nil};if tu>fu{return checkedMulScale(raw,tu/fu)};return floorDiv(raw,fu/tu),nil}
+func dateToTimestamp(days int64,unit types.TimestampUnit)(int64,error){if sign:=semantics.DateInfinity(days);sign!=0{if sign<0{return math.MinInt64+1,nil};return math.MaxInt64,nil};u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return checkedMulScale(days,86400*u)}
+func timestampToDate(raw int64,unit types.TimestampUnit)(int64,error){if sign:=semantics.TimestampInfinity(raw);sign!=0{if sign<0{return math.MinInt32+1,nil};return math.MaxInt32,nil};u,err:=timestampUnitsPerSecond(unit);if err!=nil{return 0,err};return floorDiv(raw,86400*u),nil}
 
 // scalarText 格式化标量值；BLOB 使用可逆的文本转义表示。
-func scalarText(v ScalarValue)(string,error){if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:if v.Type.Binary{return encodeBlobLiteral(v.Bytes),nil};return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:text:=temporalTime(v).Format("2006-01-02 15:04:05.999999999");if v.Type.IsTimestampTZ(){text+="+00"};return text,nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
+func scalarText(v ScalarValue)(string,error){if v.Type.ID==types.Decimal{text:=types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale);if v.Type.Decimal.Width==v.Type.Decimal.Scale{if strings.HasPrefix(text,"0."){text=text[1:]}else if strings.HasPrefix(text,"-0."){text="-"+text[2:]}};return text,nil};
+ if v.Type.ID==types.TimestampType{return semantics.FormatTimestamp(v.Int64,v.Type.Timestamp,v.TimeZoneName)};if v.Type.ID==types.DateType{if sign:=semantics.DateInfinity(v.Int64);sign!=0{return semantics.InfinityText(sign),nil};return semantics.FormatCalendarDate(temporalTime(v)),nil};if v.Type.IsUnsignedInteger(){return strconv.FormatUint(v.Uint64,10),nil};switch v.Type.ID{case types.Boolean:return strconv.FormatBool(v.Bool),nil;case types.TinyInt,types.SmallInt,types.Integer,types.BigInt:return strconv.FormatInt(v.Int64,10),nil;case types.Float,types.Double:return strconv.FormatFloat(v.Float64,'g',-1,64),nil;case types.Decimal:return types.FormatDecimalText(v.Int128,v.Type.Decimal.Scale),nil;case types.Varchar:if v.Type.Binary{return encodeBlobLiteral(v.Bytes),nil};return string(v.Bytes),nil;case types.DateType:return temporalTime(v).Format("2006-01-02"),nil;case types.TimestampType:text:=temporalTime(v).Format("2006-01-02 15:04:05.999999999");if v.Type.IsTimestampTZ(){text+="+00"};return text,nil};return "",fmt.Errorf("cannot format scalar type %d",v.Type.ID)}
 func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
 	out:=ScalarValue{Type:t,Valid:true};text:=strings.TrimSpace(s);var err error
-	if t.IsUnsignedInteger(){bits:=0;switch t.ID{case types.TinyInt:bits=8;case types.SmallInt:bits=16;case types.Integer:bits=32;case types.BigInt:bits=64};out.Uint64,err=strconv.ParseUint(text,10,bits);return out,err}
+	if t.IsUnsignedInteger() || castSignedIntegerID(t.ID) {
+		size,_:=t.FixedSize();bits:=size*8
+		if t.IsUnsignedInteger(){if n,e:=strconv.ParseUint(text,10,bits);e==nil{out.Uint64=n;return out,nil}}else{if n,e:=strconv.ParseInt(text,10,bits);e==nil{out.Int64=n;return out,nil}}
+		n,parseErr:=parseSQLIntegerText(text);if parseErr!=nil{return out,parseErr}
+		if t.IsUnsignedInteger(){if !n.IsUint64()||n.Uint64()>castUnsignedMax(t.ID){return out,fmt.Errorf("CAST integer overflow")};out.Uint64=n.Uint64()}else{if !n.IsInt64()||!castSignedFits(t.ID,n.Int64()){return out,fmt.Errorf("CAST integer overflow")};out.Int64=n.Int64()};return out,nil
+	}
 	switch t.ID{
-	case types.Boolean:out.Bool,err=strconv.ParseBool(strings.ToLower(text))
+	case types.Boolean:switch strings.ToLower(text){case "yes","y":out.Bool=true;case "no","n":out.Bool=false;default:out.Bool,err=strconv.ParseBool(strings.ToLower(text))}
 	case types.TinyInt:out.Int64,err=strconv.ParseInt(text,10,8)
 	case types.SmallInt:out.Int64,err=strconv.ParseInt(text,10,16)
 	case types.Integer:out.Int64,err=strconv.ParseInt(text,10,32)
 	case types.BigInt:out.Int64,err=strconv.ParseInt(text,10,64)
-	case types.Float,types.Double:out.Float64,err=strconv.ParseFloat(text,64)
+	case types.Float,types.Double:bits:=64;if t.ID==types.Float{bits=32};out.Float64,err=strconv.ParseFloat(text,bits);if numErr,ok:=err.(*strconv.NumError);ok&&numErr.Err==strconv.ErrRange{err=nil}
 	case types.Decimal:out.Int128,err=types.ParseDecimalText(s,t.Decimal.Width,t.Decimal.Scale)
 	case types.Varchar:
 		if t.Binary {
@@ -275,8 +292,8 @@ func parseScalarText(s string,t types.LogicalType)(ScalarValue,error){
 		} else {
 			out.Bytes = []byte(s)
 		}
-	case types.DateType:var tm time.Time;tm,err=time.Parse("2006-01-02",text);if err==nil{out.Int64=tm.Unix()/86400}
-	case types.TimestampType:var tm time.Time;tm,err=time.ParseInLocation("2006-01-02 15:04:05.999999999",text,time.UTC);if err==nil{switch t.Timestamp.Unit{case types.TimestampNanos:out.Int64=tm.UnixNano();case types.TimestampMillis:out.Int64=tm.UnixMilli();default:out.Int64=tm.UnixMicro()}}
+	case types.DateType:out.Int64,err=semantics.ParseDateLiteral(text)
+	case types.TimestampType:out.Int64,err=semantics.ParseTimestampText(text,t.Timestamp.Unit,t.Timestamp.AdjustedToUTC)
 	default:err=fmt.Errorf("CAST target type %d unsupported",t.ID)
 	}
 	return out,err

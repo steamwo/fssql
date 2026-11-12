@@ -2,10 +2,12 @@ package csv
 
 import (
 	"fmt"
+	"encoding/json"
 	"strconv"
 	"strings"
 
 	"github.com/steamwo/fssql/internal/core/types"
+"github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/tablefunc"
 )
 
@@ -56,10 +58,15 @@ func ParseTableFunctionSource(token string) (string, SourceBindOptions, error) {
 				return "", SourceBindOptions{}, err
 			}
 			opts.ExplicitSchema = fields
+		case "dateformat","date_format":opts.Inference.DateFormat=value
+		case "timestampformat","timestamp_format":opts.Inference.TimestampFormat=value
+		case "auto_type_candidates":
+			var names []string;if err:=json.Unmarshal([]byte(value),&names);err!=nil{return "",SourceBindOptions{},fmt.Errorf("auto_type_candidates requires a list of type names")};opts.Inference.Candidates=make([]types.LogicalType,0,len(names));for _,name:=range names{if strings.EqualFold(name,"NULL"){continue};if strings.EqualFold(name,"DECIMAL"){name="DECIMAL(18,3)"};typ,err:=parseCSVType(name);if err!=nil{return "",SourceBindOptions{},err};if typ.IsBlob()||typ.ID==types.List||typ.ID==types.Struct{return "",SourceBindOptions{},fmt.Errorf("unsupported CSV candidate %s",name)};opts.Inference.Candidates=append(opts.Inference.Candidates,typ)}
 		default:
 			return "", SourceBindOptions{}, fmt.Errorf("csv: unsupported read_csv option %q", key)
 		}
 	}
+ for _,format:=range []string{opts.Inference.DateFormat,opts.Inference.TimestampFormat}{if format!=""{if _,err:=semantics.TimeFormatLayout(format);err!=nil{return "",SourceBindOptions{},err}}}
 	opts.AutoDetect = &autoDetect
 	if !autoDetect && len(opts.ExplicitSchema) == 0 {
 		return "", SourceBindOptions{}, fmt.Errorf("csv: auto_detect=false requires columns")

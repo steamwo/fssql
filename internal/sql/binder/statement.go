@@ -115,7 +115,7 @@ type BoundCopyOptions struct {
 	Encryption  *BoundCopyEncryption
 	ForceQuote  bool
 	Format      CopyFormat // Format 是最终目标格式。
-	Compression string     // Compression 是 identity/gzip/zstd。
+	Compression string     // Compression 是 identity/gzip/zstd，Parquet 使用 identity/snappy。
 	Header      bool       // Header 仅 CSV 有效；CSV 默认 true 以匹配 DuckDB COPY TO。
 	Delimiter   byte       // Delimiter 仅 CSV 有效；默认逗号。
 	Quote       byte       // Quote 仅 CSV 有效；默认双引号。
@@ -199,6 +199,13 @@ func (b *StatementBinder) bindCreateView(ctx context.Context, stmt *ast.CreateVi
 		return nil, err
 	}
 	querySQL, err := b.sourceSlice(stmt.Query.NodeSpan())
+ if stmt.BoundSQL!=""{
+ source:=*stmt.Query;source.Projection=append([]ast.SelectItem(nil),stmt.Query.Projection...)
+ if source.UnionLeft==nil&&len(source.Projection)==len(q.Projection){for i,projection:=range q.Projection{if !source.Projection[i].Star&&projection.Expression.Kind==BoundNull&&projection.Expression.Type.ID==types.Varchar{source.Projection[i].Expr=&ast.CallExpr{Function:ast.QualifiedName{Parts:[]ast.Identifier{{Name:"__fssql_cast_varchar"}}},Args:[]ast.Expr{source.Projection[i].Expr}}}}}
+ columns:=make([]ast.Identifier,len(q.Output));for i,col:=range q.Output{columns[i]=ast.Identifier{Name:col.Name,Quoted:true}}
+ wrapper:=&ast.SelectStmt{Projection:[]ast.SelectItem{{Star:true}},From:&ast.DerivedTable{Alias:ast.Identifier{Name:"__fssql_view_values"},Columns:columns,Query:&source}}
+ querySQL,err=ast.FormatSelect(wrapper)
+ }
 	if err != nil {
 		return nil, b.errorAt(stmt.Query.NodeSpan(), err.Error())
 	}
@@ -486,6 +493,9 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 	}
 	if out.Compression == "" {
 		out.Compression = "identity"
+		if out.Format == CopyParquet {
+			out.Compression = "snappy"
+		}
 	}
 	if encryptedFormat != (out.Encryption != nil) {
 		return BoundCopyOptions{}, fmt.Errorf("ENCRYPTED_PARQUET requires ENCRYPTION_CONFIG; ENCRYPTION_CONFIG requires FORMAT ENCRYPTED_PARQUET")
@@ -513,7 +523,7 @@ func inferCopyOptions(destination string) BoundCopyOptions {
 		path = u.Path
 	}
 	lower := strings.ToLower(path)
-	compression := "identity"
+	compression := ""
 	for _, suffix := range []struct {
 		ext string
 		cmp string

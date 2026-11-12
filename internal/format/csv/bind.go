@@ -37,7 +37,7 @@ type SourceBinding struct {
 	allowQuotedNulls bool
 }
 func (b SourceBinding) ScanSet() *fileset.ScanSet{return b.scanSet}
-func (b SourceBinding) Schema() InferredSchema{out:=b.schema;out.Fields=append([]types.StructField(nil),b.schema.Fields...);return out}
+func (b SourceBinding) Schema() InferredSchema{out:=b.schema;out.Fields=append([]types.StructField(nil),b.schema.Fields...);out.Formats=append([]string(nil),b.schema.Formats...);return out}
 func (b SourceBinding) InferenceOptions() InferenceOptions{return b.inference}
 func (b SourceBinding) AllowQuotedNulls()bool{return b.allowQuotedNulls}
 func (b SourceBinding) MatchedFiles()int{if b.scanSet==nil{return 0};return b.scanSet.MatchedFiles()}

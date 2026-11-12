@@ -11,36 +11,23 @@ import (
 
 // ParseDateLiteral parses the canonical DATE text used by CAST and returns days
 // since 1970-01-01.
-func ParseDateLiteral(text string) (int64, error) {
-	value, err := time.Parse("2006-01-02", strings.TrimSpace(text))
-	if err != nil {
-		return 0, fmt.Errorf("invalid DATE %q", text)
-	}
-	return value.Unix() / 86400, nil
+func ParseDateLiteral(text string) (int64,error) {
+ if sign,ok:=TemporalInfinity(text);ok{if sign<0{return math.MinInt32+1,nil};return math.MaxInt32,nil}
+ tm,_,_,err:=calendarTimestamp(strings.TrimSpace(text));if err!=nil{return 0,err}
+ // DATE retains the written date even when 24:00:00 normalizes to tomorrow.
+ m:=timestampText.FindStringSubmatch(strings.TrimSpace(text));if m[5]=="24"{tm=tm.Add(-24*time.Hour)}
+ days:=tm.Unix()/86400;if tm.Unix()%86400<0{days--};if days<=math.MinInt32+1||days>=math.MaxInt32{return 0,fmt.Errorf("cannot parse DATE: value exceeds range")};return days,nil
 }
 
-// ParseTimestampLiteral parses the canonical TIMESTAMP text used by CAST and
-// returns the raw value in unit. It intentionally matches parseScalarText.
+// ParseTimestampLiteral parses a TIMESTAMP WITHOUT TIME ZONE literal.
 func ParseTimestampLiteral(text string, unit types.TimestampUnit) (int64, error) {
-	value, err := time.ParseInLocation("2006-01-02 15:04:05.999999999", strings.TrimSpace(text), time.UTC)
-	if err != nil {
-		return 0, fmt.Errorf("invalid TIMESTAMP %q", text)
-	}
-	switch unit {
-	case types.TimestampNanos:
-		return value.UnixNano(), nil
-	case types.TimestampMillis:
-		return value.UnixMilli(), nil
-	case types.TimestampMicros:
-		return value.UnixMicro(), nil
-	default:
-		return 0, fmt.Errorf("invalid timestamp unit %d", unit)
-	}
+	return ParseTimestampText(text, unit, false)
 }
 
 // ConvertTimestampUnit converts a raw whole-second timestamp between engine
 // units, truncating toward negative infinity for sub-second precision loss.
 func ConvertTimestampUnit(raw int64, from, to types.TimestampUnit) (int64, error) {
+ if TimestampInfinity(raw)!=0{return raw,nil}
 	fromUnits, err := timestampUnitsPerSecond(from)
 	if err != nil {
 		return 0, err

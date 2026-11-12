@@ -297,7 +297,7 @@ func TestCommonSQLPreparedPredicatesAndSingleEvaluation(t *testing.T) {
 			t.Fatalf("prepared UNION rows=%d err=%v", count, err)
 		}
 	}
-	for _, sql := range []string{"SELECT 'a' LIKE 'a\\' ESCAPE '\\'", "SELECT 'a' LIKE 'a' ESCAPE 'xx'", "SELECT 1 IN ()", "SELECT 1 UNION SELECT 2", "SELECT sum(DISTINCT 1,2)", "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k) b USING(missing)", "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k) b USING(k,k)"} {
+	for _, sql := range []string{"SELECT 'a' LIKE 'a\\' ESCAPE '\\'", "SELECT 'a' LIKE 'a' ESCAPE 'xx'", "SELECT 1 IN ()", "SELECT 1 INTERSECT BY NAME SELECT 2", "SELECT sum(DISTINCT 1,2)", "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k) b USING(missing)", "SELECT * FROM (SELECT 1 AS k) a JOIN (SELECT 1 AS k) b USING(k,k)"} {
 		var value any
 		if err := db.QueryRowContext(context.Background(), sql).Scan(&value); err == nil {
 			t.Errorf("accepted invalid/unsupported SQL: %s", sql)

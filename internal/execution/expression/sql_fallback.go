@@ -60,7 +60,7 @@ func (e *Executor) executeSQL(expr *binder.BoundExpression, chunk *vector.DataCh
 		for row := 0; row < chunk.Cardinality; row++ {
 			v, err := scalarFromVector(src, row)
 			if err != nil { out.Release(); return nil, err }
-			casted, err := castScalarWithDecimalRescaling(v, expr.Type)
+			casted, err := castScalarInZone(v, expr.Type,e.TimeZoneName)
 			if err != nil { out.Release(); return nil, err }
 			if err := writeScalarValue(out, row, expr.Type, casted); err != nil { out.Release(); return nil, err }
 		}

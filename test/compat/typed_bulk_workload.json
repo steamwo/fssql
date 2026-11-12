@@ -1,0 +1,578 @@
+[
+  {
+    "id": "NAME-ALIGN",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT 1 AS a,2 AS b UNION ALL BY NAME SELECT 3 AS b,4 AS c ORDER BY a NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "NAME-DISTINCT",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT 1 AS a,2 AS b UNION BY NAME SELECT 2 AS b,1 AS a ORDER BY a",
+    "ordered": true
+  },
+  {
+    "id": "NAME-CASE",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT 1 AS A UNION ALL BY NAME SELECT 2 AS a ORDER BY A",
+    "ordered": true
+  },
+  {
+    "id": "NAME-NULL-DATE",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT NULL AS d UNION ALL BY NAME SELECT CAST('2024-01-02' AS DATE) AS d ORDER BY d NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "NAME-MISSING-NULL",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT NULL AS a UNION ALL BY NAME SELECT NULL AS b ORDER BY a NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "NAME-EXACT",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT CAST('18446744073709551615' AS UBIGINT) AS v UNION BY NAME SELECT CAST('-1' AS BIGINT) AS v ORDER BY v",
+    "ordered": true
+  },
+  {
+    "id": "NAME-INNER-LIMIT",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "(SELECT 2 AS a,1 AS b UNION ALL SELECT 1,2 ORDER BY a LIMIT 1) UNION ALL BY NAME (SELECT 3 AS b,4 AS c) ORDER BY a NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "NAME-NESTED",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "WITH x AS (SELECT 1 AS a UNION ALL BY NAME SELECT 2 AS b) SELECT * FROM x UNION ALL BY NAME SELECT 3 AS c ORDER BY a NULLS LAST,b NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "NAME-CORRELATED",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS k UNION ALL SELECT 2) SELECT k,(SELECT count(*) FROM (SELECT t.k AS a UNION BY NAME SELECT t.k AS b) u) AS n FROM t ORDER BY k",
+    "ordered": true
+  },
+  {
+    "id": "NAME-DUPLICATE",
+    "source": "synthetic",
+    "capability": "by-name",
+    "priority": "P1",
+    "sql": "SELECT 1 AS a,2 AS A UNION BY NAME SELECT 3 AS a",
+    "error_category": "binder"
+  },
+  {
+    "id": "QUANT-EQ-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x = ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-EQ-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x = ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-NE-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x <> ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-NE-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x <> ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-LT-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x < ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-LT-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x < ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-LE-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x <= ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-LE-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x <= ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-GT-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x > ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-GT-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x > ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-GE-ANY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x >= ANY(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-GE-ALL",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS x UNION ALL SELECT 3 UNION ALL SELECT NULL) SELECT x,x >= ALL(SELECT 2 AS y UNION ALL SELECT 3 UNION ALL SELECT NULL) AS v FROM t ORDER BY x NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-EMPTY",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "SELECT CAST(NULL AS INTEGER)=ANY(SELECT 1 WHERE FALSE) AS a,CAST(NULL AS INTEGER)=ALL(SELECT 1 WHERE FALSE) AS b,5>ANY(SELECT 2 WHERE FALSE) AS c,5>ALL(SELECT 2 WHERE FALSE) AS d"
+  },
+  {
+    "id": "QUANT-SOME",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "SELECT 3>=SOME(SELECT 2 UNION ALL SELECT 4) AS v"
+  },
+  {
+    "id": "QUANT-STRINGS",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "SELECT 'b'>ANY(SELECT 'a' UNION ALL SELECT 'c') AS a,'b'<>ALL(SELECT 'a' UNION ALL SELECT 'c') AS b"
+  },
+  {
+    "id": "QUANT-NAN",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "SELECT CAST('NaN' AS DOUBLE)=ANY(SELECT CAST('NaN' AS DOUBLE)) AS a,CAST('NaN' AS DOUBLE)>ALL(SELECT CAST('1' AS DOUBLE)) AS b"
+  },
+  {
+    "id": "QUANT-CORRELATED",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS k UNION ALL SELECT 3 UNION ALL SELECT NULL),u AS (SELECT 1 AS k,2 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 3,4) SELECT t.k,t.k<ANY(SELECT v FROM u WHERE u.k=t.k) AS a,t.k<ALL(SELECT v FROM u WHERE u.k=t.k) AS b FROM t ORDER BY t.k NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-AGGREGATE",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS k UNION ALL SELECT 2),u AS (SELECT 1 AS k,3 AS v) SELECT k,k<ANY(SELECT sum(v) FROM u WHERE u.k=t.k) AS a,k<ALL(SELECT sum(v) FROM u WHERE u.k=t.k) AS b FROM t ORDER BY k",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-LIMIT",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS k UNION ALL SELECT 2),u AS (SELECT 1 AS k,3 AS v UNION ALL SELECT 1,4) SELECT k,k<ANY(SELECT v FROM u WHERE u.k=t.k ORDER BY v LIMIT 1) AS a FROM t ORDER BY k",
+    "ordered": true
+  },
+  {
+    "id": "QUANT-COLUMNS",
+    "source": "synthetic",
+    "capability": "quantified",
+    "priority": "P1",
+    "sql": "SELECT 1=ANY(SELECT 1,2)",
+    "error_category": "binder"
+  },
+  {
+    "id": "REGEX-MATCH",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_matches('abc123','[0-9]+') AS a,regexp_full_match('abc123','[a-z]+[0-9]+') AS b,regexp_full_match('xabc','abc') AS c"
+  },
+  {
+    "id": "REGEX-OPTIONS",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_matches('中文AB','ab','i') AS a,regexp_matches('a.b','a.b','l') AS b,regexp_matches('ab','a.b','l') AS c,regexp_matches('a\nb','^b','m') AS d,regexp_full_match('a\nb','a.b','s') AS e"
+  },
+  {
+    "id": "REGEX-EXTRACT",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_extract('a7','(a)([0-9])') AS a,regexp_extract('a7','(a)([0-9])',2) AS b,regexp_extract('ABC','[a-z]+','i') AS c,regexp_extract('x','(a)',1) AS d"
+  },
+  {
+    "id": "REGEX-REPLACE",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_replace('aba','a','X') AS a,regexp_replace('aba','a','X','g') AS b,regexp_replace('ab','(a)(b)','\\2-\\1') AS c"
+  },
+  {
+    "id": "REGEX-ESCAPE",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_escape('a b-c!') AS v"
+  },
+  {
+    "id": "REGEX-NULL",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT regexp_matches(NULL,'x') AS a,regexp_extract(NULL,'x') AS b,regexp_replace('x',NULL,'a') AS c"
+  },
+  {
+    "id": "REGEX-ALL-NULL-CAPTURE",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT array_length(regexp_extract_all('ab','(a)|(b)',1)) AS n,list_extract(regexp_extract_all('ab','(a)|(b)',1),1) AS a,list_extract(regexp_extract_all('ab','(a)|(b)',1),2) AS b"
+  },
+  {
+    "id": "REGEX-SPLIT",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT array_length(regexp_split_to_array('a,,b,',',')) AS n,list_extract(regexp_split_to_array('a,,b,',','),2) AS e,list_extract(regexp_split_to_array('αβ',''),-1) AS u"
+  },
+  {
+    "id": "REGEX-STRUCT",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT struct_extract(regexp_extract('ab','(a)(b)',['x','y']),'y') AS a,struct_extract(regexp_extract('z','(a)(b)',['x','y']),'x') AS b"
+  },
+  {
+    "id": "SPLIT-EMPTY",
+    "source": "synthetic",
+    "capability": "nested",
+    "priority": "P2",
+    "sql": "SELECT array_length(string_split('','')) AS n,list_extract(string_split('',''),1) AS v,array_length(string_split(NULL,',')) AS z"
+  },
+  {
+    "id": "SPLIT-UNICODE",
+    "source": "synthetic",
+    "capability": "nested",
+    "priority": "P2",
+    "sql": "SELECT array_length(string_split('中🙂文','')) AS n,list_extract(string_split('中🙂文',''),2) AS v,list_extract(string_split('a,b',','),0) AS z"
+  },
+  {
+    "id": "REGEX-BATCH",
+    "source": "synthetic",
+    "capability": "regex",
+    "priority": "P1",
+    "sql": "SELECT id,regexp_matches(CAST(id AS VARCHAR),'^[0-9]+$') AS m,regexp_replace(CAST(id AS VARCHAR),'[0-9]','x','g') AS r,list_extract(string_split(CAST(id AS VARCHAR)||',x',','),2) AS s FROM {batch} ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "ROUND-NULL-TYPE",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.25' AS DECIMAL(6,2)),NULL) AS n,round(CAST('1.25' AS DECIMAL(6,2)),abs(1)) AS r"
+  },
+  {
+    "id": "ROUND-NULL-COALESCE",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT coalesce(round(CAST('1.25' AS DECIMAL(6,2)),NULL),CAST('2.00' AS DECIMAL(6,2))) AS n"
+  },
+  {
+    "id": "ROUND-NULL-UNION",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.25' AS DECIMAL(6,2)),NULL) AS n UNION ALL SELECT CAST('2024-01-02' AS DATE) ORDER BY n NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "ROUND-NULL-DISTINCT",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT DISTINCT round(CAST(id AS DECIMAL(8,2)),NULL) AS v FROM {batch}"
+  },
+  {
+    "id": "BOOL-CASTS",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT CAST(TRUE AS FLOAT) AS f,CAST(FALSE AS DOUBLE) AS d,CAST(TRUE AS DECIMAL(8,2)) AS n,TRY_CAST(TRUE AS DECIMAL(1,1)) AS bad"
+  },
+  {
+    "id": "PREFIX-CASTS",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT CAST('0xff' AS UTINYINT) AS x,CAST('0b10_10' AS INTEGER) AS b,TRY_CAST('0xff' AS TINYINT) AS over,TRY_CAST('-0x1' AS BIGINT) AS bad,CAST('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF' AS HUGEINT) AS h"
+  },
+  {
+    "id": "PART-CONSTANT-FOLD",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT date_part(lower('YEAR'),CAST('2024-02-29' AS DATE)) AS y,date_part('ye'||'ar',CAST('2024-02-29' AS DATE)) AS c"
+  },
+  {
+    "id": "PART-DYNAMIC-EXPRESSION",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS id,'YEAR' AS p UNION ALL SELECT 2,'EPOCH') SELECT id,date_part(lower(p),CAST('2024-01-02' AS DATE)) AS v FROM t ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "PART-STRUCT",
+    "source": "synthetic",
+    "capability": "binding",
+    "priority": "P1",
+    "sql": "SELECT struct_extract(date_part(['year','epoch','isoyear'],CAST('2024-01-02' AS DATE)),'year') AS y,struct_extract(date_part(['year','epoch'],CAST('2024-01-02' AS DATE)),'epoch') AS e"
+  },
+  {
+    "id": "TIME-NAMED",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-01-02 03:04:05 America/New_York' AS TIMESTAMPTZ) AS t,CAST(timezone('America/New_York',CAST('2024-01-02 03:04:05' AS TIMESTAMP)) AS VARCHAR) AS s"
+  },
+  {
+    "id": "TIME-DST",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT CAST('2024-11-03 01:30:00 America/New_York' AS TIMESTAMPTZ) AS fall,CAST('2024-03-10 02:30:00 America/New_York' AS TIMESTAMPTZ) AS spring"
+  },
+  {
+    "id": "TIME-BC-WIDE",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT CAST('0001-01-01 (BC)' AS DATE) AS b,CAST('0001-01-01 (BC) 12:13:14.123456' AS TIMESTAMP) AS t,CAST('12000-01-02' AS DATE) AS wide"
+  },
+  {
+    "id": "TIME-INFINITY",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT CAST('infinity' AS TIMESTAMP_NS) AS p,CAST('-infinity' AS TIMESTAMPTZ) AS n,CAST('infinity' AS DATE) AS d,TRY_CAST('-infinity' AS DATE) AS nd"
+  },
+  {
+    "id": "TIME-INFINITY-PARTS",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT date_part('year',CAST('infinity' AS TIMESTAMP)) AS y,date_part('epoch',CAST('infinity' AS TIMESTAMP)) AS e,date_part('julian',CAST('-infinity' AS TIMESTAMP)) AS j,CAST(date_trunc('year',CAST('infinity' AS TIMESTAMP)) AS VARCHAR) AS t"
+  },
+  {
+    "id": "TIME-ZONE-FUNCTION",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT timezone('America/New_York',CAST('2024-01-02 03:04:05' AS TIMESTAMP)) AS t,timezone('America/New_York',CAST('2024-01-02 03:04:05+00' AS TIMESTAMPTZ)) AS n"
+  },
+  {
+    "id": "TIME-INFINITY-UNIT",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('infinity' AS DATE) AS TIMESTAMP_NS) AS p,CAST(CAST('-infinity' AS TIMESTAMP_NS) AS DATE) AS n"
+  },
+  {
+    "id": "RANGE-CONSTANT",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT range FROM range(1+3) ORDER BY range",
+    "ordered": true
+  },
+  {
+    "id": "RANGE-NEGATIVE",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT range FROM range(5,-1,-2) ORDER BY range",
+    "ordered": true
+  },
+  {
+    "id": "SERIES-INCLUSIVE",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT generate_series FROM generate_series(5,-1,-2) ORDER BY generate_series",
+    "ordered": true
+  },
+  {
+    "id": "RANGE-NULL",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT count(*) AS n FROM range(CAST(NULL AS BIGINT))"
+  },
+  {
+    "id": "RANGE-LATERAL",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "WITH t AS (SELECT 2 AS n UNION ALL SELECT 4) SELECT n,r.i FROM t,range(n) AS r(i) ORDER BY n,r.i",
+    "ordered": true
+  },
+  {
+    "id": "RANGE-LEFT-NULL",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "WITH t AS (SELECT 2 AS n UNION ALL SELECT NULL) SELECT n,r.i FROM t LEFT JOIN LATERAL range(n) AS r(i) ON TRUE ORDER BY n NULLS LAST,r.i NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "RANGE-CORRELATED-SCALAR",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "WITH t AS (SELECT 2 AS n UNION ALL SELECT 4) SELECT n,(SELECT count(*) FROM range(t.n)) AS c FROM t ORDER BY n",
+    "ordered": true
+  },
+  {
+    "id": "UNNEST-LATERAL",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "WITH t AS (SELECT 1 AS id,'a,b' AS s UNION ALL SELECT 2,NULL UNION ALL SELECT 3,'x') SELECT id,u.v FROM t LEFT JOIN unnest(string_split(s,',')) AS u(v) ON TRUE ORDER BY id,u.v NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "UNNEST-NULL-ELEMENT",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT u.v FROM unnest(list_value('a',NULL,'b')) AS u(v) ORDER BY u.v NULLS LAST",
+    "ordered": true
+  },
+  {
+    "id": "RANGE-BATCH",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "SELECT count(*) AS n FROM range(4097)"
+  },
+  {
+    "id": "FILE-LATERAL-REJECT",
+    "source": "synthetic",
+    "capability": "dynamic-table",
+    "priority": "P2",
+    "sql": "WITH t AS (SELECT 'missing.csv' AS p) SELECT * FROM t,read_csv(t.p)",
+    "error_category": "binder"
+  },
+  {
+    "id": "CSV-FORMATS",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT d,ts FROM read_csv('{csv_dates}',header=true,dateformat='%d/%m/%Y',timestampformat='%d/%m/%Y %H:%M:%S') ORDER BY d",
+    "ordered": true
+  },
+  {
+    "id": "CSV-AUTO-DATES",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT CAST(d AS VARCHAR) AS d,CAST(ts AS VARCHAR) AS ts FROM read_csv('{csv_dates}',header=true) ORDER BY d",
+    "ordered": true
+  },
+  {
+    "id": "CSV-CANDIDATES",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT n FROM read_csv('{csv_numbers}',header=true,auto_type_candidates=['SMALLINT','INTEGER']) ORDER BY n",
+    "ordered": true
+  },
+  {
+    "id": "CSV-VARCHAR",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT n FROM read_csv('{csv_numbers}',header=true,auto_type_candidates=['VARCHAR']) ORDER BY n",
+    "ordered": true
+  },
+  {
+    "id": "CSV-MIXED",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT d FROM read_csv('{csv_mixed}',header=true) ORDER BY d",
+    "ordered": true
+  },
+  {
+    "id": "CSV-DECIMAL",
+    "source": "synthetic",
+    "capability": "csv",
+    "priority": "P2",
+    "sql": "SELECT n FROM read_csv('{csv_decimal}',header=true,auto_type_candidates=['DECIMAL']) ORDER BY n",
+    "ordered": true
+  },
+  {
+    "id": "BOOL-FRACTIONAL-DECIMAL",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(TRY_CAST(TRUE AS DECIMAL(1,1)) AS DOUBLE) AS v,CAST(CAST(TRUE AS DECIMAL(2,2)) AS VARCHAR) AS s,CAST(CAST(FALSE AS DECIMAL(1,1)) AS VARCHAR) AS z"
+  }
+]

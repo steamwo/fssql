@@ -21,6 +21,7 @@ const (
 	PhysicalLimit
 	PhysicalOneRow // PhysicalOneRow 为 SELECT 无 FROM 提供单行零列 source；追加在末尾保持既有 kind 数值。
 	PhysicalUnionAll
+	PhysicalApply
 )
 
 // CardinalityEstimate 是 physical cost model 使用的 row estimate。
@@ -97,6 +98,8 @@ func (p *PhysicalPlan) validateShape() error {
 		return fmt.Errorf("physical plan is nil")
 	}
 	switch p.Kind {
+	case PhysicalApply:
+		if len(p.Children)!=1||p.Scan==nil||len(p.Projection)==0{return fmt.Errorf("physical table apply requires input, function and arguments")}
 	case PhysicalUnionAll:
 		if len(p.Children) != 2 {
 			return fmt.Errorf("physical UNION ALL requires two inputs")

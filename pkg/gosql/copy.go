@@ -32,7 +32,8 @@ type ParquetEncryptionOptions struct {
 }
 
 // CopyOptions configures DB.CopyTo. Compression is whole-file for text formats,
-// and the internal page codec (identity/snappy) for Parquet.
+// and the internal page codec (identity/snappy) for Parquet. Empty Compression
+// defaults to snappy for Parquet and identity for text formats.
 type CopyOptions struct {
 	Format      CopyFormat
 	Compression string

@@ -34,6 +34,9 @@ func (p *QueryPlanner) planDomainRelation(ctx context.Context, relation *binder.
 	}
 	output := append(relationColumnsToPlanner(relation.Columns), domain.Output...)
 	switch relation.Kind {
+	case binder.RelationApply:
+		args:=make([]*binder.BoundExpression,len(relation.Projection));for i,e:=range relation.Projection{var err error;args[i],err=rewriteDomainExpression(e,func(index int)int{return index},0,slots);if err!=nil{return nil,err}}
+		return &LogicalPlan{Kind:LogicalApply,Children:[]*LogicalPlan{cloneLogical(domain)},Output:output,Projection:args,Scan:&ScanSpec{Function:relation.Source}},nil
 	case binder.RelationCTE:
 		if relation.CTEQuery == nil {
 			return nil, fmt.Errorf("correlated CTE lacks query provenance")
@@ -48,7 +51,7 @@ func (p *QueryPlanner) planDomainRelation(ctx context.Context, relation *binder.
 			input = materializeDomainInput(input, fmt.Sprintf("domain-cte:%p:%p", relation.CTEQuery, domain))
 		}
 		return input, nil
-	case binder.RelationUnion:
+	case binder.RelationUnion, binder.RelationSetOperation:
 		if len(relation.Children) != 2 {
 			return nil, fmt.Errorf("correlated UNION requires two inputs")
 		}
@@ -60,6 +63,7 @@ func (p *QueryPlanner) planDomainRelation(ctx context.Context, relation *binder.
 			}
 			children[i] = input
 		}
+		if relation.Kind==binder.RelationSetOperation { return planSetOperation(relation.SetOperation,children[0],children[1]) }
 		return &LogicalPlan{Kind: LogicalUnionAll, Children: children, Output: output}, nil
 	case binder.RelationProject:
 		if len(relation.Children) != 1 {

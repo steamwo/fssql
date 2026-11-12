@@ -17,7 +17,9 @@ func (e *StableSQLEngine) prepareBoundQuery(ctx context.Context, q *query.Contex
 	if e == nil || bound == nil || scans == nil || q == nil {
 		return nil, fmt.Errorf("session: bound query preparation is uninitialized")
 	}
-	queryPlanner := planner.NewQueryPlanner(e.functions, relations)
+	zoneName,workers:=e.sessionSnapshot()
+ markQueryTimeZone(bound,zoneName)
+ queryPlanner := planner.NewQueryPlanner(e.functions, relations)
 	opt := &optimizer.Optimizer{Statistics: e.config.Statistics}
 	rewritten, subqueries, err := rewriteScalarSubqueries(ctx, queryPlanner, opt, bound)
 	if err != nil {
@@ -39,5 +41,5 @@ func (e *StableSQLEngine) prepareBoundQuery(ctx context.Context, q *query.Contex
 	if err := bindPhysicalSourceSnapshot(q, plans...); err != nil {
 		return nil, err
 	}
-	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans, subqueries: subqueries}, nil
+	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans, subqueries: subqueries,zoneName:zoneName,workers:workers}, nil
 }

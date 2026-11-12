@@ -2,6 +2,7 @@ package expression
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 
 	"github.com/steamwo/fssql/internal/core/types"
@@ -11,11 +12,12 @@ import (
 )
 
 func isCastFunction(expr *binder.BoundExpression) bool {
-	return expr != nil && expr.FunctionKind == function.Scalar && expr.FunctionID >= function.FirstCastFunctionID && expr.FunctionID < function.FirstDynamicScalarID
+	return expr != nil && expr.FunctionKind == function.Scalar && expr.FunctionID >= function.FirstCastFunctionID && expr.FunctionID < function.FirstTryCastFunctionID
 }
 
 func (e *Executor) executeRegisteredCast(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
 	if len(expr.Children) != 1 { return nil, fmt.Errorf("CAST requires one argument") }
+ if expr.TimeZoneName==""{copyExpr:=*expr;copyExpr.TimeZoneName=e.TimeZoneName;expr=&copyExpr}
 	if value, ok, parseErr := constantTemporalCast(expr); ok {
 		if parseErr != nil { return nil, parseErr }
 		out, err := vector.NewConstant(e.Scope, e.Buffers, expr.Type, chunk.Cardinality)
@@ -31,7 +33,7 @@ func (e *Executor) executeRegisteredCast(expr *binder.BoundExpression, chunk *ve
 	for row := 0; row < chunk.Cardinality; row++ {
 		value, err := scalarFromVector(src, row)
 		if err != nil { out.Release(); return nil, err }
-		casted, err := castScalarWithDecimalRescaling(value, expr.Type)
+		casted, err := castScalarInZone(value, expr.Type,expr.TimeZoneName)
 		if err != nil { out.Release(); return nil, err }
 		if err := writeScalarValue(out, row, expr.Type, casted); err != nil { out.Release(); return nil, err }
 	}
@@ -51,7 +53,7 @@ func constantTemporalCast(expr *binder.BoundExpression) (ScalarValue, bool, erro
 	if expr.Type.ID != types.DateType && expr.Type.ID != types.TimestampType {
 		return ScalarValue{}, false, nil
 	}
-	value, err := parseScalarText(child.Literal, expr.Type)
+	value, err := castScalarInZone(ScalarValue{Type:child.Type,Valid:true,Bytes:[]byte(child.Literal)}, expr.Type,expr.TimeZoneName)
 	return value, true, err
 }
 
@@ -65,6 +67,11 @@ func castScalarWithDecimalRescaling(value ScalarValue, target types.LogicalType)
 	var unscaled *big.Int
 	var sourceScale uint8
 	switch {
+	case value.Type.ID == types.Boolean:
+		unscaled = new(big.Int)
+		if value.Bool { unscaled.SetInt64(1) }
+		// DuckDB stores the Boolean bit directly for an all-fractional DECIMAL.
+		if target.Decimal.Width==target.Decimal.Scale{sourceScale=target.Decimal.Scale}
 	case value.Type.ID == types.Decimal:
 		unscaled = types.Int128Big(value.Int128)
 		sourceScale = value.Type.Decimal.Scale
@@ -72,6 +79,15 @@ func castScalarWithDecimalRescaling(value ScalarValue, target types.LogicalType)
 		unscaled = new(big.Int).SetUint64(value.Uint64)
 	case value.Type.ID >= types.TinyInt && value.Type.ID <= types.BigInt:
 		unscaled = big.NewInt(value.Int64)
+	case value.Type.ID == types.Float || value.Type.ID == types.Double:
+		// Scale the binary floating value in DOUBLE precision, then round halves
+		// away from zero. Parsing its shortest decimal text changes tie behavior.
+		scaled := math.Round(value.Float64 * math.Pow10(int(target.Decimal.Scale)))
+		if math.IsNaN(scaled) || math.IsInf(scaled, 0) {
+			return ScalarValue{}, fmt.Errorf("CAST DECIMAL overflow")
+		}
+		unscaled, _ = new(big.Float).SetFloat64(scaled).Int(nil)
+		sourceScale = target.Decimal.Scale
 	default:
 		return ScalarValue{}, fmt.Errorf("unsupported CAST %d -> DECIMAL", value.Type.ID)
 	}

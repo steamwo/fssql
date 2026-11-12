@@ -39,7 +39,7 @@ func TestMigrationCTASAndViewReplacement(t *testing.T) {
 	if _, err = db.Exec("CREATE TEMP TABLE frozen AS SELECT 1"); err == nil {
 		t.Fatal("duplicate CTAS accepted")
 	}
-	if _, err = db.Exec("CREATE OR REPLACE VIEW frozen AS SELECT 1"); err == nil {
+	if _, err = db.Exec("CREATE OR REPLACE TEMP VIEW frozen AS SELECT 1"); err == nil {
 		t.Fatal("table replaced by view")
 	}
 }

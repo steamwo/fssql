@@ -2,6 +2,7 @@ package expression
 
 import (
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -226,6 +227,9 @@ func samePartition(a, b []ScalarValue) bool {
 		}
 		if !a[i].Valid {
 			continue
+		}
+		if (a[i].Type.ID == types.Float || a[i].Type.ID == types.Double) && math.IsNaN(a[i].Float64) != math.IsNaN(b[i].Float64) {
+			return false
 		}
 		c, err := compareScalar(a[i], b[i])
 		if err != nil || c != 0 {

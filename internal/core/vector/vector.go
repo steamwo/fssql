@@ -161,6 +161,9 @@ type ListEntry struct {
 }
 
 type Vector struct {
+	scope *memory.Scope
+	bm *memory.BufferManager
+	listUsed int
 	Type        types.LogicalType
 	Kind        VectorType
 	count       int
@@ -172,21 +175,20 @@ type Vector struct {
 	dictOwned   bool
 	dictRes     *memory.Reservation
 	children    []*Vector
-	listEntries []ListEntry
 }
 
 func NewFlat(scope *memory.Scope, bm *memory.BufferManager, typ types.LogicalType, count int) (*Vector, error) {
 	if count < 0 {
 		return nil, errors.New("negative vector size")
 	}
-	v := &Vector{Type: typ, Kind: Flat, count: count, validity: NewValidityMask(count)}
+	v := &Vector{Type: typ, Kind: Flat, count: count, validity: NewValidityMask(count),scope:scope,bm:bm}
 	sz, ok := typ.FixedSize()
 	switch typ.ID {
 	case types.Varchar:
 		sz = 24
 		ok = true
 	case types.List:
-		v.listEntries = make([]ListEntry, count)
+		if count>0 { var err error;v.data,err=bm.Allocate(scope,memory.TagVector,count*8);if err!=nil{return nil,err} }
 		return v, nil
 	case types.Struct:
 		return v, nil
@@ -359,14 +361,18 @@ func decodeStringRef(src []byte) StringRef {
 }
 func (v *Vector) SetChildren(children ...*Vector) { v.children = append([]*Vector(nil), children...) }
 func (v *Vector) Children() []*Vector             { return v.children }
-func (v *Vector) SetListEntry(i int, e ListEntry) { v.listEntries[i] = e }
+func (v *Vector) SetListEntry(i int, e ListEntry) { if used:=int(e.Offset)+int(e.Length);used>v.listUsed{v.listUsed=used};data:=v.data.Bytes()[i*8:];binary.LittleEndian.PutUint32(data,e.Offset);binary.LittleEndian.PutUint32(data[4:],e.Length) }
 func (v *Vector) ListEntry(i int) (ListEntry, bool) {
 	idx, b := v.resolve(i)
 	if !b.validity.IsValid(idx) {
 		return ListEntry{}, false
 	}
-	return b.listEntries[idx], true
+	data:=b.data.Bytes()[idx*8:];return ListEntry{Offset:binary.LittleEndian.Uint32(data),Length:binary.LittleEndian.Uint32(data[4:])},true
 }
+
+// NestedRow resolves constant/dictionary indirection without copying children.
+// The returned vector remains borrowed from v.
+func (v *Vector) NestedRow(row int) (*Vector,int) { index,base:=v.resolve(row);return base,index }
 func (v *Vector) Release() {
 	if v == nil {
 		return

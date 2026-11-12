@@ -15,6 +15,9 @@ import (
 // the optional header row. Inference is intentionally sampled; callers surface
 // that fact through the source-introspection confidence contract.
 type InferenceOptions struct {
+	Candidates []types.LogicalType
+	DateFormat string
+	TimestampFormat string
 	Lex         LexConfig
 	Header      bool
 	Final       bool
@@ -26,6 +29,7 @@ type InferenceOptions struct {
 // CSV SourceBinding. Introspection must consume that binding rather than call a
 // separate inference path.
 type InferredSchema struct {
+	Formats []string
 	Fields     []types.StructField
 	SampleRows int
 }
@@ -78,6 +82,8 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 
 	var names []string
 	var kinds []inferredKind
+	candidates:=inferenceCandidates(opts)
+	var possible [][]bool
 	row := 0
 	col := 0
 	dataRows := 0
@@ -102,6 +108,7 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	finishField := func() error {
 		raw := scratchBytes[:used]
 		nullLiteral := csvFieldNullLiteral(opts.NullLiteral, quotedField)
+		if !(row==0&&opts.Header){for len(possible)<=col{flags:=make([]bool,len(candidates));for i:=range flags{flags[i]=true};possible=append(possible,flags)};if nullLiteral==nil||!bytes.Equal(raw,nullLiteral){for i,c:=range candidates{if possible[col][i]&&!candidateAccepts(raw,c){possible[col][i]=false}}}}
 		if row == 0 {
 			if opts.Header {
 				names = append(names, string(raw))
@@ -190,10 +197,12 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 		}
 	}
 	fields := make([]types.StructField, len(kinds))
+	formats:=make([]string,len(kinds))
 	for i := range kinds {
 		fields[i] = types.StructField{Name: names[i], Type: kindLogicalType(kinds[i])}
+		if kinds[i]!=kindUnknown&&(opts.Candidates!=nil||opts.DateFormat!=""||opts.TimestampFormat!=""||kinds[i]==kindVarchar){for j,c:=range candidates{if i<len(possible)&&possible[i][j]{if opts.Candidates!=nil||opts.DateFormat!=""||opts.TimestampFormat!=""||c.typ.ID==types.DateType||c.typ.ID==types.TimestampType{fields[i].Type=c.typ;formats[i]=c.format};break}}}
 	}
-	return InferredSchema{Fields: fields, SampleRows: dataRows}, nil
+	return InferredSchema{Fields: fields, SampleRows: dataRows,Formats:formats}, nil
 }
 
 // csvFieldNullLiteral 统一推断与执行的字段 NULL 字面量规则。

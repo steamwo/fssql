@@ -1,7 +1,12 @@
 package ast
 
+type SetStmt struct { Span Span; Name Identifier; Value Expr; Reset bool }
+func(*SetStmt)statementNode(){}
+func(s *SetStmt)NodeSpan()Span{return s.Span}
+
 // CreateViewStmt 表示 CREATE VIEW <name> AS <select>。
 type CreateViewStmt struct {
+	BoundSQL string
 	Replace   bool
 	Temporary bool
 	Span      Span          // Span 覆盖完整 CREATE VIEW statement。
@@ -25,6 +30,7 @@ func (s *CreateTableAsStmt) NodeSpan() Span { return s.Span }
 
 // CreateExternalTableStmt 表示 AD-045 冻结的 external-table DDL。
 type CreateExternalTableStmt struct {
+	SourceParameter Expr
 	Span     Span          // Span 覆盖完整 DDL。
 	Name     QualifiedName // Name 是 Catalog 对象名。
 	Function QualifiedName // Function 是 Stable table-function 名称。
@@ -47,6 +53,7 @@ const (
 
 // SecretOption 保存 CREATE SECRET 中一个有 source span 的 option。
 type SecretOption struct {
+	StringParameter Expr
 	Span            Span             // Span 覆盖 key/value。
 	Kind            SecretOptionKind // Kind 由语法层区分安全字段。
 	Name            Identifier       // Name 保存 option/credential key。
@@ -89,6 +96,7 @@ func (e *CopyEncryptionExpr) GoString() string { return e.String() }
 
 // CopyStmt 表示 Stable COPY ... TO；Relation 与 Query 恰有一个非 nil/非零。
 type CopyStmt struct {
+	DestinationParameter Expr
 	Span        Span           // Span 覆盖完整 COPY statement。
 	Relation    *QualifiedName // Relation 是 catalog relation/view source。
 	Query       *SelectStmt    // Query 是 parenthesized SELECT source。

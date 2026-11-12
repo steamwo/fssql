@@ -10,9 +10,9 @@
       "classification": "unsupported_feature",
       "surface": "database/sql transaction and parameterized statement boundaries",
       "stable_sql_semantics": false,
-      "summary": "SELECT parameter binding and prepared syntax are supported; transactions and parameterized DDL/COPY remain unsupported.",
+      "summary": "Value parameters and prepared syntax support queries, view/CTAS/external-table/secret DDL, COPY, DESCRIBE and SET; public transactions remain unsupported.",
       "duckdb": "DuckDB client APIs support parameter binding, prepared statements and transactions.",
-      "fssql": "QueryContext/ExecContext and prepared SELECT statements bind ?, numbered or named placeholders as AST values. Begin/BeginTx explicitly reject transactions; DDL/COPY with parameters is rejected.",
+      "fssql": "Parameters are bound as AST values. Persistent parameterized views store serialized values and fixed output aliases, never unresolved placeholders or interpolated SQL fragments. COPY destinations/options and secret values accept appropriate value parameters. Identifiers are not value parameters. Begin/BeginTx explicitly reject transactions.",
       "rationale": "Parsed statement templates can be reused safely with independent execution resources. Atomic catalog and external-file transactions require a separate commit/rollback contract; persistent view SQL must not retain unbound parameters."
     },
     {
@@ -20,9 +20,9 @@
       "classification": "intentional_deviation",
       "surface": "database/sql nested result values",
       "stable_sql_semantics": false,
-      "summary": "LIST and STRUCT values are rejected by database/sql; the current public Chunk exposes their type metadata without nested element-value accessors.",
+      "summary": "database/sql rejects LIST/STRUCT cells; native Chunk now exposes owned recursive values.",
       "duckdb": "DuckDB language bindings can expose nested result values through binding-specific value types.",
-      "fssql": "database/sql returns an explicit error for LIST/STRUCT cells. The native public Chunk exposes Type.Child/Type.Fields metadata; internal Vector/DataChunk supports nested values, but public nested value accessors are not currently available.",
+      "fssql": "Chunk.Value, Chunk.List and Chunk.Struct return copied, recursively typed values with explicit NULL validity; exact wide numerics and binary values remain lossless and may outlive the callback. The database/sql adapter still rejects nested cells instead of inventing an implicit textual encoding.",
       "rationale": "database/sql driver.Value has no lossless standard nested value representation. Converting nested values to ad-hoc strings would violate the no-hidden-semantic-downgrade invariant."
     },
     {
@@ -60,9 +60,9 @@
       "classification": "unsupported_feature",
       "surface": "general correlated and nested scalar subqueries",
       "stable_sql_semantics": false,
-      "summary": "Equality and parameter-domain EXISTS/IN/scalars, relation propagation, outer-owned aggregates, lateral derived inputs and nested scalar dependencies are supported; full subquery grammar and operator coverage remain limited.",
+      "summary": "Quantified ANY/ALL/SOME and integer range/generate_series/LIST unnest support parameter-domain and lateral execution; the complete DuckDB operator/type surface remains finite.",
       "duckdb": "DuckDB accepts derived tables, aggregate/scalar combinations and correlated or nested scalar subqueries.",
-      "fssql": "Parameter domains support non-equality predicates, constant per-domain LIMIT/OFFSET, nested references, empty global aggregates/HAVING, derived tables/CTEs, UNION ALL, JOIN ON subqueries, outer-owned aggregates and explicit/implicit INNER/CROSS/LEFT lateral derived inputs. Non-correlated scalar dependencies are prepared bottom-up. Dynamic table-function arguments and quantified ANY/ALL remain unsupported. Correlation through SAMPLE, non-constant correlated limits and disallowed dependent join types are rejected as in DuckDB 2.0.0.",
+      "fssql": "The existing parameter-domain EXISTS/IN/scalar, set-operation and lateral-derived support now includes quantified comparisons and numeric range/generate_series plus unnest arguments. Empty sets, NULL and occurrence counts retain their defined semantics. Column-dependent read_csv/read_parquet paths remain rejected, matching DuckDB 2.0. Correlation through SAMPLE and non-constant correlated limits remain rejected. Recursive CTE and other absent operators are not implied by these additions.",
       "rationale": "The implementation reuses materialization, NULL-safe hash joins, grouping and partitioned row numbers. Full operator coverage remains future work; candidate pairs without usable hash keys still require a cross product/filter with a managed-memory build side."
     },
     {
@@ -72,17 +72,57 @@
       "stable_sql_semantics": false,
       "summary": "The built-in SQL catalog is a finite subset, not arbitrary DuckDB SQL compatibility.",
       "duckdb": "DuckDB provides a substantially larger function and expression surface.",
-      "fssql": "upper, abs, round, regexp_*, date_part, try_cast and string_split are not implemented by the current built-in catalog/parser. Unknown functions and unsupported syntax fail explicitly; registered Go scalar UDFs extend only their declared names and types.",
+      "fssql": "upper, abs, numeric round, bounded CAST/TRY_CAST, scalar/STRUCT date_part, regexp_matches/full_match/replace/extract/extract_all/split_to_array/escape, string_split, list_value/extract/array_length and struct_extract are implemented for documented signatures. Registered Go scalar UDFs extend their declared names/types. This finite catalog does not include every DuckDB function or set-returning scalar form.",
       "rationale": "Do not claim general DuckDB replacement from the existing scalar test corpus. Adding functions requires individual binding, type/NULL semantics, execution and differential tests."
+    },
+    {
+      "id": "SQL-ROUND-001",
+      "classification": "unsupported_feature",
+      "surface": "general bind-time constant expression evaluation",
+      "stable_sql_semantics": false,
+      "summary": "DECIMAL round supports NULL precision and selected pure built-in precision folding; arbitrary constant evaluation is not a general engine facility.",
+      "duckdb": "round(DECIMAL, abs(1)) is accepted as constant precision. round(DECIMAL, NULL) returns a NULL logical result.",
+      "fssql": "NULL precision produces a resolved SQLNULL result. Exact integer arithmetic/casts and abs/mod/floor/round integer forms can provide constant precision. Registered UDFs are never executed during binding. More general constant function expressions may still fail to supply a compile-time DECIMAL precision.",
+      "rationale": "Preserve type-dependent binding without introducing UDF side effects or unbounded execution into the binder."
+    },
+    {
+      "id": "SQL-CAST-001",
+      "classification": "unsupported_feature",
+      "surface": "TRY_CAST conversion and text grammar coverage",
+      "stable_sql_semantics": false,
+      "summary": "TRY_CAST covers the existing scalar conversion kernels, not DuckDB's entire cast matrix or text grammar.",
+      "duckdb": "DuckDB includes a broader conversion matrix, numeric text formats and additional temporal formats.",
+      "fssql": "Numeric casts now include BOOLEAN to FLOAT/DOUBLE/DECIMAL, floating to DECIMAL and HUGEINT to BOOLEAN. Integer text supports exact decimal/exponent and unsigned 0x/0b forms with bounded wide parsing. Supported data failures return NULL in TRY_CAST; input/resource errors propagate. The remaining unsupported scalar type pairs still fail explicitly; the full DuckDB matrix and all text aliases are not implied.",
+      "rationale": "Missing conversion implementations must not be silently presented as successful NULL results. Add signatures and textual forms with independent type, value, range and error differential evidence."
+    },
+    {
+      "id": "SQL-TIMESTAMP-001",
+      "classification": "unsupported_feature",
+      "surface": "remaining temporal text aliases and grammar",
+      "stable_sql_semantics": false,
+      "summary": "ISO dates/times, numeric/IANA zones, BC/wide years and temporal infinity are supported; full DuckDB temporal grammar remains a finite boundary.",
+      "duckdb": "CAST of timestamp text with a T separator and Z suffix or a space separator and +00 offset to TIMESTAMPTZ succeeds.",
+      "fssql": "Checked SQL parsing supports ISO date components, space/T clocks, fractions, offsets, named IANA zones, BC/wide years and infinity. TimeZone sessions affect naive-to-aware conversion and formatting. Repeated/gap local times follow the documented DuckDB 2.0 policy. Non-UTC temporal predicate casts stay residual for safe pruning. Additional non-ISO special aliases and unsupported format directives fail explicitly.",
+      "rationale": "Offset text is covered by typed DuckDB 2.0.0 differential and pruning regression tests. The remaining grammar and temporal sentinel representation require separate work; this does not extend CSV inference or session timezone support."
+    },
+    {
+      "id": "SQL-DATEPART-001",
+      "classification": "unsupported_feature",
+      "surface": "remaining date_part temporal types and general constant folding",
+      "stable_sql_semantics": false,
+      "summary": "Scalar and constant LIST-to-STRUCT date_part forms are supported; INTERVAL and general constant folding remain outside the current type surface.",
+      "duckdb": "DuckDB also folds constant specifier expressions, supports additional temporal types and a LIST-of-parts STRUCT result overload.",
+      "fssql": "Calendar/clock/ISO/epoch/julian/timezone parts support DATE and timestamp types. Pure supported string expressions can bind scalar constant parts; dynamic expressions return DOUBLE. Constant part lists return STRUCT, with public nested accessors. Direct NULL temporal constants retain DuckDB metadata behavior. INTERVAL and arbitrary UDF constant evaluation are not implemented.",
+      "rationale": "Do not claim arbitrary constant folding or nested public results. Validate the supported scalar signatures with exact result metadata, NULL, precision and boundary evidence."
     },
     {
       "id": "CSV-INFER-001",
       "classification": "unsupported_feature",
-      "surface": "CSV automatic type and date/time format candidates",
+      "surface": "remaining CSV candidate types and date format directives",
       "stable_sql_semantics": false,
-      "summary": "CSV inference supports ISO DATE/TIMESTAMP/TIMESTAMPTZ; custom candidates and general date/time format detection remain unsupported.",
+      "summary": "Custom auto_type_candidates and explicit DATEFORMAT/TIMESTAMPFORMAT are implemented for current scalar types; the full DuckDB sniffer/type/directive universe remains finite.",
       "duckdb": "DuckDB supports configurable auto_type_candidates and date/time format detection. DECIMAL is an optional candidate rather than a default inference requirement.",
-      "fssql": "ISO dates, space/T-separated timestamps and offset timestamps are inferred using the execution decoder. DATE and naive TIMESTAMP promote to TIMESTAMP. Mixed zoned/unzoned values conservatively fall back to VARCHAR. Fractional numeric input retains default DOUBLE inference; exact DECIMAL requires explicit columns.",
+      "fssql": "Candidate lists retain VARCHAR fallback and are sampled consistently with decoding. Explicit date/timestamp formats share calendar parsing with execution. Unknown directives/candidate types fail explicitly. Default inference keeps its existing ISO behavior; this change does not silently reinterpret non-ISO text or introduce absent TIME/INTERVAL types.",
       "rationale": "Keep inferred types executable and preserve explicit DECIMAL input semantics; wider CSV format/candidate compatibility is separate work."
     }
   ]

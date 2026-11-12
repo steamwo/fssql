@@ -46,6 +46,7 @@ func (p *QueryPlanner) lowerSubqueryExpression(ctx context.Context, input *Logic
 	if out.Kind != binder.BoundSubquery {
 		return input, &out, nil
 	}
+	if out.Op == "IN" && out.Comparison != "" { return p.lowerDomainSubquery(ctx,input,&out) }
 	if binder.QueryCorrelated(out.Subquery) && needsDomainDecorrelation(out.Subquery) {
 		return p.lowerDomainSubquery(ctx, input, &out)
 	}

@@ -6,13 +6,18 @@ import "errors"
 // 它不调用 Sink.Finalize；仅关闭 dependency、Abort hook、CloseableSource 与 CloseableSink ownership。
 // 调用方必须保证该 tree 尚未执行，避免与 scheduler task 并发关闭。
 func AbortUnstarted(root *Pipeline) error {
-	visited := map[*Pipeline]bool{}
+	return abortUnstarted(root, map[*Pipeline]bool{})
+}
+
+// handled includes stages that already ran (Run owns their cleanup) or were
+// aborted. Shared dependencies must not be closed again after another branch fails.
+func abortUnstarted(root *Pipeline, handled map[*Pipeline]bool) error {
 	var abort func(*Pipeline) error
 	abort = func(p *Pipeline) error {
-		if p == nil || visited[p] {
+		if p == nil || handled[p] {
 			return nil
 		}
-		visited[p] = true
+		handled[p] = true
 		var errs []error
 		for _, dependency := range p.Dependencies {
 			errs = append(errs, abort(dependency))

@@ -67,6 +67,10 @@ const (
 	LBrace
 	RBrace
 	Colon
+	KeywordIntersect
+	KeywordExcept
+	LBracket
+	RBracket
 )
 
 type Token struct {

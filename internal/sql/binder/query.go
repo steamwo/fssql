@@ -53,6 +53,8 @@ const (
 	RelationSample
 	RelationUnion
 	RelationProject
+	RelationSetOperation
+	RelationApply
 )
 
 // BoundRelation 是 Planner 之前的 relation binding；不包含 runtime reader/operator。
@@ -60,6 +62,7 @@ type BoundRelation struct {
 	Lateral     bool                     // CTEQuery adds a sibling-input scope boundary.
 	Dependent   bool                     // JOIN right input captures its left input.
 	Kind        BoundRelationKind        // Kind 是 relation 来源类别。
+	SetOperation ast.SetOperation
 	ID          string                   // ID 是 relation identity。
 	Alias       string                   // Alias 是列限定符。
 	Columns     []RelationColumn         // Columns 是该 relation 输出 schema。
@@ -362,6 +365,7 @@ func (b *QueryBinder) bindTableFunction(ctx context.Context, t *ast.TableFunctio
 	if !ok || def.Kind != function.Table {
 		return nil, b.errorAt(t.Span, "unknown table function "+name)
 	}
+	if def.ID==function.RangeID||def.ID==function.GenerateSeriesID||def.ID==function.UnnestID{return b.bindBuiltinTable(ctx,t,def)}
 	args := make([]TableFunctionArgument, 0, len(t.Call.Args))
 	bindArgs := make([]function.ArgumentType, 0, len(t.Call.Args))
 	for _, raw := range t.Call.Args {
@@ -750,6 +754,7 @@ func containsSubquery(e *BoundExpression) bool {
 
 func (b *QueryBinder) projectionName(item ast.SelectItem, ordinal int) string {
 	if item.Alias != nil {
+		if !item.Alias.Quoted&&item.Alias.Raw!=""{return item.Alias.Raw}
 		return item.Alias.Name
 	}
 	switch e := item.Expr.(type) {

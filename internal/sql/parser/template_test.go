@@ -32,7 +32,7 @@ func TestTemplateBindDoesNotMutateParsedSyntax(t *testing.T) {
 }
 
 func TestTemplatePlaceholderValidation(t *testing.T) {
-	for _, sql := range []string{"SELECT $", "SELECT $0", "SELECT $2", "SELECT ?, $1", "SELECT $name, $1", "SELECT ? FROM ?", "CREATE VIEW v AS SELECT ?"} {
+	for _, sql := range []string{"SELECT $", "SELECT $0", "SELECT $2", "SELECT ?, $1", "SELECT $name, $1", "SELECT ? FROM ?"} {
 		if _, err := Compile(sql); err == nil {
 			t.Errorf("accepted %s", sql)
 		}

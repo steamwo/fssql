@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -25,11 +27,18 @@ type PreparedStatement interface {
 
 // StableStatementEngine 在 StableSQLEngine 之上增加已冻结 control/DESCRIBE/COPY statement composition。
 type StableStatementEngine struct {
+	sessionID string
+	sessionMu sync.Mutex
+	sessionCleanups []func()error
+	sessionClosed bool
 	materialize MaterializeExecutor
 	selects     *StableSQLEngine   // selects 是 SELECT/Query 唯一 production execution path。
 	control     *SQLControlAdapter // control 是 Catalog/Secret 副作用唯一 adapter。
 	copy        CopyExecutor       // copy 仅适配既有 Export/VFS，不复制 SQL/Query 执行链。
 }
+
+var sessionSequence atomic.Uint64
+func nextSessionID()string{return fmt.Sprintf("session-%d",sessionSequence.Add(1))}
 
 // NewStableStatementEngine 创建不含 COPY adapter 的 statement composition root。
 // 这保持已有 Native/control 使用者兼容；COPY 请求会显式失败，不能降级到非原子 writer。
@@ -52,7 +61,7 @@ func newStableStatementEngine(selects *StableSQLEngine, control *SQLControlAdapt
 	if control == nil {
 		return nil, fmt.Errorf("session: Stable statement engine requires SQLControlAdapter")
 	}
-	return &StableStatementEngine{selects: selects, control: control, copy: copy}, nil
+	return &StableStatementEngine{selects: selects, control: control, copy: copy,sessionID:nextSessionID()}, nil
 }
 
 // Prepare 只做 parse/bind/planning，不提前执行 Catalog/Secret/Export 副作用。
@@ -75,6 +84,9 @@ func (e *StableStatementEngine) PrepareParsed(ctx context.Context, q *query.Cont
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	q.SessionID=e.sessionID
+	e.sessionMu.Lock();sessionClosed:=e.sessionClosed;e.sessionMu.Unlock();if sessionClosed{return nil,fmt.Errorf("session is closed")}
+	if stmt,ok:=parsed.(*ast.SetStmt);ok{return e.prepareSetting(stmt)}
 	if stmt, ok := parsed.(*ast.CreateTableAsStmt); ok {
 		return e.prepareCreateTableAs(ctx, q, sql, stmt)
 	}

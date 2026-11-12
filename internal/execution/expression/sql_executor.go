@@ -15,6 +15,7 @@ import (
 // ExecuteSQL 执行 SQL Binder 的强类型表达式。
 // 已有 Phase 0 kernel 优先通过 LowerSQLExpression 复用；缺失但已在本文件实现的 typed kernel 直接执行。
 func (e *Executor) ExecuteSQL(expr *binder.BoundExpression, chunk *vector.DataChunk) (*vector.Vector, error) {
+	if expr!=nil&&expr.Kind==binder.BoundCast&&e.TimeZoneName!=""&&e.TimeZoneName!="UTC"&&(expr.Type.ID==types.TimestampType||expr.Type.ID==types.DateType){return e.executeSQL(expr,chunk)}
 	if e == nil || e.Scope == nil || e.Buffers == nil {
 		return nil, fmt.Errorf("SQL expression executor requires managed memory")
 	}

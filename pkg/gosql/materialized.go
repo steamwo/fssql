@@ -35,6 +35,7 @@ type materializedRegistry struct {
 // Close prevents new bindings; already bound queries retain their reader leases.
 // All snapshot storage is released when the last bound query closes.
 type Materialized struct {
+	ownerSession string
 	mu       sync.Mutex
 	registry *materializedRegistry
 	token    string
@@ -104,6 +105,7 @@ func (db *DB) materializePrepared(ctx context.Context, q *query.Context, prepare
 		return nil, err
 	}
 	m := &Materialized{registry: r, token: token, state: state, columns: columns}
+	if scoped,ok:=prepared.(interface{MaterializedSession()string});ok{m.ownerSession=scoped.MaterializedSession()}
 	err = prepared.Run(q, &materializedSink{state: state})
 	err = errors.Join(err, ctx.Err())
 	if err != nil {
@@ -215,6 +217,7 @@ func (r *materializedRegistry) adapters(q *query.Context) (session.TableBindAdap
 				return binder.ResolvedRelation{}, errors.New("gosql: materialized snapshot is closed or unknown")
 			}
 			m.mu.Lock()
+			if m.ownerSession!=""&&m.ownerSession!=q.SessionID{m.mu.Unlock();r.mu.Unlock();return binder.ResolvedRelation{},errors.New("gosql: materialized snapshot belongs to another session")}
 			m.refs++
 			m.mu.Unlock()
 			r.mu.Unlock()

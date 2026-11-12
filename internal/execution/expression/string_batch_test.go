@@ -60,7 +60,7 @@ func stringBatchInput(t *testing.T, scope *memory.Scope, buffers *memory.BufferM
 func stringBatchExpression(id function.ID, binary bool) *binder.BoundExpression {
 	text := types.LogicalType{ID: types.Varchar}
 	result := types.LogicalType{ID: types.BigInt}
-	if id == function.ConcatID || id == function.LowerID {
+	if id == function.ConcatID || id == function.LowerID || id == function.UpperID {
 		result = text
 	}
 	expr := &binder.BoundExpression{Kind: binder.BoundFunction, Type: result, FunctionID: id, FunctionKind: function.Scalar, Children: []*binder.BoundExpression{{Kind: binder.BoundColumn, Type: text, ColumnIndex: 0}}}
@@ -76,7 +76,7 @@ func TestStringBatchMatchesScalarSemanticsAndOwnsResults(t *testing.T) {
 		name   string
 		id     function.ID
 		binary bool
-	}{{"length", function.LengthID, false}, {"strpos", function.StrposID, true}, {"concat", function.ConcatID, true}, {"lower", function.LowerID, false}} {
+	}{{"length", function.LengthID, false}, {"strpos", function.StrposID, true}, {"concat", function.ConcatID, true}, {"lower", function.LowerID, false}, {"upper", function.UpperID, false}} {
 		for _, layout := range []string{"flat", "constant", "nested_dictionary"} {
 			t.Run(tc.name+"/"+layout, func(t *testing.T) {
 				manager := memory.NewManager(1 << 20)
@@ -127,7 +127,7 @@ func TestStringBatchMatchesScalarSemanticsAndOwnsResults(t *testing.T) {
 					if !expected.Valid {
 						continue
 					}
-					if tc.id == function.ConcatID || tc.id == function.LowerID {
+					if tc.id == function.ConcatID || tc.id == function.LowerID || tc.id == function.UpperID {
 						value, _ := out.Bytes(row)
 						if string(value) != string(expected.Bytes) {
 							t.Fatalf("row=%d got=%q want=%q", row, value, expected.Bytes)

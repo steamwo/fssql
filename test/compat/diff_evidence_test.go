@@ -11,16 +11,22 @@ import (
 // diffEvidence 是一条可复核的差分证据：同一用例在 fssql 与 DuckDB 的
 // 规范化值、列数、错误和最终是否一致。
 type diffEvidence struct {
-	Suite         string   `json:"suite"`
-	Case          string   `json:"case"`
-	SQL           string   `json:"sql,omitempty"`
-	FSSQLValues   []string `json:"fssql_values,omitempty"`
-	DuckDBValues  []string `json:"duckdb_values,omitempty"`
-	FSSQLColumns  int      `json:"fssql_columns,omitempty"`
-	DuckDBColumns int      `json:"duckdb_columns,omitempty"`
-	FSSQLError    string   `json:"fssql_error,omitempty"`
-	DuckDBError   string   `json:"duckdb_error,omitempty"`
-	Match         bool     `json:"match"`
+	Suite         string               `json:"suite"`
+	Case          string               `json:"case"`
+	SQL           string               `json:"sql,omitempty"`
+	FSSQLValues   []string             `json:"fssql_values,omitempty"`
+	DuckDBValues  []string             `json:"duckdb_values,omitempty"`
+	FSSQLColumns  int                  `json:"fssql_columns,omitempty"`
+	DuckDBColumns int                  `json:"duckdb_columns,omitempty"`
+	FSSQLError    string               `json:"fssql_error,omitempty"`
+	DuckDBError   string               `json:"duckdb_error,omitempty"`
+	Match         bool                 `json:"match"`
+	Source        string               `json:"source,omitempty"`
+	Capability    string               `json:"capability,omitempty"`
+	Priority      string               `json:"priority,omitempty"`
+	FSSQLTyped    *typedResult         `json:"fssql_typed,omitempty"`
+	DuckDBTyped   *typedResult         `json:"duckdb_typed,omitempty"`
+	Environment   *workloadEnvironment `json:"environment,omitempty"`
 }
 
 var (

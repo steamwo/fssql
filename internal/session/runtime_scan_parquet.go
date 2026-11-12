@@ -260,6 +260,7 @@ func parquetLiteral(expression *binder.BoundExpression) (formatscan.Literal, boo
 }
 
 func parquetCastChild(expression *binder.BoundExpression) (*binder.BoundExpression, bool) {
+	if expression!=nil&&(expression.Type.ID==types.TimestampType||expression.Type.ID==types.DateType)&&expression.TimeZoneName!=""&&expression.TimeZoneName!="UTC" {return nil,false}
 	if expression == nil || len(expression.Children) != 1 {
 		return nil, false
 	}
@@ -267,7 +268,7 @@ func parquetCastChild(expression *binder.BoundExpression) (*binder.BoundExpressi
 		return expression.Children[0], true
 	}
 	if expression.Kind == binder.BoundFunction && expression.FunctionKind == function.Scalar &&
-		expression.FunctionID >= function.FirstCastFunctionID && expression.FunctionID < function.FirstDynamicScalarID {
+		expression.FunctionID >= function.FirstCastFunctionID && expression.FunctionID < function.FirstTryCastFunctionID {
 		return expression.Children[0], true
 	}
 	return nil, false
@@ -279,7 +280,7 @@ func parquetTemporalLiteral(text string, target types.LogicalType) (int64, bool)
 		value, err := semantics.ParseDateLiteral(text)
 		return value, err == nil
 	case types.TimestampType:
-		value, err := semantics.ParseTimestampLiteral(text, target.Timestamp.Unit)
+		value, err := semantics.ParseTimestampText(text, target.Timestamp.Unit, target.Timestamp.AdjustedToUTC)
 		return value, err == nil
 	default:
 		return 0, false

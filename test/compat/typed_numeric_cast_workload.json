@@ -1,0 +1,288 @@
+[
+  {
+    "id": "ROUND-NULL",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(NULL) AS n, round(CAST(NULL AS DECIMAL(8,3))) AS d, round(CAST('1.25' AS DOUBLE), NULL) AS p"
+  },
+  {
+    "id": "ROUND-SIGNED",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('-124' AS TINYINT),-1) AS a, round(CAST('32760' AS SMALLINT),-1) AS b, round(CAST('2147483640' AS INTEGER),-1) AS c, round(CAST('9223372036854775800' AS BIGINT),-1) AS d"
+  },
+  {
+    "id": "ROUND-UNSIGNED",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('255' AS UTINYINT),-1) AS a, round(CAST('65535' AS USMALLINT),-2) AS b, round(CAST('4294967295' AS UINTEGER),-1) AS c, round(CAST('18446744073709551615' AS UBIGINT),-1) AS d"
+  },
+  {
+    "id": "ROUND-HUGE",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('12345678901234567890123456789012345678' AS HUGEINT),-3) AS h, round(CAST('-12345678901234567890123456789012345678' AS HUGEINT),-3) AS n"
+  },
+  {
+    "id": "ROUND-FLOAT",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('2.5' AS FLOAT)) AS a, round(CAST('-2.5' AS DOUBLE)) AS b, round(CAST('2.675' AS DOUBLE),2) AS c, round(CAST('0.145' AS FLOAT),2) AS d, round(CAST('-0.5' AS DOUBLE)) AS e"
+  },
+  {
+    "id": "ROUND-FLOAT-RANGE",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('NaN' AS DOUBLE),2) AS n, round(CAST('-Infinity' AS DOUBLE),2) AS i, round(CAST('1.7976931348623157e308' AS DOUBLE),2) AS p, round(CAST('1.7976931348623157e308' AS DOUBLE),-308) AS m, round(CAST('1.5' AS DOUBLE),2147483647) AS h, round(CAST('1.5' AS DOUBLE),CAST('-2147483648' AS INTEGER)) AS l"
+  },
+  {
+    "id": "ROUND-DECIMAL",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.235' AS DECIMAL(6,3))) AS a, round(CAST('-1.235' AS DECIMAL(6,3)),2) AS b, round(CAST('999.999' AS DECIMAL(6,3)),2) AS c, round(CAST('999999' AS DECIMAL(6,0)),-1) AS d"
+  },
+  {
+    "id": "ROUND-DECIMAL-WIDE",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1234567890123456789012345678.123456' AS DECIMAL(38,6)),3) AS p, round(CAST('-1234567890123456789012345678.123456' AS DECIMAL(38,6)),-2) AS n, round(CAST('0.0005' AS DECIMAL(18,4)),3) AS h"
+  },
+  {
+    "id": "ROUND-DECIMAL-PRECISION",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.235' AS DECIMAL(6,3)),100) AS h, round(CAST('1.235' AS DECIMAL(6,3)),1+1) AS e, round(CAST('1.235' AS DECIMAL(6,3)),CAST('-2147483648' AS INTEGER)) AS l"
+  },
+  {
+    "id": "ROUND-OVERFLOW-TINYINT",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('-128' AS TINYINT),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-OVERFLOW-SMALLINT",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('32767' AS SMALLINT),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-OVERFLOW-INTEGER",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('2147483647' AS INTEGER),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-OVERFLOW-BIGINT",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('9223372036854775807' AS BIGINT),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-OVERFLOW-HUGEINT",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('170141183460469231731687303715884105727' AS HUGEINT),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-OVERFLOW-DECIMAL",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('99999999999999999999999999999999999999' AS DECIMAL(38,0)),-1) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "ROUND-INVALID-PRECISION",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.5' AS DOUBLE), CAST(1 AS BIGINT)) AS v",
+    "error_category": "binder"
+  },
+  {
+    "id": "ROUND-DYNAMIC-DECIMAL",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS p UNION ALL SELECT 2) SELECT round(CAST('1.235' AS DECIMAL(6,3)),p) AS v FROM t",
+    "error_category": "binder"
+  },
+  {
+    "id": "TRY-TEXT",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('42' AS BIGINT) AS ok, TRY_CAST('bad' AS BIGINT) AS bad, TRY_CAST('1.5' AS BIGINT) AS half, TRY_CAST('-1.5' AS BIGINT) AS neg, TRY_CAST('1.9e1' AS INTEGER) AS exponent, TRY_CAST('  +1_000.5 ' AS INTEGER) AS u, TRY_CAST('1/2' AS INTEGER) AS invalid"
+  },
+  {
+    "id": "TRY-BOOL",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('yes' AS BOOLEAN) AS y, TRY_CAST('no' AS BOOLEAN) AS n, TRY_CAST('wrong' AS BOOLEAN) AS bad, TRY_CAST(NULL AS BOOLEAN) AS missing"
+  },
+  {
+    "id": "TRY-FLOAT",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('1e400' AS DOUBLE) AS d, TRY_CAST('1e100' AS FLOAT) AS f, TRY_CAST(CAST('1e100' AS DOUBLE) AS FLOAT) AS numeric, TRY_CAST('wrong' AS FLOAT) AS bad"
+  },
+  {
+    "id": "TRY-RANGE",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('128' AS TINYINT) AS a, TRY_CAST('-1' AS UTINYINT) AS b, TRY_CAST('18446744073709551616' AS UBIGINT) AS c, TRY_CAST('170141183460469231731687303715884105728' AS HUGEINT) AS d"
+  },
+  {
+    "id": "TRY-DECIMAL",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('12345678901234567890.12' AS DECIMAL(38,2)) AS a, TRY_CAST('wrong' AS DECIMAL(6,2)) AS b, TRY_CAST('9999' AS DECIMAL(3,0)) AS c, TRY_CAST(CAST('1.25' AS DECIMAL(6,2)) AS DECIMAL(6,1)) AS d, TRY_CAST(CAST('127.5' AS DECIMAL(6,1)) AS TINYINT) AS e"
+  },
+  {
+    "id": "TRY-TEMPORAL",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('2026-11-11' AS DATE) AS d, TRY_CAST('2026-02-30' AS DATE) AS bad, TRY_CAST('2026-11-11 12:13:14.123456789' AS TIMESTAMP_NS) AS n, TRY_CAST('bad' AS TIMESTAMP) AS t"
+  },
+  {
+    "id": "TRY-CHILD-ERROR",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST(abs(CAST('-9223372036854775808' AS BIGINT)) AS INTEGER) AS v",
+    "error_category": "overflow"
+  },
+  {
+    "id": "TRY-CHILD-CONVERSION",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST(CAST('bad' AS BIGINT) AS VARCHAR) AS v",
+    "error_category": "conversion"
+  },
+  {
+    "id": "TRY-MIXED-ROWS",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "WITH t AS (SELECT 1 AS id, '42' AS v UNION ALL SELECT 2, 'bad' UNION ALL SELECT 3, NULL UNION ALL SELECT 4, '-1.5') SELECT id, TRY_CAST(v AS BIGINT) AS v FROM t ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "TRY-TIMESTAMP-RANGE",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('2263-01-01 00:00:00' AS TIMESTAMP_NS) AS past, TRY_CAST('1670-01-01 00:00:00' AS TIMESTAMP_NS) AS before, TRY_CAST('2262-04-11 23:47:16.854775806' AS TIMESTAMP_NS) AS edge, TRY_CAST('2262-04-11 23:47:16.854775807' AS TIMESTAMP_NS) AS max_reserved, TRY_CAST('1677-09-21 00:12:43.145224193' AS TIMESTAMP_NS) AS min_reserved"
+  },
+  {
+    "id": "TRY-EXACT-TEXT",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST('9223372036854775806.5' AS BIGINT) AS exact, TRY_CAST('170141183460469231731687303715884105726.5' AS HUGEINT) AS wide, TRY_CAST('1e100000000000000000000' AS BIGINT) AS overflow, TRY_CAST('1e-100000000000000000000' AS BIGINT) AS tiny, TRY_CAST('1__0' AS INTEGER) AS invalid"
+  },
+  {
+    "id": "ROUND-FLOAT-SUBNORMAL",
+    "source": "synthetic",
+    "capability": "round",
+    "priority": "P1",
+    "sql": "SELECT round(CAST('1.1e-40' AS FLOAT),40) AS small, round(CAST('1.1e-310' AS DOUBLE),308) AS tiny"
+  },
+  {
+    "id": "CAST-TEXT-COMPAT",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST('1.5' AS BIGINT) AS half, CAST('-1.5' AS BIGINT) AS negative, CAST('1e3' AS INTEGER) AS exponent, CAST('yes' AS BOOLEAN) AS y, CAST('1e400' AS DOUBLE) AS huge"
+  },
+  {
+    "id": "ROUND-TRY-BATCH",
+    "source": "synthetic",
+    "capability": "round-try_cast",
+    "priority": "P1",
+    "ordered": true,
+    "sql": "SELECT id, round(CAST(id AS DOUBLE) / 10, CAST(grp AS INTEGER)) AS r, TRY_CAST(CASE WHEN grp = 0 THEN 'bad' ELSE CAST(id AS VARCHAR) END AS BIGINT) AS n FROM {batch} ORDER BY id"
+  },
+  {
+    "id": "CAST-FLOAT-DECIMAL",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('1.005' AS FLOAT) AS DECIMAL(6,2)) AS v0, CAST(CAST('-1.005' AS FLOAT) AS DECIMAL(6,2)) AS v1, CAST(CAST('2.675' AS FLOAT) AS DECIMAL(6,2)) AS v2, CAST(CAST('0.145' AS FLOAT) AS DECIMAL(6,2)) AS v3, CAST(CAST('9.995' AS FLOAT) AS DECIMAL(6,2)) AS v4, CAST(CAST('99.995' AS FLOAT) AS DECIMAL(6,2)) AS v5"
+  },
+  {
+    "id": "TRY-FLOAT-DECIMAL-RANGE",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST(CAST('999.994' AS FLOAT) AS DECIMAL(5,2)) AS v0, TRY_CAST(CAST('999.995' AS FLOAT) AS DECIMAL(5,2)) AS v1, TRY_CAST(CAST('-999.995' AS FLOAT) AS DECIMAL(5,2)) AS v2, TRY_CAST(CAST('NaN' AS FLOAT) AS DECIMAL(5,2)) AS v3, TRY_CAST(CAST('Inf' AS FLOAT) AS DECIMAL(5,2)) AS v4, TRY_CAST(CAST('-Inf' AS FLOAT) AS DECIMAL(5,2)) AS v5, TRY_CAST(CAST('1e30' AS FLOAT) AS DECIMAL(5,2)) AS v6"
+  },
+  {
+    "id": "CAST-DOUBLE-DECIMAL",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('1.005' AS DOUBLE) AS DECIMAL(6,2)) AS v0, CAST(CAST('-1.005' AS DOUBLE) AS DECIMAL(6,2)) AS v1, CAST(CAST('2.675' AS DOUBLE) AS DECIMAL(6,2)) AS v2, CAST(CAST('0.145' AS DOUBLE) AS DECIMAL(6,2)) AS v3, CAST(CAST('9.995' AS DOUBLE) AS DECIMAL(6,2)) AS v4, CAST(CAST('99.995' AS DOUBLE) AS DECIMAL(6,2)) AS v5"
+  },
+  {
+    "id": "TRY-DOUBLE-DECIMAL-RANGE",
+    "source": "synthetic",
+    "capability": "try_cast",
+    "priority": "P1",
+    "sql": "SELECT TRY_CAST(CAST('999.994' AS DOUBLE) AS DECIMAL(5,2)) AS v0, TRY_CAST(CAST('999.995' AS DOUBLE) AS DECIMAL(5,2)) AS v1, TRY_CAST(CAST('-999.995' AS DOUBLE) AS DECIMAL(5,2)) AS v2, TRY_CAST(CAST('NaN' AS DOUBLE) AS DECIMAL(5,2)) AS v3, TRY_CAST(CAST('Inf' AS DOUBLE) AS DECIMAL(5,2)) AS v4, TRY_CAST(CAST('-Inf' AS DOUBLE) AS DECIMAL(5,2)) AS v5, TRY_CAST(CAST('1e30' AS DOUBLE) AS DECIMAL(5,2)) AS v6"
+  },
+  {
+    "id": "CAST-FLOAT-DECIMAL-WIDTHS",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('1e30' AS DOUBLE) AS DECIMAL(38,2)) AS d, CAST(CAST('1e30' AS FLOAT) AS DECIMAL(38,2)) AS f, CAST(CAST('1.5' AS DOUBLE) AS DECIMAL(1,0)) AS a, CAST(CAST('-1.5' AS DOUBLE) AS DECIMAL(4,0)) AS b, CAST(CAST('12.125' AS DOUBLE) AS DECIMAL(18,2)) AS c, CAST(CAST('12.125' AS DOUBLE) AS DECIMAL(19,2)) AS e"
+  },
+  {
+    "id": "CAST-HUGEINT-BOOL",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('0' AS HUGEINT) AS BOOLEAN) AS z, CAST(CAST('-1' AS HUGEINT) AS BOOLEAN) AS n, TRY_CAST(CAST('170141183460469231731687303715884105727' AS HUGEINT) AS BOOLEAN) AS p, TRY_CAST(CAST(NULL AS HUGEINT) AS BOOLEAN) AS nil"
+  },
+  {
+    "id": "CAST-NUMERIC-NEW-BATCH",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT id, CAST(CAST(id AS DOUBLE)/100 AS DECIMAL(8,2)) AS d, TRY_CAST(CAST(id AS DOUBLE) AS DECIMAL(3,0)) AS t, TRY_CAST(CAST(id AS HUGEINT) AS BOOLEAN) AS b FROM {batch} ORDER BY id",
+    "ordered": true
+  },
+  {
+    "id": "CAST-FLOAT-DECIMAL-HALVES",
+    "source": "synthetic",
+    "capability": "cast",
+    "priority": "P1",
+    "sql": "SELECT CAST(CAST('2.5' AS DOUBLE) AS DECIMAL(2,0)) AS p, CAST(CAST('-2.5' AS DOUBLE) AS DECIMAL(2,0)) AS n, CAST(CAST('0.5' AS FLOAT) AS DECIMAL(2,0)) AS f, CAST(CAST('-0.5' AS FLOAT) AS DECIMAL(2,0)) AS fn"
+  }
+]

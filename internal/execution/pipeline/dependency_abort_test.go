@@ -58,3 +58,36 @@ func TestRunDAGSuccessDoesNotCallAbort(t *testing.T) {
 		t.Fatalf("abort calls=%d want=0", calls.Load())
 	}
 }
+
+type trackedDependencySource struct {
+	closes, reads int
+	err           error
+}
+
+func (s *trackedDependencySource) Next(context.Context) (*vector.DataChunk, bool, error) {
+	s.reads++
+	return nil, false, s.err
+}
+func (s *trackedDependencySource) Close() error { s.closes++; return nil }
+
+func TestRunDAGFailureClosesUnstartedSiblingsOnce(t *testing.T) {
+	want := errors.New("failed branch")
+	completedSource := &trackedDependencySource{}
+	completed := &Pipeline{ID: "completed", Source: completedSource, Sink: &sumSink{}}
+	failedSource := &trackedDependencySource{err: want}
+	failed := &Pipeline{ID: "failed", Source: failedSource, Sink: &sumSink{}}
+	unstartedSource := &trackedDependencySource{}
+	unstarted := &Pipeline{ID: "unstarted", Source: unstartedSource, Sink: &sumSink{}, Dependencies: []*Pipeline{completed}}
+	rootSource := &trackedDependencySource{}
+	var aborts atomic.Int32
+	root := &Pipeline{ID: "root", Source: rootSource, Sink: &sumSink{}, Dependencies: []*Pipeline{completed, failed, unstarted}, Abort: func() error { aborts.Add(1); return nil }}
+	if err := RunDAG(context.Background(), root, 1, nil); !errors.Is(err, want) {
+		t.Fatalf("error=%v", err)
+	}
+	if completedSource.closes != 1 || failedSource.closes != 1 || unstartedSource.closes != 1 || rootSource.closes != 1 || aborts.Load() != 1 {
+		t.Fatalf("close counts=%d,%d,%d,%d aborts=%d", completedSource.closes, failedSource.closes, unstartedSource.closes, rootSource.closes, aborts.Load())
+	}
+	if unstartedSource.reads != 0 || rootSource.reads != 0 {
+		t.Fatal("failed dependency allowed later execution")
+	}
+}

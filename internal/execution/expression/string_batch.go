@@ -32,7 +32,7 @@ func (e *Executor) executeStringBatch(expr *binder.BoundExpression, args []*vect
 		if len(args) != 2 || expr.Type.ID != types.Varchar {
 			return nil, false, nil
 		}
-	case function.LowerID:
+	case function.LowerID, function.UpperID:
 		if len(args) != 1 || expr.Type.ID != types.Varchar {
 			return nil, false, nil
 		}
@@ -128,7 +128,7 @@ func (e *Executor) executeStringBatch(expr *binder.BoundExpression, args []*vect
 				return nil, true, err
 			}
 		}
-	case function.LowerID:
+	case function.LowerID, function.UpperID:
 		writer, err := out.NewStringBatchWriter()
 		if err != nil {
 			return nil, true, err
@@ -140,8 +140,13 @@ func (e *Executor) executeStringBatch(expr *binder.BoundExpression, args []*vect
 				out.SetNull(row)
 				continue
 			}
-			lowered := strings.ToLower(string(value))
-			if err := writer.Append(row, []byte(lowered)); err != nil {
+			var converted string
+			if expr.FunctionID == function.UpperID {
+				converted = upperText(string(value))
+			} else {
+				converted = strings.ToLower(string(value))
+			}
+			if err := writer.Append(row, []byte(converted)); err != nil {
 				return nil, true, err
 			}
 		}

@@ -82,6 +82,7 @@ func (r *SourceResolver) ResolveRelation(ctx context.Context, name ast.Qualified
 		if entry.View == nil {
 			return binder.ResolvedRelation{}, fmt.Errorf("session: invalid view metadata for %s.%s", object.Schema, object.Name)
 		}
+		object=entry.View.Name
 		return binder.ResolvedRelation{ID: "view:" + object.Schema + "." + object.Name, Columns: binderColumns(entry.View.Columns)}, nil
 	case catalog.ObjectExternalTable:
 		if entry.ExternalTable == nil {
@@ -150,7 +151,7 @@ func catalogObjectName(name ast.QualifiedName) (catalog.ObjectName, error) {
 		return catalog.ObjectName{}, fmt.Errorf("session: relation name must be [schema.]object")
 	}
 	if len(name.Parts) == 1 {
-		return catalog.ObjectName{Schema: "main", Name: name.Parts[0].Name}, nil
+		return catalog.ObjectName{Name: name.Parts[0].Name}, nil
 	}
 	return catalog.ObjectName{Schema: name.Parts[0].Name, Name: name.Parts[1].Name}, nil
 }

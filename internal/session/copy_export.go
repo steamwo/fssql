@@ -286,7 +286,9 @@ func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (ex
 		format = "csv"
 	}
 	compression := strings.ToLower(strings.TrimSpace(request.Compression))
-	if compression == "" || compression == "none" {
+	if compression == "" && format == "parquet" {
+		compression = "snappy"
+	} else if compression == "" || compression == "none" {
 		compression = "identity"
 	}
 	config := exportpkg.FileWriterConfig{Schema: schema, Compression: compression}

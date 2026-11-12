@@ -2,7 +2,7 @@
 
 ## 配置与默认值
 
-fssql 不执行通用 SET。引擎时间函数使用 UTC；没有可变会话时区。DuckDB 的 `SET TimeZone='UTC'` 不需要重复执行。`threads` 对应 Config.Workers；未指定时执行器默认 1。内存、临时空间和目录分别使用 MemoryLimitBytes、TempLimitBytes、SpillMemoryBudgetBytes、TempDir、ManifestDir。扩展加载与 force_mbedtls_unsafe 无对应项；加密导出支持 CopyTo/ParquetKeys 与下列受限 SQL 入口。
+fssql 支持连接级 `SET/RESET TimeZone` 和 `threads`（别名 max_workers），默认时区 UTC，线程数默认来自 Config.Workers。查询开始时冻结配置，后续 SET 不修改已运行查询。未知配置项明确拒绝。内存、临时空间和目录分别使用 MemoryLimitBytes、TempLimitBytes、SpillMemoryBudgetBytes、TempDir、ManifestDir。扩展加载与 force_mbedtls_unsafe 无对应项；加密导出支持 CopyTo/ParquetKeys 与下列受限 SQL 入口。
 
 SQL COPY 和 CopyTo 的 Parquet 默认仍为 identity；需要 DuckDB 默认行为时显式使用 `Compression: "snappy"`，或 SQL `COMPRESSION snappy`。不静默修改原生 API 的已有默认值。
 
@@ -91,4 +91,4 @@ reservoir 默认保持原生 Go 随机流。Config.SampleCompatibility 可显式
 
 ## 未承诺能力
 
-ATTACH、PostgreSQL/MySQL scanner 明确不支持。TableFunction 不是 scanner 的等价替代。SAMPLE 的跨引擎兼容以差分证据的具体方法、版本、标准库与输入分批为准；完整 TEMP 隔离仍未实现。
+ATTACH、PostgreSQL/MySQL scanner 明确不支持。TableFunction 不是 scanner 的等价替代。SAMPLE 的跨引擎兼容以差分证据的具体方法、版本、标准库与输入分批为准；database/sql 物理连接具有独立 TEMP 命名空间；连接关闭释放 TEMP 快照。连接池复用沿用物理连接状态，需固定会话时使用 sql.Conn。

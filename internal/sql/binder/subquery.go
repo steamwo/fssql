@@ -53,6 +53,7 @@ func (b *Binder) bindInSubquery(e *ast.InSubqueryExpr) (*BoundExpression, error)
 		}
 	}
 	expr := &BoundExpression{Kind: BoundSubquery, Type: types.LogicalType{ID: types.Boolean}, Nullable: true, Span: e.Span, Op: "IN", Children: []*BoundExpression{left}, Subquery: q}
+	expr.Comparison = e.Comparison
 	if e.Not {
 		return &BoundExpression{Kind: BoundUnary, Type: expr.Type, Nullable: true, Span: e.Span, Op: "NOT", Children: []*BoundExpression{expr}}, nil
 	}

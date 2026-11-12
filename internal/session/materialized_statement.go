@@ -25,14 +25,16 @@ func (e *StableStatementEngine) prepareCreateTableAs(ctx context.Context, q *que
 	if err != nil {
 		return nil, err
 	}
+	if stmt.Temporary {name.Schema="temp"}else if name.Schema==""{name.Schema="main"}
 	prepared, err := e.selects.prepareSelect(ctx, q, sql, stmt.Query)
 	if err != nil {
 		return nil, err
 	}
-	return &preparedCreateTableAs{engine: e, name: name, input: prepared}, nil
+	return &preparedCreateTableAs{engine: e, name: name, input: prepared,temporary:stmt.Temporary||name.Schema=="temp"}, nil
 }
 
 type preparedCreateTableAs struct {
+	temporary bool
 	engine *StableStatementEngine
 	name   catalog.ObjectName
 	input  PreparedStatement
@@ -50,7 +52,9 @@ func (p *preparedCreateTableAs) Run(q *query.Context, sink pipeline.Sink) (err e
 	} else if exists {
 		return fmt.Errorf("catalog object already exists: %s.%s", p.name.Schema, p.name.Name)
 	}
-	table, cleanup, err := p.engine.materialize(q, p.input)
+	input:=p.input
+	if p.temporary{input=&scopedMaterializedInput{PreparedStatement:input,sessionID:q.SessionID}}
+	table, cleanup, err := p.engine.materialize(q, input)
 	if err != nil {
 		return err
 	}
@@ -61,12 +65,17 @@ func (p *preparedCreateTableAs) Run(q *query.Context, sink pipeline.Sink) (err e
 		}
 	}()
 	table.Name = p.name
-	if err = tx.CreateExternalTable(q.Context(), table); err != nil {
+	if p.temporary {creator,ok:=tx.(interface{CreateTemporaryExternalTable(context.Context,catalog.ExternalTable)error});if !ok{return fmt.Errorf("session catalog does not support temporary tables")};err=creator.CreateTemporaryExternalTable(q.Context(),table)}else{err=tx.CreateExternalTable(q.Context(),table)}
+	if err != nil {
 		return err
 	}
 	if err = tx.Commit(q.Context()); err != nil {
 		return err
 	}
 	committed = true
+	if p.temporary&&cleanup!=nil {p.engine.addSessionCleanup(cleanup)}
 	return sink.Finalize(q.Context())
 }
+
+type scopedMaterializedInput struct{PreparedStatement;sessionID string}
+func(s *scopedMaterializedInput)MaterializedSession()string{return s.sessionID}

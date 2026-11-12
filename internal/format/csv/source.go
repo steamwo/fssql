@@ -371,7 +371,7 @@ func (s *Source) runJob(ctx context.Context, job rangeJob) (*vector.DataChunk, *
 				chunk = &vector.DataChunk{Cardinality: rows}
 			}
 		} else {
-			chunk, consumed, decodeErr = DecodeChunk(data, s.types, DecodeOptions{Lex: s.lex, Final: final, NullLiteral: s.null, Projection: s.projection, MaxRows: maxRows}, s.scope, s.bm)
+			chunk, consumed, decodeErr = DecodeChunk(data, s.types, DecodeOptions{DateFormat:s.binding.inference.DateFormat,TimestampFormat:s.binding.inference.TimestampFormat,Formats:s.binding.schema.Formats,Lex: s.lex, Final: final, NullLiteral: s.null, Projection: s.projection, MaxRows: maxRows}, s.scope, s.bm)
 		}
 		if !job.serial {
 			result.Buffer.Release()

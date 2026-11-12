@@ -12,6 +12,25 @@ func bindTemplateSelect(query *ast.SelectStmt, values []ast.Expr) (*ast.SelectSt
 
 type templateBinder struct{ values []ast.Expr }
 
+func(b *templateBinder)statement(stmt ast.Statement)(ast.Statement,error){
+	switch s:=stmt.(type){
+	case *ast.CreateSecretStmt:
+		out:=*s;out.Options=append([]ast.SecretOption(nil),s.Options...);for i:=range out.Options{if raw:=out.Options[i].StringParameter;raw!=nil{value,err:=b.expr(raw);if err!=nil{return nil,err};lit,ok:=unwrapParameter(value).(*ast.LiteralExpr);if !ok||lit.Kind!=ast.LiteralString{return nil,fmt.Errorf("secret value parameters must be VARCHAR")};out.Options[i].StringValue=lit;out.Options[i].StringParameter=nil}};return &out,nil
+	case *ast.SetStmt:out:=*s;var err error;out.Value,err=b.expr(s.Value);out.Value=unwrapParameter(out.Value);return &out,err
+	case *ast.SelectStmt:return b.selectQuery(s)
+	case *ast.CreateViewStmt:out:=*s;var err error;out.Query,err=b.selectQuery(s.Query);if err!=nil{return nil,err};out.BoundSQL,err=ast.FormatSelect(out.Query);return &out,err
+	case *ast.CreateTableAsStmt:out:=*s;var err error;out.Query,err=b.selectQuery(s.Query);return &out,err
+	case *ast.DescribeStmt:out:=*s;var err error;out.Query,err=b.selectQuery(s.Query);return &out,err
+	case *ast.CopyStmt:
+		out:=*s;var err error;out.Query,err=b.selectQuery(s.Query);if err!=nil{return nil,err}
+		if s.DestinationParameter!=nil{v,err:=b.expr(s.DestinationParameter);if err!=nil{return nil,err};lit,ok:=unwrapParameter(v).(*ast.LiteralExpr);if !ok||lit.Kind!=ast.LiteralString{return nil,fmt.Errorf("COPY destination parameter must be VARCHAR")};out.Destination=lit;out.DestinationParameter=nil}
+		out.Options=append([]ast.CopyOption(nil),s.Options...);for i:=range out.Options{out.Options[i].Value,err=b.expr(out.Options[i].Value);if err!=nil{return nil,err};out.Options[i].Value=unwrapParameter(out.Options[i].Value)};return &out,nil
+	case *ast.CreateExternalTableStmt:
+		out:=*s;if s.SourceParameter!=nil{v,err:=b.expr(s.SourceParameter);if err!=nil{return nil,err};lit,ok:=unwrapParameter(v).(*ast.LiteralExpr);if !ok||lit.Kind!=ast.LiteralString{return nil,fmt.Errorf("external table source parameter must be VARCHAR")};out.Source=lit;out.SourceParameter=nil};return &out,nil
+	default:return nil,fmt.Errorf("sql parameter binding is not supported for %T",stmt)
+	}
+}
+
 func (b *templateBinder) selectQuery(query *ast.SelectStmt) (*ast.SelectStmt, error) {
 	if query == nil {
 		return nil, nil
@@ -119,6 +138,8 @@ func (b *templateBinder) expr(expr ast.Expr) (ast.Expr, error) {
 			}
 		}
 		return &out, nil
+	case *ast.CopyEncryptionExpr:
+		out:=*e;out.Fields=append([]ast.CopyOption(nil),e.Fields...);for i:=range out.Fields{var err error;out.Fields[i].Value,err=b.expr(out.Fields[i].Value);if err!=nil{return nil,err};out.Fields[i].Value=unwrapParameter(out.Fields[i].Value)};return &out,nil
 	case *ast.IsNullExpr:
 		out := *e
 		var err error

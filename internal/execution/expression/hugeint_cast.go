@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"strings"
 
 	"github.com/steamwo/fssql/internal/core/types"
 )
@@ -16,10 +15,10 @@ func castHugeIntScalar(value ScalarValue, target types.LogicalType) (ScalarValue
 	case value.Type.ID == types.HugeInt:
 		integer = types.Int128Big(value.Int128)
 	case value.Type.ID == types.Varchar && !value.Type.Binary:
-		var ok bool
-		integer, ok = new(big.Int).SetString(strings.TrimSpace(string(value.Bytes)), 10)
-		if !ok {
-			return ScalarValue{}, fmt.Errorf("invalid HUGEINT text")
+		var err error
+		integer, err = parseSQLIntegerText(string(value.Bytes))
+		if err != nil {
+			return ScalarValue{}, err
 		}
 	case value.Type.ID == types.Decimal:
 		integer = rescaleDecimalInteger(types.Int128Big(value.Int128), value.Type.Decimal.Scale, 0)
@@ -41,6 +40,8 @@ func castHugeIntScalar(value ScalarValue, target types.LogicalType) (ScalarValue
 		return ScalarValue{}, fmt.Errorf("unsupported CAST %d -> %d", value.Type.ID, target.ID)
 	}
 	switch {
+	case target.ID == types.Boolean:
+		out.Bool = integer.Sign() != 0
 	case target.ID == types.HugeInt:
 		wide, ok := types.Int128FromBig(integer)
 		if !ok {

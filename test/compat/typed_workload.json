@@ -1,0 +1,190 @@
+[
+  {
+    "id": "TYPE-NULL",
+    "source": "synthetic",
+    "capability": "null",
+    "priority": "P0",
+    "sql": "SELECT CAST(NULL AS VARCHAR) AS missing, 'NULL' AS text, '' AS empty"
+  },
+  {
+    "id": "TYPE-WIDE",
+    "source": "synthetic",
+    "capability": "exact-numeric",
+    "priority": "P0",
+    "sql": "SELECT CAST('12345678901234567890.120000' AS DECIMAL(38,6)) AS d, CAST('170141183460469231731687303715884105727' AS HUGEINT) AS h, CAST('18446744073709551615' AS UBIGINT) AS u"
+  },
+  {
+    "id": "TYPE-TIME",
+    "source": "synthetic",
+    "capability": "temporal",
+    "priority": "P0",
+    "sql": "SELECT CAST('1969-12-31' AS DATE) AS d, CAST('2026-11-11 12:13:14.123456789' AS TIMESTAMP_NS) AS n, CAST('2026-11-11 12:13:14.123456' AS TIMESTAMPTZ) AS z"
+  },
+  {
+    "id": "TYPE-FLOAT",
+    "source": "synthetic",
+    "capability": "float",
+    "priority": "P0",
+    "sql": "SELECT CAST('NaN' AS DOUBLE) AS n, CAST('Infinity' AS DOUBLE) AS p, CAST('-Infinity' AS DOUBLE) AS m, CAST('-0' AS DOUBLE) AS z, CAST('1.1' AS FLOAT) AS f"
+  },
+  {
+    "id": "TYPE-BLOB",
+    "source": "synthetic",
+    "capability": "blob",
+    "priority": "P0",
+    "sql": "SELECT CAST('ab' AS BLOB) AS b"
+  },
+  {
+    "id": "ROWS-MULTISET",
+    "source": "synthetic",
+    "capability": "row-shape",
+    "priority": "P0",
+    "sql": "SELECT 'a' AS x, 'bc' AS y UNION ALL SELECT 'ab', 'c' UNION ALL SELECT 'a', 'bc'"
+  },
+  {
+    "id": "ROWS-EMPTY",
+    "source": "synthetic",
+    "capability": "row-shape",
+    "priority": "P0",
+    "sql": "SELECT CAST(NULL AS BIGINT) AS v WHERE FALSE"
+  },
+  {
+    "id": "UPPER-UNICODE",
+    "source": "synthetic",
+    "capability": "upper",
+    "priority": "P1",
+    "sql": "SELECT upper('aßıſé中😊ﬃ') AS v, upper('') AS empty, upper(NULL) AS missing"
+  },
+  {
+    "id": "UPPER-ROWS",
+    "source": "synthetic",
+    "capability": "upper",
+    "priority": "P1",
+    "ordered": true,
+    "sql": "WITH t AS (SELECT 1 AS id, 'äb' AS v UNION ALL SELECT 2, NULL UNION ALL SELECT 3, 'ß') SELECT id, upper(v) AS v FROM t ORDER BY id"
+  },
+  {
+    "id": "ABS-SIGNED",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "sql": "SELECT abs(CAST('-127' AS TINYINT)) AS a, abs(CAST('-32767' AS SMALLINT)) AS b, abs(CAST('-2147483647' AS INTEGER)) AS c, abs(CAST('-9223372036854775807' AS BIGINT)) AS d, abs(NULL) AS n"
+  },
+  {
+    "id": "ABS-UNSIGNED",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "sql": "SELECT abs(CAST('255' AS UTINYINT)) AS a, abs(CAST('65535' AS USMALLINT)) AS b, abs(CAST('4294967295' AS UINTEGER)) AS c, abs(CAST('18446744073709551615' AS UBIGINT)) AS d"
+  },
+  {
+    "id": "ABS-WIDE",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "sql": "SELECT abs(CAST('-170141183460469231731687303715884105727' AS HUGEINT)) AS h, abs(CAST('-12345678901234567890.120000' AS DECIMAL(38,6))) AS d, abs(CAST('-1.25' AS DECIMAL(6,2))) AS s"
+  },
+  {
+    "id": "ABS-FLOAT",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "sql": "SELECT abs(CAST('-1.25' AS FLOAT)) AS f, abs(CAST('-Infinity' AS DOUBLE)) AS d, abs(CAST('NaN' AS DOUBLE)) AS n, abs(CAST('-0' AS DOUBLE)) AS z"
+  },
+  {
+    "id": "ERROR-CONVERSION",
+    "source": "synthetic",
+    "capability": "errors",
+    "priority": "P0",
+    "error_category": "conversion",
+    "sql": "SELECT CAST('bad' AS BIGINT) AS v"
+  },
+  {
+    "id": "ERROR-BINDER",
+    "source": "synthetic",
+    "capability": "errors",
+    "priority": "P0",
+    "error_category": "binder",
+    "sql": "SELECT missing_column AS v"
+  },
+  {
+    "id": "ABS-OVERFLOW8",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "overflow",
+    "sql": "SELECT abs(CAST('-128' AS TINYINT)) AS v"
+  },
+  {
+    "id": "ABS-OVERFLOW16",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "overflow",
+    "sql": "SELECT abs(CAST('-32768' AS SMALLINT)) AS v"
+  },
+  {
+    "id": "ABS-OVERFLOW32",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "overflow",
+    "sql": "SELECT abs(CAST('-2147483648' AS INTEGER)) AS v"
+  },
+  {
+    "id": "ABS-OVERFLOW64",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "overflow",
+    "sql": "SELECT abs(CAST('-9223372036854775808' AS BIGINT)) AS v"
+  },
+  {
+    "id": "ABS-OVERFLOW128",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "overflow",
+    "sql": "SELECT abs(CAST('-170141183460469231731687303715884105728' AS HUGEINT)) AS v"
+  },
+  {
+    "id": "ABS-INVALID",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "error_category": "binder",
+    "sql": "SELECT abs('abc') AS v"
+  },
+  {
+    "id": "ERROR-PARSER",
+    "source": "synthetic",
+    "capability": "errors",
+    "priority": "P0",
+    "sql": "SELECT ( AS v",
+    "error_category": "parser"
+  },
+  {
+    "id": "UPPER-INVALID",
+    "source": "synthetic",
+    "capability": "upper",
+    "priority": "P1",
+    "sql": "SELECT upper(1) AS v",
+    "error_category": "binder"
+  },
+  {
+    "id": "ABS-BOOLEAN",
+    "source": "synthetic",
+    "capability": "abs",
+    "priority": "P1",
+    "sql": "SELECT abs(TRUE) AS v",
+    "error_category": "binder"
+  },
+  {
+    "id": "SCALAR-BATCH",
+    "source": "synthetic",
+    "capability": "upper-abs",
+    "priority": "P1",
+    "sql": "SELECT id, upper(CAST(grp AS VARCHAR) || 'a') AS u, abs(id - 2048) AS n FROM {batch} ORDER BY id",
+    "ordered": true
+  }
+]

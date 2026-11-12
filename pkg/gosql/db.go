@@ -72,6 +72,7 @@ type Config struct {
 }
 
 type DB struct {
+	owner *DB
 	memory            *memory.Manager
 	buffers           *memory.BufferManager
 	temporary         *storagetemp.TemporaryStorageManager
@@ -115,10 +116,12 @@ func Open(config Config) (*DB, error) {
 
 	manager := memory.NewManager(config.MemoryLimitBytes)
 	buffers := memory.NewBufferManager(nil)
-	cat, err := catalog.NewMemoryCatalog(config.CatalogMaxEntries)
+	baseCatalog, err := catalog.NewMemoryCatalog(config.CatalogMaxEntries)
 	if err != nil {
 		return nil, err
 	}
+	cat,err:=catalog.NewSessionCatalog(baseCatalog,config.CatalogMaxEntries)
+	if err!=nil{return nil,err}
 	functions := function.NewQueryCatalog()
 	materialized := &materializedRegistry{items: make(map[string]*Materialized), limit: config.CatalogMaxEntries}
 	functions, err = functions.With(function.Definition{ID: materializedFunctionID, Name: materializedFunctionName, Kind: function.Table, MinArgs: 1, MaxArgs: 1})
@@ -285,8 +288,10 @@ func (db *DB) Close() error {
 		return nil
 	}
 	db.closed.Store(true)
+ if db.owner!=nil{if db.engine==nil{return nil};return db.engine.CloseSession()}
+ var sessionErr error;if db.engine!=nil{sessionErr=db.engine.CloseSession()}
 	if db.materialized != nil {
-		return db.materialized.close()
+		return errors.Join(sessionErr,db.materialized.close())
 	}
 	return nil
 }
@@ -335,7 +340,7 @@ func (db *DB) prepareParsed(ctx context.Context, sql string, parsed ast.Statemen
 	if db == nil || db.engine == nil || db.memory == nil || db.temporary == nil {
 		return nil, nil, nil, errors.New("gosql: DB is uninitialized")
 	}
-	if db.closed.Load() {
+	if db.closed.Load() || (db.owner!=nil&&db.owner.closed.Load()) {
 		return nil, nil, nil, errors.New("gosql: DB is closed")
 	}
 	if err := ctx.Err(); err != nil {

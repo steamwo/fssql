@@ -72,11 +72,23 @@ func (c *ChunkKeyComparer) SelectEqual(probeRows []int, layout RowLayout, rows [
 				return semantics.EqualFloat64(math.Float64frombits(binary.LittleEndian.Uint64(a)), math.Float64frombits(binary.LittleEndian.Uint64(b)))
 			}
 		}
+		// Flat keys have a stable physical row index for this whole batch.
+		// Constants and dictionaries retain the representation-aware view.
+		flat, validity, isFlat := c.views[key].FlatData()
+		width, _ := c.chunk.Columns[c.columns[key]].Type.FixedSize()
+		isFlat = isFlat && col.Width == width && c.chunk.Columns[c.columns[key]].Count() >= c.chunk.Cardinality
+		allValid := isFlat && validity.AllValid(c.chunk.Cardinality)
 		kept := 0
 		for _, candidate := range selection[:n] {
 			var data []byte
 			var valid bool
-			if c.viewOK[key] {
+			if isFlat {
+				row := probeRows[candidate]
+				valid = allValid || validity.IsValid(row)
+				if valid {
+					data = flat[row*col.Width : (row+1)*col.Width]
+				}
+			} else if c.viewOK[key] {
 				data, valid = c.views[key].Value(probeRows[candidate])
 			} else {
 				data, valid = c.byteViews[key].Value(probeRows[candidate])

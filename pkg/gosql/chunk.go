@@ -240,6 +240,7 @@ func publicType(t types.LogicalType) Type {
 }
 
 func logicalTypeNameOf(t types.LogicalType) string {
+	if t.NullType {return "\"NULL\""}
 	if t.IsUnsignedInteger() {
 		switch t.ID {
 		case types.TinyInt:

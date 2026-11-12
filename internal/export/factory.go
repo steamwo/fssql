@@ -48,6 +48,9 @@ func NewFileWriterFactory(config FileWriterConfig, registry *vfs.Registry, scope
 		return nil, errors.New("export: writer factory schema is empty")
 	}
 	config.Format = FileFormat(strings.ToLower(strings.TrimSpace(string(config.Format))))
+	if config.Format == FormatParquet && strings.TrimSpace(config.Compression) == "" {
+		config.Compression = "snappy"
+	}
 	config.Compression = normalizeCompression(config.Compression)
 	switch config.Format {
 	case FormatCSV, FormatJSON, FormatNDJSON:

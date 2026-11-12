@@ -262,6 +262,8 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 	switch p.Kind {
 	case planner.LogicalOneRow:
 		out.Kind = planner.PhysicalOneRow
+	case planner.LogicalApply:
+		out.Kind = planner.PhysicalApply
 	case planner.LogicalUnionAll:
 		out.Kind = planner.PhysicalUnionAll
 	case planner.LogicalScan:

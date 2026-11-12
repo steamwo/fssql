@@ -128,6 +128,7 @@ func (c *DescribeCursor) Next(scope *memory.Scope, buffers *memory.BufferManager
 
 // DuckDBTypeName 将核心 LogicalType 格式化为 Stable SQL compatibility 使用的 DuckDB-style 类型文本。
 func DuckDBTypeName(t types.LogicalType) (string, error) {
+	if t.NullType{return "\"NULL\"",nil}
 	var b strings.Builder
 	if err := appendTypeName(&b, t, 0); err != nil {
 		return "", err
