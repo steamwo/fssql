@@ -86,6 +86,12 @@ func (w *compactEncoder) encryptedFileMeta(meta FileMetaData) error {
 		last = w.fieldHeader(last, 6, ctBinary)
 		w.binary([]byte(meta.CreatedBy))
 	}
+	if len(meta.ColumnOrders) > 0 {
+		last = w.fieldHeader(last, 7, ctList)
+		if err := w.columnOrders(meta.ColumnOrders); err != nil {
+			return err
+		}
+	}
 	_ = last
 	w.stop()
 	return nil

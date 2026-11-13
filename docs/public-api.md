@@ -148,6 +148,8 @@ if err != nil { return err }
 
 `destination` must use an enabled local/S3 driver. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity` (default), `gzip` or `zstd`; Parquet uses page compression `snappy` (default) or `identity`. Explicit `none` also disables compression. These defaults apply to both `CopyTo` and SQL COPY. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
 
+Parquet export automatically considers `RLE_DICTIONARY` for low-cardinality VARCHAR/BLOB column chunks, including encrypted output. Dictionaries are limited to 256 entries and 32 KiB of PLAIN dictionary bytes; small chunks, high cardinality, insufficient estimated savings or a preparation-time memory limit retain PLAIN encoding. Encoding selection is internal and does not change SQL values, NULL handling or the compression option. Page/column statistics remain available independently of encoding.
+
 For encrypted Parquet export, set `CopyOptions.Encryption` to `ParquetEncryptionOptions{Algorithm: gosql.ParquetAES256GCM, KeyID: keyID}` and provide `Config.ParquetKeys`. The resolver receives `(context.Context, keyID, algorithm)` and must return 16 bytes for `ParquetAES128GCM` or 32 bytes for `ParquetAES256GCM`. SQL/options/manifests carry the key identity, not key bytes. This is an export API; it does not expose a general encrypted-file read key provider.
 
 ### Go table and scalar functions

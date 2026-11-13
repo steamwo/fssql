@@ -143,6 +143,7 @@ type Statistics struct {
 	MinValue        []byte
 	IsMaxValueExact *bool
 	IsMinValueExact *bool
+	NaNCount        *int64
 }
 
 type ColumnMetaData struct {
@@ -183,6 +184,14 @@ type KeyValue struct {
 	Value *string
 }
 
+// ColumnOrder identifies the ordering of modern min_value/max_value bounds.
+type ColumnOrder uint8
+
+const (
+	UndefinedColumnOrder ColumnOrder = iota
+	TypeDefinedOrder
+)
+
 type FileMetaData struct {
 	Version          int32
 	Schema           []SchemaElement
@@ -190,4 +199,5 @@ type FileMetaData struct {
 	RowGroups        []RowGroup
 	KeyValueMetadata []KeyValue
 	CreatedBy        string
+	ColumnOrders     []ColumnOrder
 }

@@ -20,9 +20,11 @@ const (
 	parquetCryptoTagBytes    = 16
 	parquetUniqueFileIDBytes = 8
 
-	parquetModuleFooter         = int8(0)
-	parquetModuleDataPage       = int8(2)
-	parquetModuleDataPageHeader = int8(4)
+	parquetModuleFooter               = int8(0)
+	parquetModuleDataPage             = int8(2)
+	parquetModuleDictionaryPage       = int8(3)
+	parquetModuleDataPageHeader       = int8(4)
+	parquetModuleDictionaryPageHeader = int8(5)
 )
 
 // ParquetEncryptionConfig is the per-export native Parquet Modular Encryption state.

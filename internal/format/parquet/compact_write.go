@@ -157,8 +157,29 @@ func (w *compactEncoder) fileMeta(meta FileMetaData) error {
 		last = w.fieldHeader(last, 6, ctBinary)
 		w.binary([]byte(meta.CreatedBy))
 	}
+	if len(meta.ColumnOrders) > 0 {
+		last = w.fieldHeader(last, 7, ctList)
+		if err := w.columnOrders(meta.ColumnOrders); err != nil {
+			return err
+		}
+	}
 	_ = last
 	w.stop()
+	return nil
+}
+
+func (w *compactEncoder) columnOrders(orders []ColumnOrder) error {
+	if err := w.listHeader(ctStruct, len(orders)); err != nil {
+		return err
+	}
+	for _, order := range orders {
+		if order != TypeDefinedOrder {
+			return fmt.Errorf("parquet: unsupported column order %d", order)
+		}
+		w.fieldHeader(0, 1, ctStruct) // ColumnOrder.TYPE_ORDER
+		w.stop()                      // empty TypeDefinedOrder
+		w.stop()                      // ColumnOrder union
+	}
 	return nil
 }
 
@@ -470,6 +491,10 @@ func (w *compactEncoder) statistics(s Statistics) {
 	}
 	if s.IsMinValueExact != nil {
 		last = w.boolField(last, 8, *s.IsMinValueExact)
+	}
+	if s.NaNCount != nil {
+		last = w.fieldHeader(last, 9, ctI64)
+		w.i64(*s.NaNCount)
 	}
 	_ = last
 	w.stop()

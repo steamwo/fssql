@@ -2,6 +2,7 @@ package json
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -89,10 +90,13 @@ func allocatePlan(p *vectorPlan, scope *memory.Scope, bm *memory.BufferManager) 
 }
 
 type typedDecoder struct {
-	projection ProjectedPathSet
-	scratch    *memory.Buffer
-	path       [maxJSONDepth]string
-	recordSeen []bool // Reused by sequential record passes; nested objects keep local state.
+	projection            ProjectedPathSet
+	scratch               *memory.Buffer
+	path                  [maxJSONDepth]string
+	recordSeen            []bool // Reused by sequential record passes; nested objects keep local state.
+	fieldSchema           []types.StructField
+	fieldIndex            map[string]int
+	fieldIndexReservation *memory.Reservation
 }
 
 func newTypedDecoder(proj ProjectedPathSet, scope *memory.Scope, bm *memory.BufferManager) (*typedDecoder, error) {
@@ -103,10 +107,42 @@ func newTypedDecoder(proj ProjectedPathSet, scope *memory.Scope, bm *memory.Buff
 	return &typedDecoder{projection: proj, scratch: b}, nil
 }
 func (d *typedDecoder) close() {
+	if d.fieldIndexReservation != nil {
+		d.fieldIndex = nil
+		d.fieldSchema = nil
+		d.fieldIndexReservation.Release()
+		d.fieldIndexReservation = nil
+	}
 	if d.scratch != nil {
 		d.scratch.Release()
 		d.scratch = nil
 	}
+}
+
+// indexFields indexes wide root objects once per batch. Small and nested
+// schemas keep the linear path; a tight budget can also use that path.
+func (d *typedDecoder) indexFields(fields []types.StructField, scope *memory.Scope) error {
+	if len(fields) <= 8 {
+		return nil
+	}
+	// Account for map metadata before allocation; names borrow the schema.
+	reservation, err := scope.Reserve(memory.TagMetadata, int64(len(fields))*80)
+	if errors.Is(err, memory.ErrLimitExceeded) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	d.fieldIndexReservation = reservation
+	d.fieldSchema = fields
+	d.fieldIndex = make(map[string]int, len(fields))
+	for i, field := range fields {
+		// Preserve the first-match behavior of the linear lookup.
+		if _, exists := d.fieldIndex[field.Name]; !exists {
+			d.fieldIndex[field.Name] = i
+		}
+	}
+	return nil
 }
 func (d *typedDecoder) ensureScratch(n int) error {
 	if n < 1 {
@@ -137,6 +173,12 @@ func (d *typedDecoder) findField(raw []byte, fields []types.StructField) (int, e
 	decoded, err := d.decodedString(raw)
 	if err != nil {
 		return -1, err
+	}
+	if d.fieldIndex != nil && len(fields) == len(d.fieldSchema) && &fields[0] == &d.fieldSchema[0] {
+		if index, ok := d.fieldIndex[string(decoded)]; ok {
+			return index, nil
+		}
+		return -1, nil
 	}
 	for i, f := range fields {
 		if len(decoded) == len(f.Name) && bytes.Equal(decoded, []byte(f.Name)) {
@@ -175,6 +217,9 @@ func DecodeRecords(records [][]byte, schema []types.StructField, projection Proj
 		return nil, err
 	}
 	defer d.close()
+	if err := d.indexFields(schema, scope); err != nil {
+		return nil, err
+	}
 	d.recordSeen = make([]bool, len(schema))
 	// Scalar/STRUCT vectors already have an exact row count. Only a selected
 	// LIST needs an element-count pass before managed child-vector allocation.

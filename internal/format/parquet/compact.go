@@ -1,6 +1,7 @@
 package parquet
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -287,6 +288,12 @@ func (r *compactReader) fileMeta() (FileMetaData, error) {
 				return m, e
 			}
 			m.CreatedBy = string(v)
+		case 7:
+			v, e := r.columnOrderList()
+			if e != nil {
+				return m, e
+			}
+			m.ColumnOrders = v
 		default:
 			if e := r.skip(f.typ, 1); e != nil {
 				return m, e
@@ -297,6 +304,37 @@ func (r *compactReader) fileMeta() (FileMetaData, error) {
 		return m, errors.New("parquet: metadata missing schema")
 	}
 	return m, nil
+}
+
+func (r *compactReader) columnOrderList() ([]ColumnOrder, error) {
+	et, n, err := r.listHeader()
+	if err != nil {
+		return nil, err
+	}
+	if et != ctStruct {
+		return nil, fmt.Errorf("parquet: column order list type %d", et)
+	}
+	orders := make([]ColumnOrder, n)
+	for i := range orders {
+		last := int16(0)
+		for {
+			field, next, err := r.field(last)
+			if err != nil {
+				return nil, err
+			}
+			last = next
+			if field.typ == ctStop {
+				break
+			}
+			if field.id == 1 && field.typ == ctStruct {
+				orders[i] = TypeDefinedOrder
+			}
+			if err := r.skip(field.typ, 1); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return orders, nil
 }
 func (r *compactReader) schemaList() ([]SchemaElement, error) {
 	et, n, e := r.listHeader()
@@ -887,13 +925,13 @@ func (r *compactReader) statistics() (Statistics, error) {
 			if e != nil {
 				return s, e
 			}
-			s.Max = append([]byte(nil), v...)
+			s.Max = bytes.Clone(v)
 		case 2:
 			v, e := r.binary()
 			if e != nil {
 				return s, e
 			}
-			s.Min = append([]byte(nil), v...)
+			s.Min = bytes.Clone(v)
 		case 3:
 			v, e := r.i64()
 			if e != nil {
@@ -911,13 +949,13 @@ func (r *compactReader) statistics() (Statistics, error) {
 			if e != nil {
 				return s, e
 			}
-			s.MaxValue = append([]byte(nil), v...)
+			s.MaxValue = bytes.Clone(v)
 		case 6:
 			v, e := r.binary()
 			if e != nil {
 				return s, e
 			}
-			s.MinValue = append([]byte(nil), v...)
+			s.MinValue = bytes.Clone(v)
 		case 7:
 			v, e := r.boolValue(f)
 			if e != nil {
@@ -930,6 +968,12 @@ func (r *compactReader) statistics() (Statistics, error) {
 				return s, e
 			}
 			s.IsMinValueExact = &v
+		case 9:
+			v, e := r.i64()
+			if e != nil {
+				return s, e
+			}
+			s.NaNCount = &v
 		default:
 			if e := r.skip(f.typ, 1); e != nil {
 				return s, e
