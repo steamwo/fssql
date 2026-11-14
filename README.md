@@ -51,12 +51,368 @@ go run ./examples/quickstart
 
 示例按 8 个分节覆盖原生 Chunk、database/sql、SQL 查询能力、Go 表函数/UDF/HMAC/物化快照、本地文件与导出、Catalog 元数据、资源配置与错误边界。逐节说明与预期输出见 [quickstart README](examples/quickstart/README.md)，代码入口见 [main.go](examples/quickstart/main.go)。
 
+## 常用使用例子
+
+以下片段放在返回 `error` 的函数中使用；`ctx` 是调用方传入的 `context.Context`。`sqlDB` 表示 `OpenSQLDB` 返回的 `*sql.DB`，`db` 表示 `Open` 返回的 `*gosql.DB`，两者分别创建独立的引擎实例。按片段需要导入 Go 标准库及 `gosql`。
+
+### 参数查询、预编译与 NULL
+
+日常行式查询可以直接使用 `database/sql`，无需注册 driver 名称：
+
+```go
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{})
+if err != nil {
+    return err
+}
+defer sqlDB.Close()
+
+stmt, err := sqlDB.PrepareContext(ctx,
+    "SELECT id FROM range(5) AS t(id) WHERE id >= ? ORDER BY id")
+if err != nil {
+    return err
+}
+defer stmt.Close()
+
+rows, err := stmt.QueryContext(ctx, int64(3))
+if err != nil {
+    return err
+}
+defer rows.Close()
+for rows.Next() {
+    var id int64
+    if err := rows.Scan(&id); err != nil {
+        return err
+    }
+    fmt.Println(id) // 依次输出 3、4
+}
+if err := rows.Err(); err != nil {
+    return err
+}
+if err := rows.Close(); err != nil {
+    return err
+}
+
+var amount string
+err = sqlDB.QueryRowContext(ctx,
+    "SELECT CAST($amount AS DECIMAL(38,2))",
+    sql.Named("amount", "12345678901234567890.12"),
+).Scan(&amount)
+if err != nil {
+    return err
+}
+fmt.Println(amount) // 12345678901234567890.12
+
+var optional sql.NullString
+if err := sqlDB.QueryRowContext(ctx,
+    "SELECT CAST(? AS VARCHAR)", nil).Scan(&optional); err != nil {
+    return err
+}
+fmt.Println(optional.Valid) // false
+```
+
+参数支持 `?`、连续编号 `$1`/`$2` 或 `$name`，同一语句不能混用。参数绑定值，不能替代表名、列名或 SQL 片段。`PrepareContext` 缓存解析语法，每次执行仍会绑定参数并重新规划。多行结果应关闭 `Rows` 并检查 `Rows.Err()`；单行查询使用 `QueryRowContext(...).Scan(...)`。
+
+### 查询本地 CSV、JSON 和 Parquet
+
+下面的片段会创建一个临时 CSV，按地区汇总，并在结束后清理。额外导入 `os`、`path/filepath`、`fmt`：
+
+```go
+root, err := os.MkdirTemp("", "fssql-example-*")
+if err != nil {
+    return err
+}
+defer os.RemoveAll(root)
+
+path := filepath.Join(root, "orders.csv")
+if err := os.WriteFile(path, []byte(
+    "id,region,amount\n1,east,10\n2,east,20\n3,west,30\n",
+), 0o600); err != nil {
+    return err
+}
+uri, err := gosql.FileURI(path)
+if err != nil {
+    return err
+}
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{
+    LocalFiles: &gosql.LocalFileConfig{RootDir: root},
+})
+if err != nil {
+    return err
+}
+defer sqlDB.Close()
+
+rows, err := sqlDB.QueryContext(ctx, `
+    SELECT region, sum(amount) AS total
+    FROM read_csv(?, header=true,
+        columns={'id':'BIGINT','region':'VARCHAR','amount':'BIGINT'})
+    GROUP BY region ORDER BY region`, uri)
+if err != nil {
+    return err
+}
+defer rows.Close()
+for rows.Next() {
+    var region string
+    var total int64
+    if err := rows.Scan(&region, &total); err != nil {
+        return err
+    }
+    fmt.Println(region, total) // east 30，然后 west 30
+}
+if err := rows.Err(); err != nil {
+    return err
+}
+```
+
+`LocalFiles.RootDir` 必须是绝对目录，文件访问限制在该根目录内。已有数据目录可先用 `filepath.Abs("data")` 取得绝对路径。本地 URI 使用 `gosql.FileURI` 生成，尤其不要手工拼接 Windows 路径。`TempDir`/`ManifestDir` 只用于临时存储，不会启用本地数据文件访问。
+
+其他读取方式如下；`?` 绑定对应文件的 URI，文件需要事先存在：
+
+| 数据格式 / 场景 | 查询语句 |
+| --- | --- |
+| CSV 自动推断 | `SELECT * FROM read_csv(?, header=true)` |
+| JSON 数组 | `SELECT * FROM read_json(?)` |
+| 逐行 JSON | `SELECT * FROM read_ndjson(?)` |
+| Parquet 过滤 | `SELECT id, amount FROM read_parquet(?) WHERE amount >= 20` |
+| 文件集合 | `SELECT * FROM read_parquet(?)`，参数可用根目录内 `*.parquet` 的 URI |
+| 查看列定义 | `DESCRIBE SELECT * FROM read_parquet(?)` |
+
+### 聚合、JOIN、窗口与集合查询
+
+以下 SQL 可分别传给 `QueryContext` 执行，不需要外部数据。`range(5)` 生成 0 到 4，`range(1, 6)` 生成 1 到 5，结束值不包含在结果中。
+
+```sql
+-- CTE、分组聚合与 HAVING：返回 bucket=0,total=6 和 bucket=1,total=9。
+WITH orders AS (
+    SELECT id, id % 2 AS bucket FROM range(1, 6) AS t(id)
+)
+SELECT bucket, sum(id) AS total
+FROM orders GROUP BY bucket HAVING sum(id) >= 6 ORDER BY bucket;
+
+-- JOIN：返回 id=1 和 id=2。
+SELECT a.id, b.id AS matched
+FROM range(3) AS a(id)
+JOIN range(1, 4) AS b(id) ON a.id = b.id
+ORDER BY a.id;
+
+-- 窗口函数：按 id 倒序编号，返回 (2,1)、(1,2)、(0,3)。
+SELECT id, row_number() OVER (ORDER BY id DESC) AS rn
+FROM range(3) AS t(id) ORDER BY rn;
+
+-- EXISTS 子查询：返回 id=1 和 id=2。
+SELECT a.id FROM range(4) AS a(id)
+WHERE EXISTS (SELECT 1 FROM range(1, 3) AS b(id) WHERE a.id = b.id)
+ORDER BY a.id;
+
+-- UNION 去重，UNION ALL 保留重复行。
+SELECT 1 AS id UNION SELECT 1 UNION SELECT 2 ORDER BY id;
+```
+
+还支持 `INTERSECT`/`EXCEPT`（含 `ALL`）、`UNION BY NAME`、LATERAL、采样、标量子查询和常用字符串/日期/正则函数。完整范围见[能力矩阵](docs/architecture/feature-contract.md)与[公共 API 文档](docs/public-api.md)。
+
+### 临时表、视图与会话
+
+需要跨多条语句保留 TEMP 表或会话设置时，使用 `sql.Conn` 固定连接。额外导入 `fmt`：
+
+```go
+conn, err := sqlDB.Conn(ctx)
+if err != nil {
+    return err
+}
+defer conn.Close()
+if _, err := conn.ExecContext(ctx,
+    "CREATE TEMP TABLE orders AS SELECT id FROM range(3) AS t(id)"); err != nil {
+    return err
+}
+if _, err := conn.ExecContext(ctx,
+    "CREATE TEMP VIEW report AS SELECT count(*) AS n FROM orders"); err != nil {
+    return err
+}
+var count int64
+if err := conn.QueryRowContext(ctx, "SELECT n FROM report").Scan(&count); err != nil {
+    return err
+}
+fmt.Println(count) // 3
+```
+
+TEMP 对象和 `TimeZone`/`threads` 等设置属于物理连接；`sql.Conn.Close()` 将连接归还池中，物理连接关闭时释放其 TEMP 对象。`Open` 使用内存 Catalog，重新打开引擎不会恢复表和视图；CTAS 是查询快照，视图保存查询定义。可以查询 `information_schema.columns` 获取元数据。
+
+### 原生 Chunk 与物化快照
+
+需要批量读取结果时，使用 `Open` 和 `QueryChunks`。额外导入 `fmt`：
+
+```go
+db, err := gosql.Open(gosql.Config{})
+if err != nil {
+    return err
+}
+defer db.Close()
+columns, err := db.QueryChunks(ctx,
+    "SELECT id FROM range(3) AS t(id) ORDER BY id",
+    func(chunk *gosql.Chunk) error {
+        for row := 0; row < chunk.RowCount(); row++ {
+            id, valid, err := chunk.Int64(row, 0)
+            if err != nil {
+                return err
+            }
+            if valid {
+                fmt.Println(id) // 依次输出 0、1、2
+            }
+        }
+        return nil
+    })
+if err != nil {
+    return err
+}
+fmt.Println(columns[0].Name) // id
+
+snapshot, err := db.Materialize(ctx, "SELECT id FROM range(3) AS t(id)")
+if err != nil {
+    return err
+}
+defer snapshot.Close()
+// SQL() 返回查询该快照的 SELECT，可作为派生表用于后续查询。
+_, err = db.QueryChunks(ctx, "SELECT count(*) FROM ("+snapshot.SQL()+") AS s",
+    func(chunk *gosql.Chunk) error {
+        n, _, err := chunk.Int64(0, 0)
+        if err != nil {
+            return err
+        }
+        fmt.Println(n) // 3
+        return nil
+    })
+if err != nil {
+    return err
+}
+```
+
+`Chunk` 仅在回调期间有效，不要保留它。访问器按 `(row, column)` 从 0 索引，`valid=false` 表示 NULL；访问器需要匹配列类型。常用方法包括 `Int64`、`Uint64`、`Float64`、`Bool`、`String`、`Bytes`、`Int128`。`Value`、`List`、`Struct` 返回拥有独立数据的值，可在回调结束后保留；嵌套结果建议使用原生 API。
+
+`Materialize` 执行一次并创建有界快照，超出内存预算后可 spill；使用完毕必须关闭快照。更多类型访问与生命周期示例见 [native.go](examples/quickstart/native.go) 和 [functions.go](examples/quickstart/functions.go)。
+
+### 导出 CSV、JSON、NDJSON 和 Parquet
+
+下面将查询结果导出为 Parquet。`root` 为已存在的绝对数据目录，额外导入 `path/filepath`、`fmt`：
+
+```go
+db, err := gosql.Open(gosql.Config{
+    LocalFiles: &gosql.LocalFileConfig{RootDir: root},
+})
+if err != nil {
+    return err
+}
+defer db.Close()
+destination, err := gosql.FileURI(filepath.Join(root, "result.parquet"))
+if err != nil {
+    return err
+}
+result, err := db.CopyTo(ctx,
+    "SELECT id FROM range(3) AS t(id)", destination,
+    gosql.CopyOptions{
+        Format:      gosql.CopyFormatParquet,
+        Compression: "snappy",
+    })
+if err != nil {
+    return err
+}
+fmt.Printf("rows=%d bytes=%d\n", result.Rows, result.Bytes) // rows=3
+```
+
+将 `Format` 换成 `CopyFormatCSV`、`CopyFormatJSON` 或 `CopyFormatNDJSON`，并修改目标扩展名，即可导出其他格式。文本格式压缩支持 `identity`/`gzip`/`zstd`，Parquet 页压缩支持 `snappy`/`identity`。CSV 默认输出表头，分隔符等通过 `CopyOptions` 配置。目标已存在时不会覆盖；成功返回表示最终文件已提交。
+
+也可通过 `ExecContext` 执行 SQL COPY，目标 URI 作为参数传入：
+
+```go
+_, err := sqlDB.ExecContext(ctx,
+    "COPY (SELECT id FROM range(3) AS t(id)) TO ? (FORMAT PARQUET)",
+    destination)
+if err != nil {
+    return err
+}
+```
+
+SQL COPY 使用配置了本地或 S3 driver 的 `sqlDB`，目标同样必须尚不存在。需要导出行数、字节数时使用 `CopyTo`；`database/sql` 的 `RowsAffected()` 当前返回 0。加密 Parquet 导出和压缩往返示例见 [files.go](examples/quickstart/files.go)。
+
+### 注册 Go 标量函数与表函数
+
+标量 UDF 可将 Go 逻辑用于 SQL 表达式。下面注册大写转换函数，额外导入 `strings`、`fmt`：
+
+```go
+upper := gosql.ScalarFunction{
+    Name:          "app_upper",
+    Arguments:     []gosql.Type{{ID: "VARCHAR"}},
+    Result:        gosql.Type{ID: "VARCHAR"},
+    Deterministic: true,
+    NullHandling:  gosql.ScalarNullPropagate,
+    Eval: func(args []gosql.ScalarValue) (gosql.ScalarValue, error) {
+        return gosql.ScalarValue{
+            Type: gosql.Type{ID: "VARCHAR"}, Valid: true,
+            String: strings.ToUpper(args[0].String),
+        }, nil
+    },
+}
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{
+    ScalarFunctions: []gosql.ScalarFunction{upper},
+})
+if err != nil {
+    return err
+}
+defer sqlDB.Close()
+var text string
+if err := sqlDB.QueryRowContext(ctx,
+    "SELECT app_upper(?)", "hello").Scan(&text); err != nil {
+    return err
+}
+fmt.Println(text) // HELLO
+```
+
+默认 NULL 传播策略不会为 NULL 输入调用 `Eval`。需要自行处理 NULL 时使用 `ScalarNullCall` 并检查参数的 `Valid`。`gosql.NewHMACSHA256ScalarFunction(key)` 可创建 `data_plane_hmac_sha256` 函数，按相同方式注册。
+
+应用内数据可以通过 `Config.TableFunctions` 暴露为 SQL 数据源：声明 `TableFunction{Name, Columns, Open}`，由 `Open` 返回实现 `Next(ctx, BatchWriter)` 和 `Close()` 的 `BatchReader`。每批最多填充 `Capacity()` 行，`io.EOF` 表示结束；当前自定义表函数使用固定 schema、零 SQL 参数。最小 ID 数据源示例见[公共 API](docs/public-api.md#go-table-and-scalar-functions)，完整批量读取实现见 [functions.go](examples/quickstart/functions.go)。
+
+### S3 / MinIO 与资源限制
+
+本地文件和 S3 都需要显式启用。下面是 MinIO 配置，额外导入 `os`、`time`：
+
+```go
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{
+    MemoryLimitBytes:       128 << 20, // 128 MiB 受管内存
+    TempLimitBytes:         1 << 30,   // 1 GiB 临时存储
+    SpillMemoryBudgetBytes: 8 << 20,
+    Workers:               2,
+    S3: &gosql.S3Config{
+        Endpoint:          "http://127.0.0.1:9000",
+        Region:            "us-east-1",
+        ForcePathStyle:    true,
+        AllowInsecureHTTP: true, // 此示例使用本地 HTTP 端点
+        AccessKey:         os.Getenv("AWS_ACCESS_KEY_ID"),
+        SecretKey:         os.Getenv("AWS_SECRET_ACCESS_KEY"),
+        SessionToken:      os.Getenv("AWS_SESSION_TOKEN"),
+        MaxRetries:        3,
+        RequestTimeout:    10 * time.Second,
+    },
+})
+if err != nil {
+    return err
+}
+defer sqlDB.Close()
+var count int64
+if err := sqlDB.QueryRowContext(ctx,
+    "SELECT count(*) FROM read_parquet(?)",
+    "s3://my-bucket/orders.parquet").Scan(&count); err != nil {
+    return err
+}
+```
+
+运行前准备好端点、凭据和对象；使用 HTTPS 端点时无需 `AllowInsecureHTTP`。S3 URI 同样可用于 COPY/CopyTo 导出。以上代码从环境变量显式传入凭据，不会自动启用未配置的协议。
+
+`Config{}` 默认使用 256 MiB 受管内存、1 GiB 临时存储和 1 个 worker；零值选择默认值。`MemoryUsed()` 只统计引擎受管内存，不代表进程 RSS 或 Go heap。超时可统一传入 `context.WithTimeout` 返回的上下文，并 `defer cancel()`；查询失败、取消和提前关闭都会进入资源清理路径。
+
 ## 当前公共 API 能力
 
 | 能力 | 当前入口与边界 |
 | --- | --- |
 | 原生查询 | `Open` → `QueryChunks`；Chunk 仅在回调期间有效，结果列信息通过 `[]Column` 返回。 |
-| 行式查询 | `OpenSQLDB` 返回 `*sql.DB`；支持 SELECT 参数、`PrepareContext` 及上下文取消。 |
+| 行式查询 | `OpenSQLDB` 返回 `*sql.DB`；支持值参数、`PrepareContext` 及上下文取消。 |
 | 控制语句与导出 | `DB.Exec` 执行 DDL、控制语句和 COPY；`DB.CopyTo` 提供结构化选项及导出统计。目标由已配置的 VFS driver 支持。 |
 | 数据源 | `Config.LocalFiles` 开启受根目录限制的本地文件访问，`Config.S3` 开启 S3；内建读取函数支持 Parquet、CSV、JSON、NDJSON。 |
 | Go 扩展 | `Config.TableFunctions` 注册固定 schema 的零参数批量表函数；`Config.ScalarFunctions` 注册标量函数，另有 HMAC-SHA256 辅助构造器。 |
@@ -65,7 +421,9 @@ go run ./examples/quickstart
 
 当前 `Config` 没有 SQLiteCatalog、自定义 VFS、SFTP、FTP 或 WebDAV 的注入入口，也没有公共 HTTP 服务构造器。内部模块的实现范围与外部项目可直接使用的范围，请以[公共 API 文档](docs/public-api.md)为准。
 
-SELECT 参数支持 `?`、`$1` 或 `$name`，预编译语句缓存解析结果；每次执行重新绑定参数并取得语句快照。事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回。LIST/STRUCT 公开类型元数据，但当前 `Chunk` 没有读取嵌套元素值的方法。
+值参数可用于 SELECT、已支持的 CREATE、COPY、DESCRIBE 和 SET 等语句。事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回；原生 DECIMAL 访问器返回未缩放整数，需结合 `Type.Scale` 解释。日期/时间的行式结果为 UTC `time.Time`。LIST/STRUCT 可通过原生 `Chunk.Value`/`List`/`Struct` 读取，`database/sql` 对非 NULL 嵌套值仍返回错误。
+
+当前不支持原生持久化表、`UPDATE`/`DELETE`/`MERGE`、递归 CTE 等能力。TEMP 命名空间与设置按物理连接隔离；依赖会话状态时应使用 `sql.Conn`。
 
 SQL 已实现非递归 CTE、集合谓词、按位置的 UNION/INTERSECT/EXCEPT（含 ALL）、嵌套标量子查询、参数域去相关，以及显式/隐式 LATERAL 派生表关联。具体支持范围、拒绝边界和验证入口见[公共 API 文档](docs/public-api.md)，不代表完整 DuckDB SQL 兼容或全部性能验收完成。
 
