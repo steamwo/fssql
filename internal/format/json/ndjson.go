@@ -411,14 +411,14 @@ func (s *NDJSONSource) runJob(ctx context.Context, j ndjsonJob) (*vector.DataChu
 			return nil, rem, nil
 		}
 		if s.countOnly {
-			err := validateCountRecords(ctx, records, s.binding.Schema().Fields, s.scope, s.bm)
+			err := validateCountRecords(ctx, records, s.binding.schema.Fields, s.scope, s.bm)
 			res.Buffer.Release()
 			if err != nil {
 				return nil, nil, err
 			}
 			return &vector.DataChunk{Cardinality: len(records)}, rem, nil
 		}
-		chunk, err := DecodeRecords(records, s.binding.Schema().Fields, s.projection, s.scope, s.bm)
+		chunk, err := DecodeRecords(records, s.binding.schema.Fields, s.projection, s.scope, s.bm)
 		res.Buffer.Release()
 		if err != nil {
 			return nil, nil, err

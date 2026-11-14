@@ -106,6 +106,12 @@ func encodeDefinitionLevels(out *parquetPageBuffer, vec *vector.Vector, start, c
 }
 
 func encodeParquetPlain(out *parquetPageBuffer, vec *vector.Vector, typ coretypes.LogicalType, start, count int) error {
+	if handled, err := encodeParquetFlatPlain(out, vec, typ, start, count); handled {
+		return err
+	}
+	if typ.ID == coretypes.Varchar {
+		return encodeParquetBytesPlain(out, vec, start, count)
+	}
 	if typ.ID == coretypes.Boolean {
 		var packed byte
 		bit := uint(0)
@@ -199,14 +205,6 @@ func encodeParquetPlain(out *parquetPageBuffer, vec *vector.Vector, typ coretype
 				binary.BigEndian.PutUint64(scratch[8:16], v.Lo)
 				if err := out.Append(scratch[:16]); err != nil { return err }
 			}
-		case coretypes.Varchar:
-			v, _ := vec.Bytes(row)
-			if uint64(len(v)) > math.MaxUint32 {
-				return errors.New("export: parquet byte array exceeds uint32")
-			}
-			binary.LittleEndian.PutUint32(scratch[:4], uint32(len(v)))
-			if err := out.Append(scratch[:4]); err != nil { return err }
-			if err := out.Append(v); err != nil { return err }
 		default:
 			return fmt.Errorf("export: unsupported parquet plain type %d", typ.ID)
 		}

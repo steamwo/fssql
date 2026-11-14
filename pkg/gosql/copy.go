@@ -37,6 +37,11 @@ type ParquetEncryptionOptions struct {
 type CopyOptions struct {
 	Format      CopyFormat
 	Compression string
+	// ParquetRowGroupRows defaults to 2048 when zero; only valid for Parquet.
+	ParquetRowGroupRows int
+	// ParquetPageRows defaults to min(512, row-group rows) when zero.
+	// It must not exceed the effective row-group size; only valid for Parquet.
+	ParquetPageRows int
 	// ForceQuote quotes every non-NULL CSV field, including column names.
 	ForceQuote bool
 	// DuckDBCompatible uses DuckDB BLOB and UTC timestamp text in CSV output.
@@ -68,14 +73,16 @@ func (db *DB) CopyTo(ctx context.Context, querySQL, destination string, options 
 		header = *options.Header
 	}
 	request := session.CopyRequest{
-		Destination:      destination,
-		Format:           string(options.Format),
-		Compression:      options.Compression,
-		Header:           header,
-		Delimiter:        options.Delimiter,
-		Quote:            options.Quote,
-		ForceQuote:       options.ForceQuote,
-		DuckDBCompatible: options.DuckDBCompatible,
+		Destination:         destination,
+		Format:              string(options.Format),
+		Compression:         options.Compression,
+		ParquetRowGroupRows: options.ParquetRowGroupRows,
+		ParquetPageRows:     options.ParquetPageRows,
+		Header:              header,
+		Delimiter:           options.Delimiter,
+		Quote:               options.Quote,
+		ForceQuote:          options.ForceQuote,
+		DuckDBCompatible:    options.DuckDBCompatible,
 	}
 	if options.Encryption != nil {
 		request.EncryptionAlgorithm = options.Encryption.Algorithm

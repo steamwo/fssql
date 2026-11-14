@@ -62,6 +62,9 @@ func NewFileWriterFactory(config FileWriterConfig, registry *vfs.Registry, scope
 		if config.Parquet.Encryption != nil {
 			return nil, errors.New("export: Parquet encryption is only valid for Parquet output")
 		}
+		if config.Parquet.RowGroupRows != 0 || config.Parquet.PageRows != 0 || config.Parquet.PageBufferSize != 0 {
+			return nil, errors.New("export: Parquet layout options are only valid for Parquet output")
+		}
 	case FormatParquet:
 		// Compression is a Parquet page codec here, never a whole-file compression layer.
 		switch config.Compression {
@@ -70,6 +73,11 @@ func NewFileWriterFactory(config FileWriterConfig, registry *vfs.Registry, scope
 			return nil, fmt.Errorf("export: unsupported Parquet page compression %q", config.Compression)
 		}
 		config.Parquet.Compression = config.Compression
+		var err error
+		config.Parquet, err = NormalizeParquetLayout(config.Parquet)
+		if err != nil {
+			return nil, err
+		}
 		if err := ValidateParquetEncryption(config.Parquet.Encryption); err != nil {
 			return nil, err
 		}

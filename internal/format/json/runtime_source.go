@@ -130,7 +130,7 @@ func (s *JSONRuntimeSource) Next(ctx context.Context) (*vector.DataChunk, bool, 
 		}
 		if len(records) > 0 {
 			// records 是 carry 的 slice views；DecodeRecords 完成前不能 compact/release carry。
-			chunk, decodeErr := DecodeRecords(records, s.binding.Schema().Fields, ProjectedPathSet{}, s.scope, s.bm)
+			chunk, decodeErr := DecodeRecords(records, s.binding.schema.Fields, ProjectedPathSet{}, s.scope, s.bm)
 			if decodeErr != nil {
 				return nil, false, s.failLocked(decodeErr)
 			}

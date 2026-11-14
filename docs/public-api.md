@@ -141,12 +141,16 @@ err := db.Exec(ctx, "COPY (SELECT 1) TO 's3://bucket/out.parquet'")
 result, err := db.CopyTo(ctx, "SELECT 1 AS id", destination, gosql.CopyOptions{
     Format: gosql.CopyFormatParquet,
     Compression: "snappy",
+    ParquetRowGroupRows: 8192,
+    ParquetPageRows: 2048,
 })
 if err != nil { return err }
 // result.Rows, result.Bytes and result.Columns describe committed output.
 ```
 
 `destination` must use an enabled local/S3 driver. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity` (default), `gzip` or `zstd`; Parquet uses page compression `snappy` (default) or `identity`. Explicit `none` also disables compression. These defaults apply to both `CopyTo` and SQL COPY. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
+
+`CopyOptions.ParquetRowGroupRows` and `ParquetPageRows` configure Parquet row-group/page boundaries independently of input chunks, including encrypted output. Zero selects the existing defaults: 2048 rows per group and 512 rows per page (clamped to smaller groups). Positive page rows must not exceed the effective group rows; negative sizes and layout options on text formats are rejected before opening output. Larger groups use the same DB memory budget and may fail when it is insufficient. These options apply to `CopyTo`; SQL COPY retains its existing layout defaults.
 
 Parquet export automatically considers `RLE_DICTIONARY` for low-cardinality VARCHAR/BLOB column chunks, including encrypted output. Dictionaries are limited to 256 entries and 32 KiB of PLAIN dictionary bytes; small chunks, high cardinality, insufficient estimated savings or a preparation-time memory limit retain PLAIN encoding. Encoding selection is internal and does not change SQL values, NULL handling or the compression option. Page/column statistics remain available independently of encoding.
 

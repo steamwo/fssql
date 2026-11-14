@@ -11,16 +11,17 @@ import (
 	"math"
 	"strings"
 
-	"github.com/golang/snappy"
 	"github.com/steamwo/fssql/internal/core/memory"
 	"github.com/steamwo/fssql/internal/core/vector"
 	"github.com/steamwo/fssql/internal/format/parquet"
 )
 
 const (
-	defaultParquetRowGroupRows = 2048
-	defaultParquetPageRows     = 512
-	defaultParquetPageBuffer   = 64 << 10
+	// DefaultParquetRowGroupRows preserves the default export layout.
+	DefaultParquetRowGroupRows = 2048
+	// DefaultParquetPageRows is clamped to smaller row groups when omitted.
+	DefaultParquetPageRows   = 512
+	defaultParquetPageBuffer = 64 << 10
 )
 
 var (
@@ -68,20 +69,10 @@ func NewParquetWriter(schema []Column, opts ParquetWriteOptions, scope *memory.S
 	if scope == nil || bm == nil || sink == nil {
 		return nil, errors.New("export: Parquet writer requires managed memory and sink")
 	}
-	if opts.RowGroupRows <= 0 {
-		opts.RowGroupRows = defaultParquetRowGroupRows
-	}
-	if opts.PageRows <= 0 {
-		opts.PageRows = defaultParquetPageRows
-		if opts.PageRows > opts.RowGroupRows {
-			opts.PageRows = opts.RowGroupRows
-		}
-	}
-	if opts.PageBufferSize <= 0 {
-		opts.PageBufferSize = defaultParquetPageBuffer
-	}
-	if opts.PageRows > opts.RowGroupRows {
-		return nil, fmt.Errorf("export: parquet page rows %d exceed row-group rows %d", opts.PageRows, opts.RowGroupRows)
+	var err error
+	opts, err = NormalizeParquetLayout(opts)
+	if err != nil {
+		return nil, err
 	}
 	opts.Compression = strings.ToLower(strings.TrimSpace(opts.Compression))
 	if opts.Compression == "" {
@@ -292,6 +283,9 @@ func (w *ParquetWriter) ensureStarted(ctx context.Context) error {
 }
 
 func (w *ParquetWriter) allocateRowGroup() error {
+	if err := checkParquetRowGroupBudget(w.schema, w.opts.RowGroupRows, w.scope); err != nil {
+		return err
+	}
 	rows := make([]*vector.Vector, len(w.schema))
 	for i := range w.schema {
 		v, err := vector.NewFlat(w.scope, w.bm, w.schema[i].Type, w.opts.RowGroupRows)
@@ -335,11 +329,13 @@ func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) er
 		rowGroupOrdinal = *ordinal
 	}
 	var totalUncompressed, totalCompressed int64
+	pages := &parquetPageWorkspace{scope: w.scope, bm: w.bm, initial: w.opts.PageBufferSize}
+	defer pages.release()
 	for col := range w.schema {
 		if col > math.MaxInt16 {
 			return errors.New("export: Parquet column ordinal exceeds int16")
 		}
-		chunk, uncompressed, compressed, err := w.writeColumnChunk(ctx, col, rowGroupOrdinal)
+		chunk, uncompressed, compressed, err := w.writeColumnChunk(ctx, col, rowGroupOrdinal, pages)
 		if err != nil {
 			return err
 		}
@@ -351,6 +347,7 @@ func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) er
 	group.TotalCompressedSize = &totalCompressed
 	group.FileOffset = &groupStart
 
+	pages.release()
 	estimate := int64((len(w.rowGroups)+1)*(256+len(w.schema)*320)) + w.statisticsBytes
 	if err := w.metadataReservation.Resize(estimate); err != nil {
 		return err
@@ -363,14 +360,20 @@ func (w *ParquetWriter) flushRowGroup(ctx context.Context, allocateNext bool) er
 	return nil
 }
 
-func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupOrdinal int16) (parquet.ColumnChunk, int64, int64, error) {
+func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupOrdinal int16, pages *parquetPageWorkspace) (parquet.ColumnChunk, int64, int64, error) {
+	defer pages.releaseEncoded()
 	physical, err := parquetPhysicalType(w.schema[col].Type)
 	if err != nil {
 		return parquet.ColumnChunk{}, 0, 0, err
 	}
 	// Column statistics merge page statistics, avoiding a second value scan.
 	extraMetadata := int64(256)
-	if err := w.metadataReservation.Resize(w.metadataReservation.Size() + extraMetadata); err != nil {
+	err = w.metadataReservation.Resize(w.metadataReservation.Size() + extraMetadata)
+	if errors.Is(err, memory.ErrLimitExceeded) {
+		pages.release()
+		err = w.metadataReservation.Resize(w.metadataReservation.Size() + extraMetadata)
+	}
+	if err != nil {
 		return parquet.ColumnChunk{}, 0, 0, err
 	}
 	w.statisticsBytes += extraMetadata
@@ -384,8 +387,6 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupO
 	start := w.offset
 	var totalUncompressed, totalCompressed int64
 	pageOrdinal := int16(0)
-	var body *parquetPageBuffer
-	defer func() { body.Release() }()
 	dictionary, err := planParquetDictionary(ctx, w.rows[col], w.rowCount, w.opts.PageRows, w.scope, w.bm)
 	if err != nil {
 		return parquet.ColumnChunk{}, 0, 0, err
@@ -395,7 +396,8 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupO
 	dataOffset := start
 	encodings := []parquet.Encoding{parquet.EncodingPlain, parquet.EncodingRLE}
 	if dictionary != nil {
-		body, err = newParquetPageBuffer(w.scope, w.bm, w.opts.PageBufferSize)
+		var body *parquetPageBuffer
+		body, err = pages.page()
 		if err == nil {
 			var committed bool
 			committed, totalUncompressed, totalCompressed, err = w.writeDictionaryPage(ctx, body, dictionary, rowGroupOrdinal, int16(col))
@@ -413,10 +415,7 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupO
 			// budget and reuse the immutable row group through the PLAIN path.
 			dictionary.Release()
 			dictionary = nil
-			if body != nil {
-				body.Release()
-				body = nil
-			}
+			pages.release()
 			totalUncompressed, totalCompressed = 0, 0
 		}
 	}
@@ -425,65 +424,54 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupO
 		if count > w.opts.PageRows {
 			count = w.opts.PageRows
 		}
-		if body == nil {
-			body, err = newParquetPageBuffer(w.scope, w.bm, w.opts.PageBufferSize)
-			if err != nil {
-				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
-			}
-		}
-		body.used = 0
-		if err := encodeDefinitionLevels(body, w.rows[col], pageStart, count); err != nil {
-			body.Release()
+		body, err := pages.page()
+		if err != nil {
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 		encoding := parquet.EncodingPlain
 		if dictionary != nil {
 			encoding = parquet.EncodingRLEDictionary
-			err = dictionary.encodeIndices(body, pageStart, count)
-		} else {
-			err = encodeParquetPlain(body, w.rows[col], w.schema[col].Type, pageStart, count)
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			body.used = 0
+			err = encodeDefinitionLevels(body, w.rows[col], pageStart, count)
+			if err == nil {
+				if dictionary != nil {
+					err = dictionary.encodeIndices(body, pageStart, count)
+				} else {
+					err = encodeParquetPlain(body, w.rows[col], w.schema[col].Type, pageStart, count)
+				}
+			}
+			if !errors.Is(err, memory.ErrLimitExceeded) || attempt != 0 {
+				break
+			}
+			// Encoding has not reached the sink. Reclaim the preceding page's
+			// idle compression/encryption buffers and rebuild this page.
+			pages.releaseEncoded()
 		}
 		if err != nil {
-			body.Release()
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 		if body.Len() > math.MaxInt32 {
-			body.Release()
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet page exceeds int32 size")
 		}
 
 		payload := body.Bytes()
-		var compressedBuffer *memory.Buffer
 		if w.opts.Compression == "snappy" {
-			max := snappy.MaxEncodedLen(len(payload))
-			if max < 0 {
-				body.Release()
-				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet page exceeds Snappy block limit")
-			}
-			compressedBuffer, err = w.bm.Allocate(w.scope, memory.TagExportBuffer, max)
+			payload, err = pages.compress(payload)
 			if err != nil {
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
-			payload = snappy.Encode(compressedBuffer.Bytes(), payload)
 		}
 		compressedPageSize := len(payload)
 		if w.opts.Encryption != nil {
 			frameSize, err := parquetEncryptedFrameSize(len(payload))
 			if err != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
 			compressedPageSize = frameSize
 		}
 		if compressedPageSize > math.MaxInt32 {
-			if compressedBuffer != nil {
-				compressedBuffer.Release()
-			}
-			body.Release()
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: parquet compressed page exceeds int32 size")
 		}
 		pageStats := collectParquetStatistics(w.rows[col], pageStart, count)
@@ -516,82 +504,45 @@ func (w *ParquetWriter) writeColumnChunk(ctx context.Context, col int, rowGroupO
 			},
 		})
 		if err != nil {
-			if compressedBuffer != nil {
-				compressedBuffer.Release()
-			}
-			body.Release()
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 		}
 
 		headerOnDisk := len(header)
 		if w.opts.Encryption != nil {
-			headerFrame, headerBuffer, err := w.encryptManaged(header, parquetModuleDataPageHeader, rowGroupOrdinal, int16(col), pageOrdinal)
+			headerFrame, err := pages.encrypt(w, header, parquetModuleDataPageHeader, rowGroupOrdinal, int16(col), pageOrdinal)
 			if err != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
 			headerOnDisk = len(headerFrame)
 			writeErr := w.writeBytes(ctx, headerFrame)
-			headerBuffer.Release()
 			if writeErr != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, writeErr
 			}
-			dataFrame, dataBuffer, err := w.encryptManaged(payload, parquetModuleDataPage, rowGroupOrdinal, int16(col), pageOrdinal)
+			dataFrame, err := pages.encrypt(w, payload, parquetModuleDataPage, rowGroupOrdinal, int16(col), pageOrdinal)
 			if err != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
 			writeErr = w.writeBytes(ctx, dataFrame)
-			dataBuffer.Release()
 			if writeErr != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, writeErr
 			}
 		} else {
 			if err := w.writeBytes(ctx, header); err != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
 			if err := w.writeBytes(ctx, payload); err != nil {
-				if compressedBuffer != nil {
-					compressedBuffer.Release()
-				}
-				body.Release()
 				return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, err
 			}
 		}
 		totalUncompressed += int64(headerOnDisk + body.Len())
 		totalCompressed += int64(headerOnDisk + compressedPageSize)
-		if compressedBuffer != nil {
-			compressedBuffer.Release()
-		}
-		// Retain only the original workspace. A large value must not keep an
-		// enlarged page alive and reduce the budget available to later pages.
-		if body.buffer.Len() > w.opts.PageBufferSize {
-			body.Release()
-			body = nil
-		}
+		pages.trim()
 		if pageOrdinal == math.MaxInt16 && pageStart+count < w.rowCount {
 			return parquet.ColumnChunk{}, totalUncompressed, totalCompressed, errors.New("export: Parquet page ordinal exceeds int16")
 		}
 		pageOrdinal++
 	}
+	pages.releaseEncoded()
 	if omitBounds {
 		columnStats.MinValue, columnStats.MaxValue = nil, nil
 	} else if columnStats.MinValue != nil && columnStats.NaNCount == nil {

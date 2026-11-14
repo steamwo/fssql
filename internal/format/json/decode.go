@@ -14,13 +14,14 @@ import (
 
 type vectorPlan struct {
 	typ      types.LogicalType
+	selected bool
 	count    int
 	next     int
 	children []*vectorPlan
 }
 
 func newPlan(t types.LogicalType) (*vectorPlan, error) {
-	p := &vectorPlan{typ: t}
+	p := &vectorPlan{typ: t, selected: true}
 	switch t.ID {
 	case types.Struct:
 		p.children = make([]*vectorPlan, len(t.Fields))
@@ -65,6 +66,22 @@ func resetNext(p *vectorPlan) {
 		resetNext(c)
 	}
 }
+
+// Projection depends only on schema paths, never on the current record.
+// LIST elements share their parent's path; STRUCT fields extend it.
+func selectPlan(p *vectorPlan, projection ProjectedPathSet, path []string) {
+	if projection.Empty() {
+		return
+	}
+	p.selected = projection.Relevant(path)
+	for i, child := range p.children {
+		childPath := path
+		if p.typ.ID == types.Struct {
+			childPath = append(path, p.typ.Fields[i].Name)
+		}
+		selectPlan(child, projection, childPath)
+	}
+}
 func allocatePlan(p *vectorPlan, scope *memory.Scope, bm *memory.BufferManager) (*vector.Vector, error) {
 	v, err := vector.NewFlat(scope, bm, p.typ, p.count)
 	if err != nil {
@@ -90,21 +107,19 @@ func allocatePlan(p *vectorPlan, scope *memory.Scope, bm *memory.BufferManager) 
 }
 
 type typedDecoder struct {
-	projection            ProjectedPathSet
 	scratch               *memory.Buffer
-	path                  [maxJSONDepth]string
 	recordSeen            []bool // Reused by sequential record passes; nested objects keep local state.
 	fieldSchema           []types.StructField
 	fieldIndex            map[string]int
 	fieldIndexReservation *memory.Reservation
 }
 
-func newTypedDecoder(proj ProjectedPathSet, scope *memory.Scope, bm *memory.BufferManager) (*typedDecoder, error) {
+func newTypedDecoder(scope *memory.Scope, bm *memory.BufferManager) (*typedDecoder, error) {
 	b, err := bm.Allocate(scope, memory.TagJSONDecode, 256)
 	if err != nil {
 		return nil, err
 	}
-	return &typedDecoder{projection: proj, scratch: b}, nil
+	return &typedDecoder{scratch: b}, nil
 }
 func (d *typedDecoder) close() {
 	if d.fieldIndexReservation != nil {
@@ -187,8 +202,6 @@ func (d *typedDecoder) findField(raw []byte, fields []types.StructField) (int, e
 	}
 	return -1, nil
 }
-func (d *typedDecoder) relevant(depth int) bool { return d.projection.Relevant(d.path[:depth]) }
-
 func DecodeRecords(records [][]byte, schema []types.StructField, projection ProjectedPathSet, scope *memory.Scope, bm *memory.BufferManager) (*vector.DataChunk, error) {
 	if scope == nil || bm == nil {
 		return nil, fmt.Errorf("json: managed memory required")
@@ -207,12 +220,13 @@ func DecodeRecords(records [][]byte, schema []types.StructField, projection Proj
 			return nil, err
 		}
 		setInstances(p, len(records))
+		selectPlan(p, projection, []string{f.Name})
 		plans[i] = p
 		if projectedList(f.Type, projection, []string{f.Name}) {
 			needsCount = true
 		}
 	}
-	d, err := newTypedDecoder(projection, scope, bm)
+	d, err := newTypedDecoder(scope, bm)
 	if err != nil {
 		return nil, err
 	}
@@ -231,10 +245,10 @@ func DecodeRecords(records [][]byte, schema []types.StructField, projection Proj
 		}
 	}
 	cols := make([]*vector.Vector, 0, len(plans))
-	for i, p := range plans {
+	for _, p := range plans {
 		var v *vector.Vector
 		var err error
-		if projection.Relevant([]string{schema[i].Name}) {
+		if p.selected {
 			v, err = allocatePlan(p, scope, bm)
 		} else {
 			v, err = vector.NewConstant(scope, bm, p.typ, len(records))
@@ -311,8 +325,7 @@ func (d *typedDecoder) countRecord(rec []byte, schema []types.StructField, plans
 				return fmt.Errorf("json: duplicate field %q", schema[idx].Name)
 			}
 			seen[idx] = true
-			d.path[0] = schema[idx].Name
-			if d.relevant(1) {
+			if plans[idx].selected {
 				if err := d.countValue(t, value, schema[idx].Type, plans[idx], 1); err != nil {
 					return err
 				}
@@ -411,11 +424,10 @@ func (d *typedDecoder) countValue(t *Tokenizer, first Token, typ types.LogicalTy
 					return fmt.Errorf("json: duplicate struct field %q", typ.Fields[idx].Name)
 				}
 				seen[idx] = true
-				if depth >= len(d.path) {
+				if depth >= maxJSONDepth {
 					return fmt.Errorf("json: nesting too deep")
 				}
-				d.path[depth] = typ.Fields[idx].Name
-				if d.relevant(depth + 1) {
+				if plan.children[idx].selected {
 					if err := d.countValue(t, value, typ.Fields[idx].Type, plan.children[idx], depth+1); err != nil {
 						return err
 					}
@@ -490,8 +502,7 @@ func (d *typedDecoder) decodeRecord(rec []byte, row int, schema []types.StructFi
 				return fmt.Errorf("json: duplicate field %q", schema[idx].Name)
 			}
 			seen[idx] = true
-			d.path[0] = schema[idx].Name
-			if d.relevant(1) {
+			if plans[idx].selected {
 				if err := d.decodeValue(t, value, schema[idx].Type, plans[idx], cols[idx], row, 1); err != nil {
 					return fmt.Errorf("json: field %s: %w", schema[idx].Name, err)
 				}
@@ -637,8 +648,10 @@ func (d *typedDecoder) decodeValue(t *Tokenizer, first Token, typ types.LogicalT
 					return fmt.Errorf("duplicate struct field")
 				}
 				seen[idx] = true
-				d.path[depth] = typ.Fields[idx].Name
-				if d.relevant(depth + 1) {
+				if depth >= maxJSONDepth {
+					return fmt.Errorf("json: nesting too deep")
+				}
+				if plan.children[idx].selected {
 					if err := d.decodeValue(t, value, typ.Fields[idx].Type, plan.children[idx], children[idx], row, depth+1); err != nil {
 						return err
 					}

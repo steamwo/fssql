@@ -39,6 +39,8 @@ type CopyRequest struct {
 	Destination         string
 	Format              string
 	Compression         string
+	ParquetRowGroupRows int
+	ParquetPageRows     int
 	Header              bool
 	Delimiter           byte
 	Quote               byte
@@ -142,6 +144,13 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 		return CopyExportResult{}, errors.New("session: COPY refuses to start without frozen Query SourceSnapshot")
 	}
 	// Validate the factory, including encryption key length and page codec, before any output writer is opened.
+	if writerConfig.Format == exportpkg.FormatParquet {
+		var err error
+		writerConfig.Parquet, err = exportpkg.NormalizeParquetLayout(writerConfig.Parquet)
+		if err != nil {
+			return CopyExportResult{}, err
+		}
+	}
 	pool, err := exportpkg.NewWriterPool(e.config.MaxWriters, e.config.PerWriterReservation, q.Memory)
 	if err != nil {
 		return CopyExportResult{}, err
@@ -171,6 +180,9 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 
 	queryFingerprint := fingerprintText(queryText)
 	exportIdentity := string(writerConfig.Format) + "\x00" + writerConfig.Compression
+	if writerConfig.Format == exportpkg.FormatParquet && (writerConfig.Parquet.RowGroupRows != exportpkg.DefaultParquetRowGroupRows || writerConfig.Parquet.PageRows != exportpkg.DefaultParquetPageRows) {
+		exportIdentity += fmt.Sprintf("\x00row_group_rows=%d\x00page_rows=%d", writerConfig.Parquet.RowGroupRows, writerConfig.Parquet.PageRows)
+	}
 	if writerConfig.Parquet.Encryption != nil {
 		exportIdentity += "\x00" + writerConfig.Parquet.Encryption.Algorithm + "\x00" + writerConfig.Parquet.Encryption.KeyID
 	}
@@ -295,6 +307,9 @@ func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (ex
 	if (request.ForceQuote || request.DuckDBCompatible) && format != "csv" {
 		return config, errors.New("session: CSV text options require CSV format")
 	}
+	if (request.ParquetRowGroupRows != 0 || request.ParquetPageRows != 0) && format != "parquet" {
+		return config, errors.New("session: Parquet layout options require Parquet format")
+	}
 	switch format {
 	case "csv":
 		config.Format = exportpkg.FormatCSV
@@ -315,6 +330,11 @@ func copyRequestWriterConfig(request CopyRequest, schema []exportpkg.Column) (ex
 		config.Format = exportpkg.FormatNDJSON
 	case "parquet":
 		config.Format = exportpkg.FormatParquet
+		var err error
+		config.Parquet, err = exportpkg.NormalizeParquetLayout(exportpkg.ParquetWriteOptions{RowGroupRows: request.ParquetRowGroupRows, PageRows: request.ParquetPageRows})
+		if err != nil {
+			return exportpkg.FileWriterConfig{}, err
+		}
 	default:
 		return exportpkg.FileWriterConfig{}, fmt.Errorf("session: unsupported COPY format %q", request.Format)
 	}

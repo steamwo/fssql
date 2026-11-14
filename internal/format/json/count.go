@@ -98,7 +98,7 @@ func validateCountRecords(ctx context.Context, records [][]byte, schema []types.
 		}
 		plans[i] = plan
 	}
-	d, err := newTypedDecoder(ProjectedPathSet{}, scope, bm)
+	d, err := newTypedDecoder(scope, bm)
 	if err != nil {
 		return err
 	}
