@@ -1,8 +1,28 @@
 # fssql
 
-fssql 是用 Go 实现的单节点 OLAP 查询引擎，可嵌入 Go 应用。内部使用自研 Vector/DataChunk 和 Push Pipeline，通过受控内存与临时存储执行查询。
+[English](README_EN.md) | **简体中文**
 
-对外 Go 包为 `github.com/steamwo/fssql/pkg/gosql`，提供原生 Chunk 回调和 `database/sql` 两种查询方式。
+fssql 是用 Go 实现的**嵌入式只读 SQL 查询与数据转换/导出引擎**。它面向本地文件、对象存储和应用内数据的分析型工作负载：读取数据，用 SQL 查询和转换，再导出为常见数据格式。
+
+内部使用自研 Vector/DataChunk 和 Push Pipeline，通过受控内存、临时存储与 spill 执行查询。对外 Go 包为 `github.com/steamwo/fssql/pkg/gosql`，提供原生 Chunk 回调和 `database/sql` 两种查询方式。
+
+## 项目定位
+
+fssql 当前专注于一条明确的数据处理路径：
+
+**读取数据 → SQL 查询/转换 → 导出结果**
+
+- **数据读取**：CSV、JSON、NDJSON、Parquet，以及本地文件和 S3 / MinIO。
+- **SQL 查询**：过滤、投影、聚合、JOIN、窗口函数、子查询、集合操作、CTE 等分析型 SQL。
+- **数据导出**：CSV、JSON、NDJSON、Parquet，支持本地文件和已配置的 S3 目标。
+- **Go 嵌入**：既可使用原生 Chunk API，也可直接通过 `database/sql` 查询。
+- **资源控制**：提供内存、临时存储、spill、worker 和队列限制，适合在 Go 服务内嵌运行。
+- **可扩展数据源与函数**：支持 Go Table Function、Scalar UDF 和物化快照。
+
+fssql **不以替代 DuckDB 或成为通用数据库为目标**。DuckDB 在项目中主要作为 SQL 语义、格式互操作和性能测试的参考基线。
+
+当前重点是只读查询、数据转换和可靠导出；事务、可变持久化表以及 `UPDATE` / `DELETE` / `MERGE` 不是当前阶段的主要目标，未来可根据实际需求再评估。
+
 
 ## 快速开始
 
@@ -421,9 +441,9 @@ if err := sqlDB.QueryRowContext(ctx,
 
 当前 `Config` 没有 SQLiteCatalog、自定义 VFS、SFTP、FTP 或 WebDAV 的注入入口，也没有公共 HTTP 服务构造器。内部模块的实现范围与外部项目可直接使用的范围，请以[公共 API 文档](docs/public-api.md)为准。
 
-值参数可用于 SELECT、已支持的 CREATE、COPY、DESCRIBE 和 SET 等语句。事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回；原生 DECIMAL 访问器返回未缩放整数，需结合 `Type.Scale` 解释。日期/时间的行式结果为 UTC `time.Time`。LIST/STRUCT 可通过原生 `Chunk.Value`/`List`/`Struct` 读取，`database/sql` 对非 NULL 嵌套值仍返回错误。
+值参数可用于 SELECT、已支持的 CREATE、COPY、DESCRIBE 和 SET 等语句。当前引擎面向只读查询与导出工作负载，事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回；原生 DECIMAL 访问器返回未缩放整数，需结合 `Type.Scale` 解释。日期/时间的行式结果为 UTC `time.Time`。LIST/STRUCT 可通过原生 `Chunk.Value`/`List`/`Struct` 读取，`database/sql` 对非 NULL 嵌套值仍返回错误。
 
-当前不支持原生持久化表、`UPDATE`/`DELETE`/`MERGE`、递归 CTE 等能力。TEMP 命名空间与设置按物理连接隔离；依赖会话状态时应使用 `sql.Conn`。
+当前不提供原生可变持久化表，也不支持 `UPDATE`/`DELETE`/`MERGE` 和事务；这些能力不属于当前只读查询/导出方向的主要目标。递归 CTE 目前同样不支持。TEMP 命名空间与设置按物理连接隔离；依赖会话状态时应使用 `sql.Conn`。
 
 SQL 已实现非递归 CTE、集合谓词、按位置的 UNION/INTERSECT/EXCEPT（含 ALL）、嵌套标量子查询、参数域去相关，以及显式/隐式 LATERAL 派生表关联。具体支持范围、拒绝边界和验证入口见[公共 API 文档](docs/public-api.md)，不代表完整 DuckDB SQL 兼容或全部性能验收完成。
 
@@ -433,8 +453,8 @@ SQL 已实现非递归 CTE、集合谓词、按位置的 UNION/INTERSECT/EXCEPT�
 - [SQL、数据源和执行能力矩阵](docs/architecture/feature-contract.md)
 - [相关子查询与 LATERAL 的实现和支持范围](docs/architecture/subquery-lowering.md)
 - [架构约束](ARCHITECTURE.md)
-- [项目测试规范与 DuckDB 对标方案](docs/testing-standard.md)
-- [2026-11-07 与 DuckDB 2.0.0 的全方位性能与能力对比](docs/validation/2026-11-07-full-duckdb-comparison/report.md)：262/262 差分用例一致；28 个计时场景（本地与 MinIO）共 812 条正式样本，总体 `time_ratio` 中位 3.86，核心场景仍未达到 ≤2 目标
+- [项目测试规范与 DuckDB 差分验证/性能基线方案](docs/testing-standard.md)
+- [2026-11-07 与 DuckDB 2.0.0 的差分与性能基线报告](docs/validation/2026-11-07-full-duckdb-comparison/report.md)：262/262 差分用例一致；28 个计时场景（本地与 MinIO）共 812 条正式样本，总体 `time_ratio` 中位 3.86。该报告用于验证语义正确性、发现性能差距和建立优化基线，不代表项目以替代 DuckDB 为目标
 - [引擎优化与改进计划及诊断证据](docs/optimization-review-2026-11-06.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
 - [DuckDB 兼容性完善方案与实施进度](docs/duckdb-compatibility-roadmap.md)
