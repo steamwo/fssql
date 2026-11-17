@@ -77,6 +77,42 @@ func TestMetadataCacheRejectsUnstableIdentity(t *testing.T) {
 	}
 }
 
+func TestHTTPMetadataIsQueryLocalAndUsesFullIdentity(t *testing.T) {
+	shared, _ := NewMetadataCache(8)
+	first, second := NewQueryMetadataCache(shared), NewQueryMetadataCache(shared)
+	a := cacheSource(t, "https://example.test/data?sig=one", "same", 100)
+	b := cacheSource(t, "https://example.test/data?sig=two", "same", 100)
+	if shared.Put(a, Footer{}) {
+		t.Fatal("HTTP footer entered cross-query cache")
+	}
+	if !first.Put(a, Footer{MetadataLength: 3}) {
+		t.Fatal("query cache rejected HTTP footer")
+	}
+	if _, ok := first.Get(b); ok {
+		t.Fatal("different signed URLs shared footer")
+	}
+	if _, ok := second.Get(a); ok {
+		t.Fatal("queries shared HTTP footer")
+	}
+	a.Identity = vfs.ObjectIdentity{SnapshotID: "sha256:one", Size: 100}
+	if !first.Put(a, Footer{MetadataLength: 5}) {
+		t.Fatal("query cache rejected materialized identity")
+	}
+	a.Identity.SnapshotID = "sha256:two"
+	if _, ok := first.Get(a); ok {
+		t.Fatal("different content shared footer")
+	}
+	local := cacheSource(t, "s3://bucket/data", "stable", 100)
+	first.Put(local, Footer{MetadataLength: 7})
+	if footer, ok := second.Get(local); !ok || footer.MetadataLength != 7 {
+		t.Fatal("existing cross-query cache bypassed")
+	}
+	first.Clear()
+	if first.Metrics().Entries != 0 {
+		t.Fatal("query cache not released")
+	}
+}
+
 func TestMetadataCacheVersionIDSeparatesVersions(t *testing.T) {
 	cache, _ := NewMetadataCache(2)
 	u, err := vfs.ParseURI("s3://bucket/versioned.parquet")

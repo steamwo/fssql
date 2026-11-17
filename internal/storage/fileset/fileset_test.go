@@ -116,6 +116,50 @@ func TestPlannerDirectFileUsesStat(t *testing.T) {
 	}
 }
 
+type httpDriver struct{ *fakeDriver }
+
+func (*httpDriver) Scheme() string { return "https" }
+
+func TestHTTPQueryIsNotAGlobAndSignaturesAffectFingerprint(t *testing.T) {
+	var fingerprints []string
+	for _, raw := range []string{"https://example.test/data?sig=one&literal=?*[", "https://example.test/data?sig=two&literal=?*["} {
+		u := mustURI(t, raw)
+		d := &httpDriver{&fakeDriver{stat: vfs.ObjectInfo{URI: u, Size: 5, Identity: vfs.ObjectIdentity{ETag: "same", Size: 5}}}}
+		reg, _ := vfs.NewRegistry(d)
+		set, err := NewPlanner(reg).Plan(context.Background(), raw, PlanOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.prefixes) != 0 || set.Files()[0].URI.RequestURL() != raw {
+			t.Fatal("HTTP request interpreted as a glob")
+		}
+		fingerprints = append(fingerprints, set.Fingerprint())
+	}
+	if fingerprints[0] == fingerprints[1] {
+		t.Fatal("signatures lost in fingerprint")
+	}
+	reg, _ := vfs.NewRegistry(&httpDriver{&fakeDriver{}})
+	for _, raw := range []string{"https://example.test/*.csv?sig=secret", "https://example.test/[ab].csv?sig=secret"} {
+		if _, err := NewPlanner(reg).Plan(context.Background(), raw, PlanOptions{}); err == nil {
+			t.Fatal("HTTP glob accepted")
+		}
+	}
+}
+
+func TestFingerprintIncludesSnapshotAndViewSpec(t *testing.T) {
+	f := FileSnapshot{URI: mustURI(t, "https://example.test/data?sig=one"), Size: 5, Identity: vfs.ObjectIdentity{Size: 5, SnapshotID: "sha256:one"}}
+	base := datasetFingerprint([]FileSnapshot{f})
+	f.Identity.SnapshotID = "sha256:two"
+	if base == datasetFingerprint([]FileSnapshot{f}) {
+		t.Fatal("SnapshotID omitted")
+	}
+	f.Identity.SnapshotID = "sha256:one"
+	f.URI.ViewKey = "another-representation"
+	if base == datasetFingerprint([]FileSnapshot{f}) {
+		t.Fatal("view spec omitted")
+	}
+}
+
 func TestPlannerRejectsRepeatedContinuationToken(t *testing.T) {
 	u := mustURI(t, "s3://b/a.parquet")
 	d := &fakeDriver{pages: map[string]vfs.ListPage{

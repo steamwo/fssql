@@ -60,6 +60,7 @@ func (s *multipartTestServer) handler(w http.ResponseWriter, r *http.Request) {
 			s.stored = append(s.stored, part...)
 		}
 		w.WriteHeader(http.StatusOK)
+		_,_=io.WriteString(w,`<CompleteMultipartUploadResult><ETag>"final"</ETag></CompleteMultipartUploadResult>`)
 	case r.Method == http.MethodDelete && q.Get("uploadId") != "":
 		s.aborts++
 		w.WriteHeader(http.StatusNoContent)

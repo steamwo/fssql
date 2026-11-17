@@ -2,6 +2,8 @@ package vfs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -21,21 +23,36 @@ var (
 )
 
 type URI struct {
-	Scheme string
-	Host   string
-	Path   string
-	Raw    string
+	Scheme     string
+	Host       string
+	Path       string
+	Raw        string
+	RawPath    string
+	RawQuery   string
+	ForceQuery bool
+	// ViewID routes reads within one query; ViewKey identifies its representation.
+	ViewID  string
+	ViewKey string
 }
 
 func ParseURI(raw string) (URI, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return URI{}, fmt.Errorf("vfs: parse uri: %w", err)
+		// url.Parse errors may contain the complete signed URL.
+		return URI{}, errors.New("vfs: invalid uri")
 	}
 	if u.Scheme == "" {
-		return URI{}, fmt.Errorf("vfs: uri has no scheme: %q", raw)
+		return URI{}, errors.New("vfs: uri has no scheme")
 	}
 	scheme := strings.ToLower(u.Scheme)
+	if scheme == "http" || scheme == "https" {
+		if u.Host == "" || u.Opaque != "" || u.User != nil || strings.Contains(raw, "#") {
+			return URI{}, errors.New("vfs: HTTP uri requires a host and forbids userinfo and fragment")
+		}
+		c := URI{Scheme: scheme, Host: u.Host, Path: u.Path, RawPath: u.RawPath, RawQuery: u.RawQuery, ForceQuery: u.ForceQuery}
+		c.Raw = c.String()
+		return c, nil
+	}
 	host := u.Host
 	if scheme == "s3" {
 		host = strings.ToLower(host)
@@ -54,11 +71,57 @@ func ParseURI(raw string) (URI, error) {
 }
 
 func (u URI) String() string {
+	if u.IsHTTP() {
+		display := u.url()
+		parts := strings.Split(u.RawQuery, "&")
+		for i, part := range parts {
+			if part == "" {
+				continue
+			}
+			key, _, ok := strings.Cut(part, "=")
+			if ok {
+				parts[i] = key + "=REDACTED"
+			} else {
+				parts[i] = "REDACTED"
+			}
+		}
+		display.RawQuery = strings.Join(parts, "&")
+		return display.String()
+	}
+	return u.url().String()
+}
+
+func (u URI) url() *url.URL {
 	p := u.Path
-	if p == "" {
+	if p == "" && !u.IsHTTP() {
 		p = "/"
 	}
-	return (&url.URL{Scheme: strings.ToLower(u.Scheme), Host: u.Host, Path: p}).String()
+	return &url.URL{Scheme: strings.ToLower(u.Scheme), Host: u.Host, Path: p, RawPath: u.RawPath, RawQuery: u.RawQuery, ForceQuery: u.ForceQuery}
+}
+
+// RequestURL is the lossless transport address. Never use it for diagnostics.
+func (u URI) RequestURL() string { return u.url().String() }
+func (u URI) GoString() string   { return u.String() }
+func (u URI) IsHTTP() bool {
+	return strings.EqualFold(u.Scheme, "http") || strings.EqualFold(u.Scheme, "https")
+}
+func (u URI) IdentityKey() string {
+	sum := sha256.Sum256([]byte(u.RequestURL()))
+	return hex.EncodeToString(sum[:])
+}
+
+// ReadKey keeps different logical views out of the same reader window.
+func (u URI) ReadKey() string {
+	if u.ViewID != "" {
+		return u.ViewID
+	}
+	return u.IdentityKey()
+}
+func (u URI) HasGlob() bool {
+	if u.IsHTTP() {
+		return strings.ContainsAny(u.url().EscapedPath(), "*[")
+	}
+	return strings.ContainsAny(u.ObjectKey(), "*?[")
 }
 
 func (u URI) ObjectKey() string { return strings.TrimPrefix(u.Path, "/") }
@@ -66,6 +129,7 @@ func (u URI) ObjectKey() string { return strings.TrimPrefix(u.Path, "/") }
 type ObjectIdentity struct {
 	ETag       string
 	VersionID  string
+	SnapshotID string
 	Size       int64
 	ModifiedAt time.Time
 }
@@ -73,6 +137,9 @@ type ObjectIdentity struct {
 func (i ObjectIdentity) Stable() bool { return i.VersionID != "" || i.ETag != "" }
 
 func (i ObjectIdentity) Matches(other ObjectIdentity) bool {
+	if i.SnapshotID != "" || other.SnapshotID != "" {
+		return i.SnapshotID != "" && i.SnapshotID == other.SnapshotID && i.Size == other.Size
+	}
 	if i.VersionID != "" || other.VersionID != "" {
 		return i.VersionID != "" && i.VersionID == other.VersionID
 	}
@@ -138,7 +205,10 @@ type Driver interface {
 	ReadRange(context.Context, RangeRequest, *memory.Scope, *memory.BufferManager) (RangeResult, error)
 }
 
-type Registry struct{ drivers map[string]Driver }
+type Registry struct {
+	drivers map[string]Driver
+	views   ObjectViewResolver
+}
 
 func NewRegistry(ds ...Driver) (*Registry, error) {
 	r := &Registry{drivers: make(map[string]Driver, len(ds))}
@@ -167,6 +237,10 @@ func (r *Registry) DriverFor(u URI) (Driver, error) {
 }
 
 func (r *Registry) EffectiveCapabilities(ctx context.Context, u URI) (CapabilitySet, error) {
+	if u.ViewID != "" && r.views != nil {
+		obj, err := r.views.Lookup(u)
+		return obj.Capabilities, err
+	}
 	d, err := r.DriverFor(u)
 	if err != nil {
 		return 0, err

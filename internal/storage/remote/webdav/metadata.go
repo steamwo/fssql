@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"strconv"
 	"strings"
@@ -53,6 +54,9 @@ func validateContentRange(value string, expectedStart, expectedEnd int64) error 
 
 // statusError 构造不读取大响应体的 HTTP 状态错误。
 func statusError(operation string, status int) error {
+	if status == http.StatusNotFound {
+		return fmt.Errorf("%w: %w: %s status=%d", ErrProtocol, os.ErrNotExist, operation, status)
+	}
 	return fmt.Errorf("%w: %s status=%d", ErrProtocol, operation, status)
 }
 

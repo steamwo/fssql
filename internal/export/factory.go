@@ -102,6 +102,15 @@ func (f *FileWriterFactory) Open(ctx context.Context, uri vfs.URI, opts vfs.Writ
 	})
 }
 
+// OpenStaged composes the existing format/compression pipeline over a
+// coordinator-owned byte sink. Closing this writer seals; it never publishes.
+func (f *FileWriterFactory) OpenStaged(ctx context.Context, base ByteSink) (*PooledWriter, error) {
+	if f == nil || f.pool == nil || base == nil {
+		return nil, errors.New("export: invalid staged file writer")
+	}
+	return f.pool.Acquire(ctx, func(ctx context.Context) (FormatWriter, error) { return f.compose(ctx, base) })
+}
+
 func (f *FileWriterFactory) compose(ctx context.Context, base ByteSink) (FormatWriter, error) {
 	if f.config.Format == FormatParquet {
 		writer, err := NewParquetWriter(f.config.Schema, f.config.Parquet, f.scope, f.buffers, base)

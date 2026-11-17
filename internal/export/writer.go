@@ -159,7 +159,10 @@ func (w *PooledWriter) Close(ctx context.Context) (WriteResult, error) {
 	w.terminal = true
 	result, err := w.writer.Close(ctx)
 	if err != nil {
-		abortErr := w.writer.Abort(context.Background())
+		var abortErr error
+		if !errors.Is(err, ErrCommitUncertain) {
+			abortErr = w.writer.Abort(context.Background())
+		}
 		w.release()
 		return WriteResult{}, errors.Join(err, abortErr)
 	}

@@ -51,6 +51,7 @@ func(b *SourceBinder)Bind(ctx context.Context,pattern string,opts SourceBindOpti
 	if b==nil||b.registry==nil||b.planner==nil||b.scope==nil||b.bm==nil{return SourceBinding{},errors.New("csv: uninitialized source binder")}
 	if strings.HasPrefix(pattern,tablefunc.Prefix){decoded,parsed,err:=ParseTableFunctionSource(pattern);if err!=nil{return SourceBinding{},err};pattern,opts=decoded,parsed}
 	if opts.AutoDetect!=nil&&!*opts.AutoDetect&&len(opts.ExplicitSchema)==0{return SourceBinding{},fmt.Errorf("csv: auto_detect=false requires explicit schema")}
+	if opts.FileSet.View.FileCompression==""&&b.registry.HasObjectViews(){opts.FileSet.View.FileCompression="auto"}
 	scanSet,err:=b.planner.Plan(ctx,pattern,opts.FileSet);if err!=nil{return SourceBinding{},err};files:=scanSet.Files();if len(files)==0{return SourceBinding{},fileset.ErrNoMatches}
 	if len(opts.ExplicitSchema)>0{fields:=make([]types.StructField,len(opts.ExplicitSchema));copy(fields,opts.ExplicitSchema);return SourceBinding{scanSet:scanSet,schema:InferredSchema{Fields:fields},inference:opts.Inference,schemaFile:0,allowQuotedNulls:opts.AllowQuotedNulls},nil}
 	file:=files[0];if file.Size<=0{return SourceBinding{},fmt.Errorf("csv: cannot infer schema from empty file %s",file.URI.String())};driver,err:=b.registry.DriverFor(file.URI);if err!=nil{return SourceBinding{},err};caps,err:=b.registry.EffectiveCapabilities(ctx,file.URI);if err!=nil{return SourceBinding{},err};if !caps.Has(vfs.RandomRead){return SourceBinding{},fmt.Errorf("csv: schema inference requires RandomRead for %s",file.URI.String())}

@@ -65,6 +65,18 @@ func (s *LocalManifestStore) Save(ctx context.Context, manifest *Manifest) error
 	if err := manifest.Validate(); err != nil {
 		return err
 	}
+	if manifest.ManifestVersion == 2 {
+		old, err := s.Load(ctx)
+		if errors.Is(err, os.ErrNotExist) {
+			if manifest.Revision != 1 || manifest.ExportState != ExportStatePlanned {
+				return ErrStaleRevision
+			}
+		} else if err != nil {
+			return err
+		} else if err := validatePublishUpdate(old, manifest); err != nil {
+			return err
+		}
+	}
 	upper, err := manifestJSONUpperBound(manifest)
 	if err != nil {
 		return err

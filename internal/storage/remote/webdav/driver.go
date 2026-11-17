@@ -34,6 +34,8 @@ var (
 
 // Driver 把 WebDAV endpoint 暴露为统一 VFS capability driver。
 type Driver struct {
+	// AtomicMoveVerified is an operator assertion, never inferred from OPTIONS.
+	AtomicMoveVerified bool
 	// SchemeName 只能是 webdav 或 webdavs。
 	SchemeName string
 	// Key 固定 endpoint、credential version 与 security profile。
@@ -86,7 +88,11 @@ func (d *Driver) Scheme() string { return d.SchemeName }
 // StaticCapabilities 只声明当前实现可严格保证的能力。
 // 条件写、AtomicRename、StableETag 不因 WebDAV 标准“可能支持”而提前宣称。
 func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList)
+	caps := vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList)
+	if d.AtomicMoveVerified {
+		caps = caps.With(vfs.NoReplacePublish)
+	}
+	return caps
 }
 
 // Probe 使用 OPTIONS 的 Allow/DAV header 收窄可直接探测的写和列表能力；Range 在真实 GET 时严格验证 206。
@@ -106,12 +112,15 @@ func (d *Driver) Probe(ctx context.Context) (vfs.ProbeResult, error) {
 	}
 
 	// OPTIONS 已经是 endpoint runtime probe；缺失 Allow 时按“不支持”收窄，而不是保留静态能力。
-	known := vfs.Capabilities(vfs.StreamingWrite, vfs.ServerSideList)
+	known := vfs.Capabilities(vfs.StreamingWrite, vfs.ServerSideList, vfs.NoReplacePublish)
 	supported := vfs.CapabilitySet(0)
 	allow := strings.ToUpper(response.Header.Get("Allow"))
 	// 当前流式写依赖 PUT staging + MOVE final；两者缺一都不能宣称 StreamingWrite。
 	if headerToken(allow, "PUT") && headerToken(allow, "MOVE") {
 		supported = supported.With(vfs.StreamingWrite)
+		if d.AtomicMoveVerified {
+			supported = supported.With(vfs.NoReplacePublish)
+		}
 	}
 	if headerToken(allow, "PROPFIND") || response.Header.Get("DAV") != "" {
 		supported = supported.With(vfs.ServerSideList)
@@ -310,7 +319,9 @@ func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope 
 	}
 	end := request.Offset + request.Length - 1
 	httpRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", request.Offset, end))
-	if before.Identity.ETag != "" {
+	// If-Match uses strong comparison; submitting Apache's fresh weak ETag
+	// would reject an unchanged resource. Weak metadata is still checked below.
+	if before.Identity.ETag != "" && !strings.HasPrefix(before.Identity.ETag, "W/") {
 		httpRequest.Header.Set("If-Match", before.Identity.ETag)
 	}
 	response, err := d.do(httpRequest)

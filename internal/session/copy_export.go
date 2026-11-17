@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	pathpkg "path"
 	"strings"
 
@@ -23,6 +24,7 @@ type CopyManifestStoreFactory func(*query.Context, string) (exportpkg.ManifestSt
 type ParquetKeyResolver func(context.Context, string, string) ([]byte, error)
 
 type ExportCopyExecutorConfig struct {
+	ManifestDir          string
 	Registry             *vfs.Registry
 	Buffers              *memory.BufferManager
 	ManifestStore        CopyManifestStoreFactory
@@ -34,6 +36,7 @@ type ExportCopyExecutorConfig struct {
 type ExportCopyExecutor struct{ config ExportCopyExecutorConfig }
 
 type CopyRequest struct {
+	PublishMode         string
 	ForceQuote          bool
 	DuckDBCompatible    bool
 	Destination         string
@@ -49,6 +52,7 @@ type CopyRequest struct {
 }
 
 type CopyExportResult struct {
+	JobID  string
 	Rows   int64
 	Bytes  int64
 	Schema []exportpkg.Column
@@ -86,7 +90,7 @@ func (e *ExportCopyExecutor) Run(q *query.Context, bound *binder.BoundCopyTo, pr
 	if err != nil {
 		return err
 	}
-	_, err = e.runPrepared(q, prepared, bound.Destination, writerConfig, sql)
+	_, err = e.runPrepared(q, prepared, bound.Destination, writerConfig, sql, bound.Options.PublishMode)
 	return err
 }
 
@@ -126,10 +130,10 @@ func (e *ExportCopyExecutor) RunPrepared(q *query.Context, prepared *PreparedSQL
 			return CopyExportResult{}, err
 		}
 	}
-	return e.runPrepared(q, prepared, request.Destination, config, queryText)
+	return e.runPrepared(q, prepared, request.Destination, config, queryText, request.PublishMode)
 }
 
-func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQLQuery, destination string, writerConfig exportpkg.FileWriterConfig, queryText string) (CopyExportResult, error) {
+func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQLQuery, destination string, writerConfig exportpkg.FileWriterConfig, queryText, publishMode string) (CopyExportResult, error) {
 	if e == nil || e.config.Registry == nil || e.config.Buffers == nil || e.config.ManifestStore == nil {
 		return CopyExportResult{}, errors.New("session: COPY export executor is uninitialized")
 	}
@@ -167,6 +171,20 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 	finalURI := root
 	finalURI.Path = pathpkg.Join(root.Path, filePath)
 	finalURI.Raw = finalURI.String()
+	mode := vfs.PublishMode(strings.ToLower(strings.TrimSpace(publishMode)))
+	if mode == "" {
+		mode = vfs.PublishStrict
+	}
+	if mode != vfs.PublishStrict && mode != vfs.PublishCompatible {
+		return CopyExportResult{}, errors.New("session: unsupported COPY PUBLISH_MODE")
+	}
+	driver, err := e.config.Registry.DriverFor(finalURI)
+	if err != nil {
+		return CopyExportResult{}, err
+	}
+	if staged, ok := driver.(vfs.StagedPublishDriver); ok && e.config.ManifestDir != "" {
+		return e.runStaged(q, prepared, finalURI, mode, staged, factory, writerConfig, queryText, snapshot.Fingerprint)
+	}
 	caps, err := e.config.Registry.EffectiveCapabilities(q.Context(), finalURI)
 	if err != nil {
 		return CopyExportResult{}, err
@@ -187,6 +205,13 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 		exportIdentity += "\x00" + writerConfig.Parquet.Encryption.Algorithm + "\x00" + writerConfig.Parquet.Encryption.KeyID
 	}
 	jobID := fingerprintText(queryFingerprint + "\x00" + snapshot.Fingerprint + "\x00" + finalURI.String() + "\x00" + exportIdentity)
+	if e.config.ManifestDir != "" {
+		unlock, err := exportpkg.LockJob(q.Context(), e.config.ManifestDir, jobID)
+		if err != nil {
+			return CopyExportResult{}, err
+		}
+		defer unlock()
+	}
 	manifest, err := exportpkg.NewManifest(jobID, queryFingerprint, snapshot.Fingerprint, root.String(), string(writerConfig.Format), writerConfig.Compression, "atomic_publish", []string{filePath})
 	if err != nil {
 		return CopyExportResult{}, err
@@ -208,6 +233,22 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 	}
 	if store == nil {
 		return CopyExportResult{}, errors.New("session: COPY ManifestStore factory returned nil")
+	}
+	if e.config.ManifestDir != "" {
+		previous, err := store.Load(q.Context())
+		if err == nil {
+			if err := exportpkg.ValidateManifestJob(previous, jobID); err != nil {
+				return CopyExportResult{}, err
+			}
+			cause := exportpkg.ErrExportNotRecoverable
+			if previous.ExportState == exportpkg.ExportStateCommitted {
+				cause = exportpkg.ErrCommitConflict
+			}
+			return CopyExportResult{}, &exportpkg.ExportJobError{JobID: jobID, Err: cause}
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return CopyExportResult{}, err
+		}
 	}
 	if err := store.Save(q.Context(), manifest); err != nil {
 		return CopyExportResult{}, fmt.Errorf("session: persist COPY WRITING manifest: %w", err)
@@ -232,7 +273,7 @@ func (e *ExportCopyExecutor) runPrepared(q *query.Context, prepared *PreparedSQL
 	if len(manifest.FileStates) != 1 || manifest.FileStates[0].State != exportpkg.FileStateComplete {
 		return CopyExportResult{}, errors.New("session: COPY completed without one COMPLETE output file")
 	}
-	return CopyExportResult{Rows: copySink.rows, Bytes: manifest.FileStates[0].Size, Schema: append([]exportpkg.Column(nil), writerConfig.Schema...)}, nil
+	return CopyExportResult{JobID: jobID, Rows: copySink.rows, Bytes: manifest.FileStates[0].Size, Schema: append([]exportpkg.Column(nil), writerConfig.Schema...)}, nil
 }
 
 func copyDestination(raw string) (vfs.URI, string, error) {
@@ -347,12 +388,13 @@ func fingerprintText(value string) string {
 }
 
 type copyExportSink struct {
-	dataset  *exportpkg.DatasetWriter
-	manifest *exportpkg.Manifest
-	store    exportpkg.ManifestStore
-	commit   *exportpkg.SingleFileCommitter
-	rows     int64
-	terminal bool
+	dataset   *exportpkg.DatasetWriter
+	manifest  *exportpkg.Manifest
+	store     exportpkg.ManifestStore
+	commit    *exportpkg.SingleFileCommitter
+	rows      int64
+	terminal  bool
+	uncertain bool
 }
 
 func (s *copyExportSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
@@ -371,12 +413,14 @@ func (s *copyExportSink) Finalize(ctx context.Context) error {
 		return errors.New("session: COPY sink is closed")
 	}
 	if err := s.dataset.Close(ctx); err != nil {
+		s.uncertain = errors.Is(err, exportpkg.ErrCommitUncertain)
 		return err
 	}
 	if err := s.store.Save(ctx, s.manifest); err != nil {
 		return fmt.Errorf("session: persist COPY complete-file manifest: %w", err)
 	}
 	if err := s.commit.Commit(ctx); err != nil {
+		s.uncertain = errors.Is(err, exportpkg.ErrCommitUncertain)
 		return err
 	}
 	s.terminal = true
@@ -389,6 +433,9 @@ func (s *copyExportSink) Close() error {
 	}
 	s.terminal = true
 	var errs []error
+	if s.uncertain {
+		return nil
+	}
 	if s.dataset != nil {
 		if err := s.dataset.Abort(context.Background()); err != nil {
 			errs = append(errs, err)

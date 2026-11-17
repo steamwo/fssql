@@ -21,11 +21,15 @@ const (
 
 // openWriteHandle 打开一个可写 handle；truncate 只用于 incomplete-file 新尝试的第一次写入。
 func (s *wireSession) openWriteHandle(path string, truncate bool) ([]byte, error) {
-	payload := appendString(nil, path)
 	flags := uint32(fxWrite | fxCreat)
 	if truncate {
 		flags |= fxTrunc
 	}
+	return s.openWriteFlags(path, flags)
+}
+
+func (s *wireSession) openWriteFlags(path string, flags uint32) ([]byte, error) {
+	payload := appendString(nil, path)
 	payload = appendU32(payload, flags)
 	// v3 OPEN 的 attrs 不能为空；flags=0 表示不额外设置属性。
 	payload = appendU32(payload, 0)
@@ -49,11 +53,19 @@ func (s *wireSession) openWriteHandle(path string, truncate bool) ([]byte, error
 
 // WriteAt 实现 WritableSession；每次调用只持有 bounded protocol packet，caller data 不被 session 长期保留。
 func (s *wireSession) WriteAt(ctx context.Context, path string, data []byte, offset int64, truncate bool) (n int, err error) {
+	flags := uint32(fxWrite | fxCreat)
+	if truncate {
+		flags |= fxTrunc
+	}
+	return s.writeAtFlags(ctx, path, data, offset, flags)
+}
+
+func (s *wireSession) writeAtFlags(ctx context.Context, path string, data []byte, offset int64, flags uint32) (n int, err error) {
 	if offset < 0 {
 		return 0, errors.New("sftp: negative write offset")
 	}
 	err = s.withContext(ctx, func() error {
-		h, err := s.openWriteHandle(path, truncate)
+		h, err := s.openWriteFlags(path, flags)
 		if err != nil {
 			return err
 		}

@@ -130,7 +130,10 @@ func (o *managedOutput) Close(ctx context.Context) (WriteResult, error) {
 	}
 	result, err := o.sink.Close(ctx)
 	if err != nil {
-		abortErr := o.sink.Abort(context.Background())
+		var abortErr error
+		if !errors.Is(err, ErrCommitUncertain) {
+			abortErr = o.sink.Abort(context.Background())
+		}
 		o.releaseBuffer()
 		return WriteResult{}, errors.Join(err, abortErr)
 	}

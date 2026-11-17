@@ -60,7 +60,11 @@ type Config struct {
 	Workers                int
 	BlockingQueue          int
 	S3                     *S3Config
+	HTTP                   []HTTPConfig
 	LocalFiles             *LocalFileConfig
+	FTP                    *FTPConfig
+	SFTP                   *SFTPConfig
+	WebDAV                 *WebDAVConfig
 	TableFunctions         []TableFunction
 	ScalarFunctions        []ScalarFunction
 	// ParquetKeys resolves encrypted-export key bytes without placing keys in SQL or manifests.
@@ -72,6 +76,8 @@ type Config struct {
 }
 
 type DB struct {
+	manifestDir string
+	exportRegistry *vfs.Registry
 	owner *DB
 	memory            *memory.Manager
 	buffers           *memory.BufferManager
@@ -80,6 +86,7 @@ type DB struct {
 	closed            atomic.Bool
 	materialized      *materializedRegistry
 	spillMemoryBudget int64
+	remoteResources   *remoteResources
 }
 
 func Open(config Config) (*DB, error) {
@@ -152,6 +159,17 @@ func Open(config Config) (*DB, error) {
 		}
 		drivers = append(drivers, driver)
 	}
+	remotes, err := publicRemoteDrivers(config)
+	if err != nil {
+		return nil, err
+	}
+	opened := false
+	defer func() {
+		if !opened {
+			_ = remotes.Close()
+		}
+	}()
+	drivers = append(drivers, remotes.drivers...)
 	registry, err := vfs.NewRegistry(drivers...)
 	if err != nil {
 		return nil, err
@@ -225,6 +243,7 @@ func Open(config Config) (*DB, error) {
 		}
 	}
 	copyExecutor, err := session.NewExportCopyExecutor(session.ExportCopyExecutorConfig{
+		ManifestDir:config.ManifestDir,
 		Registry:    registry,
 		Buffers:     buffers,
 		ParquetKeys: parquetKeys,
@@ -246,7 +265,7 @@ func Open(config Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db := &DB{memory: manager, buffers: buffers, temporary: temporary, engine: statements, materialized: materialized, spillMemoryBudget: spillBudget}
+	db := &DB{manifestDir:config.ManifestDir, exportRegistry:registry, memory: manager, buffers: buffers, temporary: temporary, engine: statements, materialized: materialized, spillMemoryBudget: spillBudget, remoteResources: remotes}
 	statements.SetMaterializer(func(q *query.Context, prepared session.PreparedStatement) (catalog.ExternalTable, func() error, error) {
 		var columns []Column
 		var definitions []catalog.ColumnDefinition
@@ -260,6 +279,7 @@ func Open(config Config) (*DB, error) {
 		}
 		return catalog.ExternalTable{Columns: definitions, TableFunction: materializedFunctionName, Source: m.token}, m.Close, nil
 	})
+	opened = true
 	return db, nil
 }
 
@@ -290,10 +310,11 @@ func (db *DB) Close() error {
 	db.closed.Store(true)
  if db.owner!=nil{if db.engine==nil{return nil};return db.engine.CloseSession()}
  var sessionErr error;if db.engine!=nil{sessionErr=db.engine.CloseSession()}
+	remoteErr := db.remoteResources.Close()
 	if db.materialized != nil {
-		return errors.Join(sessionErr,db.materialized.close())
+		return errors.Join(sessionErr, remoteErr, db.materialized.close())
 	}
-	return nil
+	return errors.Join(sessionErr, remoteErr)
 }
 
 func (db *DB) MemoryUsed() int64 {

@@ -39,8 +39,20 @@ func firstResponseText(message string) string {
 
 // unexpectedCode 统一构造协议状态码错误。
 func unexpectedCode(operation string, code int, message string, expected ...int) error {
-	return fmt.Errorf("%w: %s code=%d expected=%v message=%q", ErrProtocol, operation, code, expected, message)
+	return &statusError{operation, code, message, expected}
 }
+
+type statusError struct {
+	operation string
+	code      int
+	message   string
+	expected  []int
+}
+
+func (e *statusError) Error() string {
+	return fmt.Sprintf("%v: %s code=%d expected=%v message=%q", ErrProtocol, e.operation, e.code, e.expected, e.message)
+}
+func (e *statusError) Unwrap() error { return ErrProtocol }
 
 // validateCommandArg 防止 URI/credential 中的 CRLF 注入 FTP control channel。
 func validateCommandArg(value string) error {

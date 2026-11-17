@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const CurrentManifestVersion = 1
+const CurrentManifestVersion = 2
 
 var (
 	ErrInvalidManifest   = errors.New("export: invalid manifest")
@@ -19,6 +19,7 @@ type ExportState string
 const (
 	ExportStatePlanned    ExportState = "PLANNED"
 	ExportStateWriting    ExportState = "WRITING"
+	ExportStatePrepared   ExportState = "PREPARED"
 	ExportStateCommitting ExportState = "COMMITTING"
 	ExportStateCommitted  ExportState = "COMMITTED"
 	ExportStateFailed     ExportState = "FAILED"
@@ -59,6 +60,8 @@ type FileEntry struct {
 
 // Manifest is durable recovery state. Encryption identity is persisted, key material never is.
 type Manifest struct {
+	Revision            uint64            `json:"revision,omitempty"`
+	Publish             *PublishRecord    `json:"publish,omitempty"`
 	ManifestVersion     int               `json:"manifest_version"`
 	JobID               string            `json:"job_id"`
 	QueryFingerprint    string            `json:"query_fingerprint"`
@@ -77,7 +80,8 @@ type Manifest struct {
 
 func NewManifest(jobID, queryFingerprint, sourceFingerprint, destinationURI, format, compression, consistency string, files []string) (*Manifest, error) {
 	m := &Manifest{
-		ManifestVersion:  CurrentManifestVersion,
+		// Legacy dataset/atomic writers remain v1 until their staged adapters migrate.
+		ManifestVersion:  1,
 		JobID:            strings.TrimSpace(jobID),
 		QueryFingerprint: strings.TrimSpace(queryFingerprint),
 		SourceSnapshot:   SourceSnapshotRef{Fingerprint: strings.TrimSpace(sourceFingerprint)},
@@ -101,7 +105,7 @@ func (m *Manifest) Validate() error {
 	if m == nil {
 		return fmt.Errorf("%w: nil manifest", ErrInvalidManifest)
 	}
-	if m.ManifestVersion != CurrentManifestVersion {
+	if m.ManifestVersion != 1 && m.ManifestVersion != CurrentManifestVersion {
 		return fmt.Errorf("%w: unsupported manifest version %d", ErrInvalidManifest, m.ManifestVersion)
 	}
 	if strings.TrimSpace(m.JobID) == "" || strings.TrimSpace(m.QueryFingerprint) == "" || strings.TrimSpace(m.SourceSnapshot.Fingerprint) == "" {
@@ -149,6 +153,12 @@ func (m *Manifest) Validate() error {
 	if m.ExportState == ExportStateCommitted && !m.AllFilesComplete() {
 		return fmt.Errorf("%w: committed export contains incomplete files", ErrInvalidManifest)
 	}
+	if m.ManifestVersion == 2 {
+		return m.validatePublish()
+	}
+	if m.Publish != nil || m.Revision != 0 || m.ExportState == ExportStatePrepared {
+		return fmt.Errorf("%w: v2 fields in v1 manifest", ErrInvalidManifest)
+	}
 	return nil
 }
 
@@ -156,7 +166,11 @@ func (m *Manifest) TransitionExport(next ExportState) error {
 	if m == nil {
 		return fmt.Errorf("%w: nil manifest", ErrInvalidTransition)
 	}
-	if !canTransitionExport(m.ExportState, next) {
+	allowed := canTransitionExport(m.ExportState, next)
+	if m.ManifestVersion == 2 {
+		allowed = canTransitionPublish(m.ExportState, next)
+	}
+	if !allowed {
 		return fmt.Errorf("%w: export %s -> %s", ErrInvalidTransition, m.ExportState, next)
 	}
 	if next == ExportStateCommitting && !m.AllFilesComplete() {
@@ -243,7 +257,7 @@ func UnmarshalManifest(data []byte) (*Manifest, error) {
 
 func validExportState(s ExportState) bool {
 	switch s {
-	case ExportStatePlanned, ExportStateWriting, ExportStateCommitting, ExportStateCommitted, ExportStateFailed:
+	case ExportStatePlanned, ExportStateWriting, ExportStatePrepared, ExportStateCommitting, ExportStateCommitted, ExportStateFailed:
 		return true
 	default:
 		return false

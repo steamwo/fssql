@@ -23,16 +23,18 @@ var (
 const defaultMaxFiles = 100000
 
 type PlanOptions struct {
+	View             vfs.ObjectViewSpec
 	HivePartitioning bool
 	MaxFiles         int
 	ListPageSize     int
 }
 
 type FileSnapshot struct {
-	URI        vfs.URI
-	Size       int64
-	Identity   vfs.ObjectIdentity
-	Partitions map[string]string
+	URI            vfs.URI
+	Size           int64
+	Identity       vfs.ObjectIdentity
+	SourceIdentity vfs.ObjectIdentity
+	Partitions     map[string]string
 }
 
 func (f FileSnapshot) clone() FileSnapshot {
@@ -93,6 +95,9 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 	if err != nil {
 		return nil, err
 	}
+	if patternURI.IsHTTP() && patternURI.HasGlob() {
+		return nil, errors.New("fileset: HTTP URL glob is unsupported")
+	}
 	driver, err := p.registry.DriverFor(patternURI)
 	if err != nil {
 		return nil, err
@@ -101,12 +106,13 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 	if maxFiles <= 0 {
 		maxFiles = defaultMaxFiles
 	}
-	if !hasGlob(patternURI.ObjectKey()) {
-		info, err := driver.Stat(ctx, patternURI)
+	if !patternURI.HasGlob() {
+		obj, err := p.registry.ResolveObject(ctx, patternURI, opts.View)
 		if err != nil {
 			return nil, err
 		}
-		f := snapshotFromInfo(info, opts.HivePartitioning)
+		f := snapshotFromInfo(vfs.ObjectInfo{URI: obj.URI, Size: obj.Size, Identity: obj.Identity}, opts.HivePartitioning)
+		f.SourceIdentity = obj.SourceIdentity
 		return newScanSet(patternURI.String(), patternURI.ObjectKey(), []FileSnapshot{f}), nil
 	}
 
@@ -139,7 +145,15 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 			if len(files) >= maxFiles {
 				return nil, fmt.Errorf("%w: max=%d", ErrFileLimit, maxFiles)
 			}
-			files = append(files, snapshotFromEntry(entry, opts.HivePartitioning))
+			f := snapshotFromEntry(entry, opts.HivePartitioning)
+			if p.registry.HasObjectViews() {
+				obj, err := p.registry.ResolveObject(ctx, entry.URI, opts.View)
+				if err != nil {
+					return nil, err
+				}
+				f.URI, f.Size, f.Identity, f.SourceIdentity = obj.URI, obj.Size, obj.Identity, obj.SourceIdentity
+			}
+			files = append(files, f)
 		}
 		if !page.Truncated {
 			break
@@ -154,9 +168,11 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 		continuation = page.NextContinuationToken
 	}
 	if len(files) == 0 {
-		return nil, fmt.Errorf("%w: %s", ErrNoMatches, rawPattern)
+		return nil, fmt.Errorf("%w: %s", ErrNoMatches, patternURI.String())
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].URI.String() < files[j].URI.String() })
+	// Existing protocol listings keep their path order; no display serialization
+	// participates in resource identity or comparison.
+	sort.Slice(files, func(i, j int) bool { return files[i].URI.Path < files[j].URI.Path })
 	return newScanSet(patternURI.String(), prefix, files), nil
 }
 
@@ -242,9 +258,19 @@ func datasetFingerprint(files []FileSnapshot) string {
 	h := sha256.New()
 	ordered := make([]FileSnapshot, len(files))
 	copy(ordered, files)
-	sort.Slice(ordered, func(i, j int) bool { return ordered[i].URI.String() < ordered[j].URI.String() })
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].URI.IdentityKey()+ordered[i].URI.ViewKey < ordered[j].URI.IdentityKey()+ordered[j].URI.ViewKey
+	})
 	for _, f := range ordered {
-		_, _ = h.Write([]byte(f.URI.String()))
+		_, _ = h.Write([]byte(f.URI.IdentityKey()))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(f.URI.ViewKey))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(f.Identity.SnapshotID))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(f.Identity.ModifiedAt.UTC().Format("2006-01-02T15:04:05.999999999Z")))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(fmt.Sprintf("%q/%q/%d/%s", f.SourceIdentity.VersionID, f.SourceIdentity.ETag, f.SourceIdentity.Size, f.SourceIdentity.ModifiedAt.UTC().Format("2006-01-02T15:04:05.999999999Z"))))
 		_, _ = h.Write([]byte{0})
 		_, _ = h.Write([]byte(f.Identity.VersionID))
 		_, _ = h.Write([]byte{0})

@@ -9,6 +9,7 @@ import (
 	"github.com/steamwo/fssql/internal/format/parquet"
 	"github.com/steamwo/fssql/internal/function"
 	"github.com/steamwo/fssql/internal/query"
+	"github.com/steamwo/fssql/internal/storage/objectview"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
@@ -46,23 +47,33 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 	if q == nil || q.Memory == nil || q.Closed() {
 		return nil, nil, fmt.Errorf("session: Stable query sources require live QueryContext")
 	}
-	parquetBinder, err := parquet.NewSourceBinder(f.Registry, f.ParquetCache, q.Memory, f.Buffers)
+	views, err := objectview.New(q, f.Registry, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}
-	csvBinder, err := csv.NewSourceBinder(f.Registry, q.Memory, f.Buffers)
+	registry := views.Registry()
+	cache := parquet.NewQueryMetadataCache(f.ParquetCache)
+	if err := q.AddCleanup(func() error { cache.Clear(); return nil }); err != nil {
+		cache.Clear()
+		return nil, nil, err
+	}
+	parquetBinder, err := parquet.NewSourceBinder(registry, cache, q.Memory, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}
-	jsonBinder, err := jsonformat.NewJSONBinder(f.Registry, q.Memory, f.Buffers)
+	csvBinder, err := csv.NewSourceBinder(registry, q.Memory, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}
-	ndjsonBinder, err := jsonformat.NewNDJSONBinder(f.Registry, q.Memory, f.Buffers)
+	jsonBinder, err := jsonformat.NewJSONBinder(registry, q.Memory, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}
-	resolver, err := NewStableTableFunctionResolver(f.Registry, parquetBinder, csvBinder, jsonBinder, ndjsonBinder)
+	ndjsonBinder, err := jsonformat.NewNDJSONBinder(registry, q.Memory, f.Buffers)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolver, err := NewStableTableFunctionResolver(registry, parquetBinder, csvBinder, jsonBinder, ndjsonBinder)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -87,7 +98,7 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 	if err != nil {
 		return nil, nil, err
 	}
-	globScan, err := NewGlobScanOpenAdapter(f.Registry, q.Memory, f.Buffers)
+	globScan, err := NewGlobScanOpenAdapter(registry, q.Memory, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}

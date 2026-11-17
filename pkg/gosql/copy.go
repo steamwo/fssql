@@ -35,6 +35,8 @@ type ParquetEncryptionOptions struct {
 // and the internal page codec (identity/snappy) for Parquet. Empty Compression
 // defaults to snappy for Parquet and identity for text formats.
 type CopyOptions struct {
+	// PublishMode defaults to strict. Strict never downgrades automatically.
+	PublishMode CopyPublishMode
 	Format      CopyFormat
 	Compression string
 	// ParquetRowGroupRows defaults to 2048 when zero; only valid for Parquet.
@@ -56,6 +58,7 @@ type CopyOptions struct {
 
 // ExportResult is returned only after the final output object has been committed.
 type ExportResult struct {
+	JobID   string
 	Rows    int64
 	Bytes   int64
 	Columns []Column
@@ -73,6 +76,7 @@ func (db *DB) CopyTo(ctx context.Context, querySQL, destination string, options 
 		header = *options.Header
 	}
 	request := session.CopyRequest{
+		PublishMode:         string(options.PublishMode),
 		Destination:         destination,
 		Format:              string(options.Format),
 		Compression:         options.Compression,
@@ -93,5 +97,5 @@ func (db *DB) CopyTo(ctx context.Context, querySQL, destination string, options 
 	if err := errors.Join(runErr, closeErr); err != nil {
 		return ExportResult{}, err
 	}
-	return ExportResult{Rows: result.Rows, Bytes: result.Bytes, Columns: append([]Column(nil), columns...)}, nil
+	return ExportResult{JobID: result.JobID, Rows: result.Rows, Bytes: result.Bytes, Columns: append([]Column(nil), columns...)}, nil
 }

@@ -8,6 +8,17 @@ func cloneManifest(manifest *Manifest) *Manifest {
 		return nil
 	}
 	cloned := *manifest
+	if manifest.Publish != nil {
+		p := *manifest.Publish
+		p.Intent.Token = append([]byte(nil), p.Intent.Token...)
+		p.Ownership = append([]byte(nil), p.Ownership...)
+		if p.Sealed != nil {
+			s := *p.Sealed
+			s.RecoveryToken = append([]byte(nil), s.RecoveryToken...)
+			p.Sealed = &s
+		}
+		cloned.Publish = &p
+	}
 	cloned.FileStates = append([]FileEntry(nil), manifest.FileStates...)
 	for i := range cloned.FileStates {
 		if manifest.FileStates[i].PublishedIdentity != nil {

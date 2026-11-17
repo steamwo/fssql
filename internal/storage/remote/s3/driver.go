@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -107,7 +108,7 @@ func (d *Driver) Scheme() string { return "s3" }
 // StaticCapabilities 只声明已经由驱动真实实现的能力；S3 multipart completion/PutObject
 // 可作为 single-object AtomicPublishWrite 完成点，IncompleteWriteRecovery 只清理 job 独占 staging scope；仍不伪造目录 rename。
 func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite, vfs.AtomicPublishWrite, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject, vfs.ServerSideList, vfs.IncompleteWriteRecovery)
+	return vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite, vfs.AtomicPublishWrite, vfs.NoReplacePublish, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject, vfs.ServerSideList, vfs.IncompleteWriteRecovery)
 }
 
 func (d *Driver) Probe(context.Context) (vfs.ProbeResult, error) {
@@ -362,6 +363,9 @@ func statusError(resp *http.Response) error {
 	}
 	if resp.StatusCode == http.StatusPreconditionFailed {
 		return vfs.ErrObjectChanged
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("%w: S3 HTTP status 404", os.ErrNotExist)
 	}
 	return fmt.Errorf("s3: http status %d", resp.StatusCode)
 }

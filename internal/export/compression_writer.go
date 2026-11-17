@@ -158,7 +158,10 @@ func (s *CompressionSink) Close(ctx context.Context) (WriteResult, error) {
 	}
 	result, closeErr := s.downstream.Close(ctx)
 	if closeErr != nil {
-		abortErr := s.downstream.Abort(context.Background())
+		var abortErr error
+		if !errors.Is(closeErr, ErrCommitUncertain) {
+			abortErr = s.downstream.Abort(context.Background())
+		}
 		s.release()
 		return WriteResult{}, errors.Join(closeErr, abortErr)
 	}

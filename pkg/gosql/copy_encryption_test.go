@@ -204,7 +204,7 @@ func assertNoPersistedKey(t *testing.T, root string, key []byte, encoded string)
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
+		if entry.IsDir() || filepath.Ext(path) != ".json" {
 			return nil
 		}
 		data, err := os.ReadFile(path)

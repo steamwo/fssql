@@ -422,7 +422,7 @@ func (s *Source) readWindow(ctx context.Context, job rangeJob, length int64) (vf
 	if !job.serial {
 		return s.read(ctx, job.file, job.offset, length)
 	}
-	if s.window != nil && s.windowURI == job.file.URI.String() && job.offset >= s.windowOffset && job.offset < s.windowOffset+int64(s.window.Len()) {
+	if s.window != nil && s.windowURI == job.file.URI.ReadKey() && job.offset >= s.windowOffset && job.offset < s.windowOffset+int64(s.window.Len()) {
 		return vfs.RangeResult{Buffer: s.window}, nil
 	}
 	s.releaseWindow()
@@ -430,7 +430,7 @@ func (s *Source) readWindow(ctx context.Context, job rangeJob, length int64) (vf
 	if err != nil {
 		return result, err
 	}
-	s.window, s.windowURI, s.windowOffset = result.Buffer, job.file.URI.String(), job.offset
+	s.window, s.windowURI, s.windowOffset = result.Buffer, job.file.URI.ReadKey(), job.offset
 	return result, nil
 }
 

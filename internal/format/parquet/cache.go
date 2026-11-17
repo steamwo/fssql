@@ -18,10 +18,12 @@ type MetadataCacheMetrics struct {
 }
 
 type metadataCacheKey struct {
-	URI       string
-	VersionID string
-	ETag      string
-	Size      int64
+	URI        string
+	ViewKey    string
+	SnapshotID string
+	VersionID  string
+	ETag       string
+	Size       int64
 }
 
 type metadataCacheEntry struct {
@@ -39,6 +41,8 @@ type metadataFlight struct {
 // results. Only stable object identities are cacheable; callers with an unstable
 // identity always rediscover the footer to avoid reusing stale schema metadata.
 type MetadataCache struct {
+	shared     *MetadataCache
+	queryLocal bool
 	mu         sync.Mutex
 	maxEntries int
 	lru        *list.List
@@ -47,6 +51,31 @@ type MetadataCache struct {
 	hits       uint64
 	misses     uint64
 	evictions  uint64
+}
+
+// NewQueryMetadataCache keeps HTTP/materialized footers within the query while
+// preserving the established cross-query cache for other physical objects.
+func NewQueryMetadataCache(shared *MetadataCache) *MetadataCache {
+	local, _ := NewMetadataCache(shared.maxEntries)
+	local.shared, local.queryLocal = shared, true
+	return local
+}
+
+func (c *MetadataCache) route(src FooterSource) *MetadataCache {
+	if c == nil {
+		return nil
+	}
+	if c.shared != nil && !src.URI.IsHTTP() && src.Identity.SnapshotID == "" {
+		return c.shared
+	}
+	return c
+}
+
+func (c *MetadataCache) key(src FooterSource) (metadataCacheKey, bool) {
+	if (src.URI.IsHTTP() || src.Identity.SnapshotID != "") && !c.queryLocal {
+		return metadataCacheKey{}, false
+	}
+	return metadataKey(src)
 }
 
 func NewMetadataCache(maxEntries int) (*MetadataCache, error) {
@@ -62,22 +91,25 @@ func NewMetadataCache(maxEntries int) (*MetadataCache, error) {
 }
 
 func metadataKey(src FooterSource) (metadataCacheKey, bool) {
-	if !src.Identity.Stable() {
+	if !src.Identity.Stable() && src.Identity.SnapshotID == "" {
 		return metadataCacheKey{}, false
 	}
 	return metadataCacheKey{
-		URI:       src.URI.String(),
-		VersionID: src.Identity.VersionID,
-		ETag:      src.Identity.ETag,
-		Size:      src.Size,
+		URI:        src.URI.IdentityKey(),
+		ViewKey:    src.URI.ViewKey,
+		SnapshotID: src.Identity.SnapshotID,
+		VersionID:  src.Identity.VersionID,
+		ETag:       src.Identity.ETag,
+		Size:       src.Size,
 	}, true
 }
 
 func (c *MetadataCache) Get(src FooterSource) (Footer, bool) {
+	c = c.route(src)
 	if c == nil {
 		return Footer{}, false
 	}
-	key, cacheable := metadataKey(src)
+	key, cacheable := c.key(src)
 	if !cacheable {
 		return Footer{}, false
 	}
@@ -93,10 +125,11 @@ func (c *MetadataCache) Get(src FooterSource) (Footer, bool) {
 }
 
 func (c *MetadataCache) Put(src FooterSource, footer Footer) bool {
+	c = c.route(src)
 	if c == nil {
 		return false
 	}
-	key, cacheable := metadataKey(src)
+	key, cacheable := c.key(src)
 	if !cacheable {
 		return false
 	}
@@ -131,10 +164,11 @@ func (c *MetadataCache) putLocked(key metadataCacheKey, footer Footer) {
 // path. Concurrent misses for the same stable object are coalesced into one
 // footer discovery. Waiting callers may cancel without cancelling the owner.
 func (c *MetadataCache) GetOrDiscover(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64) (Footer, error) {
+	c = c.route(src)
 	if c == nil {
 		return DiscoverFooter(ctx, driver, src, scope, bm, maxFooterBytes)
 	}
-	key, cacheable := metadataKey(src)
+	key, cacheable := c.key(src)
 	if !cacheable {
 		c.mu.Lock()
 		c.misses++

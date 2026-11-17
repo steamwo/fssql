@@ -112,6 +112,7 @@ const (
 
 // BoundCopyOptions 是能够无损映射到现有 Export FileWriterConfig 的 Stable SQL 子集。
 type BoundCopyOptions struct {
+	PublishMode string
 	Encryption  *BoundCopyEncryption
 	ForceQuote  bool
 	Format      CopyFormat // Format 是最终目标格式。
@@ -420,6 +421,13 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 		}
 		seen[name] = struct{}{}
 		switch name {
+		case "publish_mode":
+			value, err := copyStringLike(option.Value)
+			if err != nil { return BoundCopyOptions{},fmt.Errorf("PUBLISH_MODE: %w",err) }
+			value = strings.ToLower(strings.TrimSpace(value))
+			if value == "" { value = "strict" }
+			if value != "strict" && value != "compatible" { return BoundCopyOptions{},fmt.Errorf("unsupported COPY PUBLISH_MODE") }
+			out.PublishMode = value
 		case "encryption_config":
 			var err error
 			out.Encryption, err = bindCopyEncryption(option.Value)

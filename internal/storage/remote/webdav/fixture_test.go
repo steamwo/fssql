@@ -27,6 +27,7 @@ type davFixture struct {
 	files map[string][]byte
 	// ignoreRange 让 GET 故意返回 200 whole-object，用于 no-silent-fallback 回归测试。
 	ignoreRange bool
+	weakETag    bool
 	// redirectRange 让 range GET 重定向到 metadata endpoint，用于 redirect bypass 测试。
 	redirectRange bool
 	// stallPUTResponse 在读完 request body 后等待客户端取消，用于 Close cancellation/leak 测试。
@@ -132,12 +133,16 @@ func (f *davFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (f *davFixture) serveHead(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	data, ok := f.files[r.URL.Path]
+	weak := f.weakETag
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	etag := fmt.Sprintf("\"%x\"", len(data)*17)
+	if weak {
+		etag = "W/" + etag
+	}
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Last-Modified", time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC).Format(http.TimeFormat))
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
@@ -148,13 +153,17 @@ func (f *davFixture) serveHead(w http.ResponseWriter, r *http.Request) {
 func (f *davFixture) serveGet(w http.ResponseWriter, r *http.Request, ignoreRange bool) {
 	f.mu.Lock()
 	data, ok := f.files[r.URL.Path]
+	weak := f.weakETag
 	f.mu.Unlock()
 	if !ok {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	etag := fmt.Sprintf("\"%x\"", len(data)*17)
-	if expected := r.Header.Get("If-Match"); expected != "" && expected != etag {
+	if weak {
+		etag = "W/" + etag
+	}
+	if expected := r.Header.Get("If-Match"); expected != "" && (weak || expected != etag) {
 		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}

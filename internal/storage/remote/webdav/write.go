@@ -26,6 +26,7 @@ type putResult struct {
 
 // writeHandle 把 bounded streaming PUT 与 staging object 生命周期绑定。
 type writeHandle struct {
+	putOnly bool
 	// driver 提供 MOVE/DELETE/Stat 等 VFS 操作。
 	driver *Driver
 	// finalURI 是用户可见目标。
@@ -70,17 +71,20 @@ func (d *Driver) OpenWrite(ctx context.Context, uri vfs.URI, opts vfs.WriteOptio
 	if !probe.Supported.Has(vfs.StreamingWrite) {
 		return nil, fmt.Errorf("%w: endpoint lacks PUT+MOVE", vfs.ErrWriteUnsupported)
 	}
+	staging, err := stagingURI(uri)
+	if err != nil {
+		return nil, err
+	}
+	return d.openPUT(ctx, uri, staging, nil, false)
+}
+
+func (d *Driver) openPUT(ctx context.Context, uri, stagingURI vfs.URI, headers http.Header, putOnly bool) (*writeHandle, error) {
 	select {
 	case d.writeSlots <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
-	stagingURI, err := stagingURI(uri)
-	if err != nil {
-		<-d.writeSlots
-		return nil, err
-	}
 	pipeReader, pipeWriter := io.Pipe()
 	requestCtx, cancel := context.WithCancel(ctx)
 	request, err := d.newRequest(requestCtx, http.MethodPut, stagingURI, pipeReader)
@@ -92,11 +96,21 @@ func (d *Driver) OpenWrite(ctx context.Context, uri vfs.URI, opts vfs.WriteOptio
 		return nil, err
 	}
 	request.Header.Set("Content-Type", "application/octet-stream")
+	for k, vs := range headers {
+		request.Header[k] = append([]string(nil), vs...)
+	}
 
 	result := make(chan putResult, 1)
 	slotReleased := make(chan struct{})
 	go func() {
-		response, requestErr := d.do(request)
+		var response *http.Response
+		var requestErr error
+		if putOnly {
+			response, requestErr = d.doPublish(request)
+		} else {
+			response, requestErr = d.do(request)
+		}
+		_ = pipeReader.CloseWithError(requestErr)
 		result <- putResult{response: response, err: requestErr}
 		close(result)
 		<-d.writeSlots
@@ -104,7 +118,8 @@ func (d *Driver) OpenWrite(ctx context.Context, uri vfs.URI, opts vfs.WriteOptio
 	}()
 
 	return &writeHandle{
-		driver: d, finalURI: uri, stagingURI: stagingURI, pipeWriter: pipeWriter,
+		putOnly: putOnly,
+		driver:  d, finalURI: uri, stagingURI: stagingURI, pipeWriter: pipeWriter,
 		cancel: cancel, result: result, slotReleased: slotReleased,
 	}, nil
 }
@@ -185,6 +200,13 @@ func (h *writeHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
 			h.bestEffortCleanup(context.Background())
 			return vfs.ObjectIdentity{}, err
 		}
+	}
+	if h.putOnly {
+		h.mu.Lock()
+		h.terminal = true
+		h.mu.Unlock()
+		h.cancel()
+		return vfs.ObjectIdentity{}, nil
 	}
 	if err := h.driver.move(ctx, h.stagingURI, h.finalURI); err != nil {
 		h.fail(err)
@@ -291,7 +313,34 @@ func (h *writeHandle) fail(err error) {
 // bestEffortCleanup 用于 Close 失败后的 staging 清理；清理失败不覆盖首错。
 func (h *writeHandle) bestEffortCleanup(ctx context.Context) {
 	h.cancel()
+	if h.putOnly {
+		return
+	}
 	_ = h.driver.deleteInternal(ctx, h.stagingURI, nil, true)
+}
+
+// Release cancels/drains process resources while preserving staging for recovery.
+func (h *writeHandle) Release() error {
+	if h == nil {
+		return nil
+	}
+	h.writeMu.Lock()
+	defer h.writeMu.Unlock()
+	h.cancel()
+	if h.pipeWriter != nil {
+		_ = h.pipeWriter.CloseWithError(context.Canceled)
+	}
+	response, err := h.waitPUT(context.Background())
+	if response != nil {
+		_ = response.Body.Close()
+	}
+	h.mu.Lock()
+	h.terminal = true
+	h.mu.Unlock()
+	if errors.Is(err, context.Canceled) {
+		return nil
+	}
+	return err
 }
 
 // Delete 删除普通 WebDAV 对象；Expected 仅在有 ETag 时通过 If-Match 表达。

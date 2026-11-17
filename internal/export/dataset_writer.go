@@ -115,7 +115,9 @@ func (w *DatasetWriter) Close(ctx context.Context) error {
 	w.single = nil
 	w.singlePath = ""
 	if err != nil {
-		_ = w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
+		if !errors.Is(err, ErrCommitUncertain) {
+			_ = w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
+		}
 		return err
 	}
 	return w.completeFile(filePath, result)
@@ -179,6 +181,9 @@ func (w *DatasetWriter) writeCompleteFile(ctx context.Context, filePath string, 
 	}
 	result, err := writer.Close(ctx)
 	if err != nil {
+		if errors.Is(err, ErrCommitUncertain) {
+			return err
+		}
 		abortErr := writer.Abort(context.Background())
 		stateErr := w.manifest.TransitionFile(filePath, FileStateFailed, 0, "")
 		return errors.Join(err, abortErr, stateErr)

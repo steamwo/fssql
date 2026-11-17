@@ -50,6 +50,26 @@ func TestReadRangeUsesManagedBufferAndExact206(t *testing.T) {
 	}
 }
 
+func TestReadRangeDoesNotSubmitWeakETagAsIfMatch(t *testing.T) {
+	fixture := newDAVFixture()
+	fixture.weakETag = true
+	driver, _ := newTestDriver(t, fixture, 1)
+	uri, _ := vfs.ParseURI("webdav://" + driver.Key.Endpoint + "/data.bin")
+	scope := memory.NewManager(1024).NewScope()
+	defer scope.Close()
+	r, err := driver.ReadRange(context.Background(), vfs.RangeRequest{URI: uri, Offset: 2, Length: 4}, scope, memory.NewBufferManager(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(r.Buffer.Bytes()) != "cdef" {
+		t.Fatal("incorrect range bytes")
+	}
+	r.Buffer.Release()
+	if scope.Used() != 0 {
+		t.Fatal("managed buffer leak")
+	}
+}
+
 func TestReadRangeRejectsWholeObjectFallbackWithoutReadingIt(t *testing.T) {
 	fixture := newDAVFixture()
 	fixture.ignoreRange = true

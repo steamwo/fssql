@@ -16,8 +16,8 @@ For a complete runnable example covering both Go query APIs and the other public
 | Custom scalar functions | `Config.ScalarFunctions`, `ScalarFunction`, `ScalarValue`, NULL policies and `NewHMACSHA256ScalarFunction`. |
 | Structured export | `DB.CopyTo`, `CopyOptions`, `ExportResult`, `Config.ParquetKeys` and `ParquetKeyResolver`. |
 | Catalog | `Open` constructs a MemoryCatalog shared within that DB instance. SQLiteCatalog exists internally, but Config has no catalog injection or persistence option. |
-| Data sources and COPY destinations | `Config.LocalFiles` and `Config.S3` register explicitly configured local and S3 drivers. Unconfigured schemes fail explicitly. TempDir/ManifestDir configure spill and recovery state. |
-| Other protocol adapters | SFTP, FTP and WebDAV implementations are internal; Config has no public driver registration option. |
+| Data sources and COPY destinations | `Config.LocalFiles`, `Config.S3`, `Config.FTP`, `Config.SFTP` and `Config.WebDAV` register explicitly configured drivers. Single-file COPY uses the configured protocol's strict or explicitly selected compatible publication contract. Unconfigured schemes fail explicitly. TempDir/ManifestDir configure spill and recovery state. |
+| Other protocol adapters | `Config.FTP` (FTP/implicit-TLS FTPS), `Config.SFTP` (OpenSSH), and `Config.WebDAV` (WebDAV/WebDAVS) enable endpoint-scoped reads and recoverable single-file COPY. Strict prerequisites and compatible limitations are documented below. Custom VFS registration remains internal. |
 | Source introspection | SQL `DESCRIBE`, `parquet_schema` and `parquet_file_metadata` use the query path. There is no exported `DB.InspectSource` method. |
 | HTTP service | The wire adapter is internal; the public package has no HTTP server constructor. |
 | Nested results | Type metadata is exposed for LIST/STRUCT; Chunk currently has no public accessor for nested element values. |
@@ -40,7 +40,7 @@ if err != nil {
 defer db.Close()
 ```
 
-`gosql.Config` exposes bounded engine memory, temporary storage, spill policy, catalog/cache capacities, worker/queue limits, local spill/COPY manifest roots, and optional local-file/S3 configuration. Zero values select defaults:
+`gosql.Config` exposes bounded engine memory, temporary storage, spill policy, catalog/cache capacities, worker/queue limits, local spill/COPY manifest roots, and optional local-file/S3/FTP/SFTP/WebDAV/HTTP configuration. Zero values select defaults:
 
 | Field | Default |
 | --- | --- |
@@ -55,6 +55,8 @@ defer db.Close()
 | `TempDir` | `filepath.Join(os.TempDir(), "fssql-spill")` |
 | `ManifestDir` | `filepath.Join(os.TempDir(), "fssql-copy-manifests")` |
 | `LocalFiles`, `S3` | nil; no local/S3 data driver registered |
+| `FTP`, `SFTP`, `WebDAV` | nil; no corresponding remote data driver registered |
+| `HTTP` | empty; no HTTP/HTTPS data drivers registered |
 | `TableFunctions`, `ScalarFunctions` | empty; built-ins only |
 | `ParquetKeys` | nil; no application-provided export key resolver |
 
@@ -62,7 +64,7 @@ MemoryUsed and MemoryLimitBytes describe engine-managed memory, not total proces
 
 `SpillMemoryBudgetBytes` is an operator policy, not a separate memory allowance; hash joins use an effective minimum budget of 4096 bytes. All managed allocations still share the DB memory limit. CROSS build inputs remain resident, and some stateful window/sampling plans execute serially even when `Workers` is higher. Caller allocations inside source/UDF callbacks are outside managed-memory accounting.
 
-`DB.Close` prevents new work. Query calls already in progress retain their own query-scoped context/ownership and finish or cancel through the supplied context.
+`DB.Close` prevents new work and releases configured remote pools and idle HTTP connections. It cancels outstanding HTTP source requests. Leased FTP/SFTP sessions close when returned; subsequent acquisitions fail, so callers should finish or cancel remote queries before closing the DB. Query calls retain their own query-scoped context/ownership and also observe their supplied context.
 
 ### Local files
 
@@ -83,6 +85,123 @@ _ = uri
 ```
 
 With an `OpenSQLDB` instance configured for the same root, use `QueryContext(ctx, "SELECT * FROM read_parquet(?)", uri)`. Parameters supply values; table names, column identifiers and SQL fragments cannot be parameters.
+
+### Remote protocols
+
+The same configuration works with `Open` and `OpenSQLDB`. Each optional config binds one endpoint; a query URI must use the same scheme and exact host/port spelling. Endpoints must be URLs without user info, data paths, queries or fragments. Put the data path in the query URI. `Open` validates configuration without connecting; DNS, server authentication, SSH executable/file availability and protocol capability checks occur when querying.
+
+```go
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{
+    FTP: &gosql.FTPConfig{
+        Endpoint: "ftps://ftp.example.com:990", // implicit TLS
+        Username: "reader",
+        Password: os.Getenv("FTP_PASSWORD"),
+    },
+    SFTP: &gosql.SFTPConfig{
+        Endpoint:       "sftp://sftp.example.com:22",
+        Username:       "reader",
+        KnownHostsFile: "/app/ssh/known_hosts",
+        IdentityFile:   "/app/ssh/id_ed25519",
+    },
+    WebDAV: &gosql.WebDAVConfig{
+        Endpoint: "webdavs://dav.example.com",
+        Username: "reader",
+        Password: os.Getenv("WEBDAV_PASSWORD"),
+    },
+})
+if err != nil { return err }
+defer sqlDB.Close()
+
+rows, err := sqlDB.QueryContext(ctx,
+    "SELECT * FROM read_csv(?, header=true)",
+    "sftp://sftp.example.com:22/data/input.csv")
+if err != nil { return err }
+defer rows.Close()
+// Consume rows and check rows.Err().
+```
+
+- `FTPConfig.Endpoint` accepts `ftp://` (port 21) and `ftps://` (implicit TLS, port 990). Plain FTP requires `AllowPlainFTP: true`; explicit AUTH TLS is not implemented. `MaxSessions` defaults to 4 and `MaxAttempts` to 2.
+- `SFTPConfig` requires `Username` and `KnownHostsFile`. It invokes `SSHBinary` (default `ssh`) with strict host-key checking and batch mode, using `IdentityFile` or the SSH agent. `ConnectTimeout` defaults to 15 seconds, `MaxSessions` to 4 and `MaxAttempts` to 2. Password prompts are disabled. Network access follows OpenSSH configuration; `RemoteNetworkConfig` applies to FTP/WebDAV/HTTP.
+- `WebDAVConfig.Endpoint` accepts `webdav://` (HTTP, port 80) and `webdavs://` (HTTPS, port 443). Authentication uses `Username` and `Password` as Basic Auth. Range reads require a server that returns exact HTTP 206 responses.
+- FTP and WebDAV accept `Network: gosql.RemoteNetworkConfig{AllowPrivate: true}` for private servers; `AllowLoopback` and `AllowLinkLocal` are independent opt-ins. Default policy rejects all three address classes. The configured endpoint port is the only permitted control/HTTP port; FTP passive data connections remain bound to the validated server IP.
+- `FTPConfig.TLSConfig` and `WebDAVConfig.TLSConfig` accept a standard `*tls.Config`, for example with custom `RootCAs`. The configuration is cloned when opening the DB; normal certificate verification applies by default. Credentials are supplied through configuration rather than URI user info or SQL.
+
+Parquet/CSV/JSON/NDJSON readers use the same registered VFS drivers. Available operations remain bounded by server capabilities (for example FTP REST STREAM and MLSD). Single-file SQL COPY and `CopyTo` use staged publication and v2 recovery manifests. Strict mode is the default and never downgrades automatically.
+
+| Protocol | Strict publication | Explicit compatible publication |
+| --- | --- | --- |
+| SFTP | SFTP v3 handshake must advertise `hardlink@openssh.com` version `1`. Exclusive staging is created in the final directory; a hardlink publishes without replacing an existing destination. The server must support links on that filesystem. Extension/version are persisted and checked again on recovery. | Exclusive staging followed by standard SFTP rename. No POSIX overwrite-rename fallback; strict no-overwrite is not guaranteed across server implementations. |
+| WebDAV/WebDAVS | Set `WebDAVConfig.AtomicMoveVerified: true` only after validating both atomic same-directory MOVE and no-overwrite behavior under concurrent destination creation. Uses `MOVE Overwrite: F`. OPTIONS/DAV headers and a successful rename alone do not prove these guarantees. | Uses `MOVE Overwrite: F`, subject to server behavior. Default concurrent Apache `mod_dav_fs` can overwrite a competing destination despite this header. Crash-safe atomic visibility is also deployment dependent. |
+| FTP/FTPS | Rejected before creating staging. | STOR a unique same-directory staging name, check target absence, then RNFR/RNTO. There is a TOCTOU window: if another client creates the target after the check, a server whose rename overwrites may replace that competing file. |
+
+WebDAV publishing first attempts conditional staging creation with an infinite exclusive depth-zero DAV lock. Only an explicit LOCK 405/501 selects the conditional PUT protocol, which requires a strong ETag in its creation response. Staging upload, MOVE and deletion remain conditional. FTP publishing requires SIZE and an exact parent MLSD listing to distinguish a missing target from a permission-related 550; full-byte verification uses RETR without requiring REST. SFTP requires exclusive OPEN and ordinary file reads/removal. No publication path deletes the final destination before rename. Staging creation/publish requests are not replayed implicitly after an unknown response, and unknown staging ownership is retained as `cleanup_pending` for operator inspection rather than guessed cleanup.
+
+For a configured FTP/FTPS endpoint, opt into its compatible contract explicitly:
+
+```go
+result, err := db.CopyTo(ctx, querySQL, "ftps://ftp.example.com:990/data/output.csv", gosql.CopyOptions{
+    Format: gosql.CopyFormatCSV,
+    PublishMode: gosql.CopyPublishCompatible,
+})
+```
+
+The SQL equivalent uses `(FORMAT csv, PUBLISH_MODE 'compatible')`. Keep `ManifestDir` across DB/process restarts and use the returned/error JobID with `RecoverExport`; do not repeat COPY to resolve an uncertain publication. See [Export recovery](#export-recovery).
+
+### HTTP and HTTPS sources
+
+```go
+sqlDB, err := gosql.OpenSQLDB(gosql.Config{
+    HTTP: []gosql.HTTPConfig{
+        {
+            Endpoint:    "https://data.example.com",
+            BearerToken: os.Getenv("DATA_TOKEN"),
+            // Empty FallbackPolicy defaults to HTTPFallbackMaterialize.
+        },
+        {
+            Endpoint:       "https://archive.example.com:8443",
+            Headers:        map[string]string{"X-API-Key": os.Getenv("ARCHIVE_KEY")},
+            FallbackPolicy: gosql.HTTPFallbackRequireRange,
+        },
+    },
+})
+if err != nil { return err }
+defer sqlDB.Close()
+rows, err := sqlDB.QueryContext(ctx, "SELECT * FROM read_csv(?, header=true)", signedURL)
+if err != nil { return err }
+defer rows.Close()
+```
+
+HTTP sources work with CSV, JSON, NDJSON and Parquet through Native API and `database/sql`, including JOINs across configured endpoints. URLs need no file suffix. Raw path escaping, repeated slashes, query order, duplicate parameters, empty values and an explicit empty query separator are preserved. Query wildcard characters do not trigger glob expansion. URL path globs, directory listing, URI userinfo, fragments and HTTP export destinations are unsupported.
+
+Each `HTTPConfig.Endpoint` must be `http(s)://host[:port]` without a path (including `/`), query, userinfo or fragment. Default ports are normalized when rejecting duplicate origins. HTTP and HTTPS require separate authorization. Unconfigured origins are denied, including redirect destinations. `Open` validates and copies the endpoint list and headers without DNS or remote requests.
+
+Authentication is anonymous, Basic (`Username`/`Password`), Bearer (`BearerToken`), or fixed custom headers for API keys. Basic and Bearer cannot be combined. `Authorization`, `Host`, `Proxy-Authorization`, Range/conditional headers, `Accept-Encoding`, hop-by-hop/connection headers and `Content-Length` cannot be customized. Redirects are manual, limited to five, reject HTTPS-to-HTTP downgrades, and regenerate authentication and custom headers from each target endpoint's own configuration. Cookies and environment proxies are disabled. DNS, IP and the configured port are checked at every hop and again at actual dialing; connections use the validated IPs. Private, loopback and link-local addresses require independent `Network` opt-ins.
+
+`MaxConnections` defaults to 8 per origin. `RequestTimeout` defaults to 0, adding no request deadline beyond the caller's context. Positive timeouts cover connection-slot waits, DNS, requests and response bodies. TCP connect and TLS handshake timeouts are 10 seconds; the response-header timeout is 30 seconds. `TLSConfig` is stored with `Clone()`, which is a **shallow copy**: replacing caller top-level fields is isolated, but certificate pools, certificates, callbacks and captured state may remain shared. Do not mutate shared objects after `Open`; dynamic TLS callbacks must be concurrency-safe.
+
+Reading starts with `GET Range: bytes=0-0`, without requiring HEAD. A valid identity-encoded 206 with a known total and strong ETag creates a pinned remote snapshot; every subsequent range uses `If-Match` and verifies the exact interval, total, ETag and body length. Later redirects, 200, 412 or identity/size changes fail the query instead of switching versions.
+
+`HTTPFallbackMaterialize` reuses an initial complete 200 body, or issues one full GET after a valid partial response lacks a strong validator/known total or uses HTTP gzip. Partial gzip bytes are validated as a range response and closed, never handed to a gzip decoder. Complete responses stream through a 64 KiB managed buffer into query temporary storage, reserving quota before each write; all materialized bytes count toward `TempLimitBytes`. `HTTPFallbackRequireRange` closes responses lacking stable physical Range with a capability error without downloading the full object. A 416 with `Content-Range: bytes */0` is a valid empty object for either policy. Protocol, authentication, network and TLS errors never trigger a whole-object retry.
+
+Materialized logical views have content SHA-256 SnapshotIDs, query-local sharing and cleanup on cancellation, bind/runtime failure and early Rows.Close. HTTP footers never enter the shared cross-query Parquet cache. Diagnostics redact query values; different signed URLs retain separate identities. HTTP `Content-Encoding` supports identity and gzip; br, unknown or stacked transport encodings fail explicitly. Go's automatic decompression remains disabled.
+
+### Compressed text sources
+
+`read_csv`, `read_json`, `read_ndjson`, `read_csv_auto` and `read_json_auto` accept `compression='auto'|'none'|'gzip'|'zstd'`. The default is `auto`; options may also be bound as `database/sql` value parameters. `read_json_auto(..., format='newline_delimited', compression='gzip')` retains its existing NDJSON alias behavior.
+
+```sql
+SELECT * FROM read_csv('s3://bucket/no-suffix', header=true, compression='auto');
+SELECT * FROM read_json('https://data.example.com/signed?token=...', compression='gzip');
+SELECT * FROM read_ndjson('file:///data/events.zst', compression='zstd');
+```
+
+File compression uses content magic, independently of suffix, Content-Type or protocol. It applies uniformly to local, S3, FTP/FTPS, SFTP, WebDAV/WebDAVS and HTTP/HTTPS inputs, including mixed compressed/plain files selected by a local or remote glob. `none` disables file decoding; an explicit gzip/zstd mode requires matching magic. Concatenated gzip members, concatenated zstd frames and multiple zstd skippable-frame prefixes are supported. Decoder checksum and truncation errors fail the query before publishing a SnapshotID.
+
+The resolver first decodes HTTP Content-Encoding, then sniffs and decodes optional file compression, then writes **one** logical temporary object. HTTP gzip plus a gzip or zstd file therefore does not create an intermediate temporary file. The SnapshotID hashes the final logical bytes; the physical ETag/version remains separate. Compressed Content-Length does not become logical Size or the decoded quota reservation. `TempLimitBytes` applies to actual decoded bytes, including decompression expansion; quota exhaustion stops input and removes incomplete files.
+
+Decoder workspaces are reserved against `MemoryLimitBytes` before allocation: gzip reserves 1 MiB per decoding layer; zstd reserves a 1 MiB base plus its bounded window (up to 8 MiB), including transient window growth. A 4-byte managed magic prefix and managed copy/range buffers are separately charged. Unknown lengths, streaming reads, cancellation, bind/runtime failure and early close share query resource cleanup. Identical view specifications initialize once per query; `auto`, `none`, `gzip` and `zstd` retain separate identities and read routes. Uncompressed RandomRead objects in auto mode retain remote/local range access after the small magic probe.
+
+`HTTPFallbackRequireRange` still permits file gzip/zstd decoding and temporary materialization when the underlying HTTP object has stable Range support. `compression='none'` does not disable HTTP gzip decoding. Parquet supports HTTP gzip materialization, while whole-file `.parquet.gz`/`.parquet.zst` wrappers remain unsupported; existing Parquet page compression is unchanged.
 
 ### Native chunk query API
 
@@ -145,16 +264,61 @@ result, err := db.CopyTo(ctx, "SELECT 1 AS id", destination, gosql.CopyOptions{
     ParquetPageRows: 2048,
 })
 if err != nil { return err }
-// result.Rows, result.Bytes and result.Columns describe committed output.
+// result.JobID, result.Rows, result.Bytes and result.Columns describe committed output.
 ```
 
-`destination` must use an enabled local/S3 driver. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity` (default), `gzip` or `zstd`; Parquet uses page compression `snappy` (default) or `identity`. Explicit `none` also disables compression. These defaults apply to both `CopyTo` and SQL COPY. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
+`destination` must use an enabled local/S3/FTP/FTPS/SFTP/WebDAV/WebDAVS driver and satisfy its selected publication mode. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity` (default), `gzip` or `zstd`; Parquet uses page compression `snappy` (default) or `identity`. Explicit `none` also disables compression. These defaults apply to both `CopyTo` and SQL COPY. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
 
 `CopyOptions.ParquetRowGroupRows` and `ParquetPageRows` configure Parquet row-group/page boundaries independently of input chunks, including encrypted output. Zero selects the existing defaults: 2048 rows per group and 512 rows per page (clamped to smaller groups). Positive page rows must not exceed the effective group rows; negative sizes and layout options on text formats are rejected before opening output. Larger groups use the same DB memory budget and may fail when it is insufficient. These options apply to `CopyTo`; SQL COPY retains its existing layout defaults.
 
 Parquet export automatically considers `RLE_DICTIONARY` for low-cardinality VARCHAR/BLOB column chunks, including encrypted output. Dictionaries are limited to 256 entries and 32 KiB of PLAIN dictionary bytes; small chunks, high cardinality, insufficient estimated savings or a preparation-time memory limit retain PLAIN encoding. Encoding selection is internal and does not change SQL values, NULL handling or the compression option. Page/column statistics remain available independently of encoding.
 
 For encrypted Parquet export, set `CopyOptions.Encryption` to `ParquetEncryptionOptions{Algorithm: gosql.ParquetAES256GCM, KeyID: keyID}` and provide `Config.ParquetKeys`. The resolver receives `(context.Context, keyID, algorithm)` and must return 16 bytes for `ParquetAES128GCM` or 32 bytes for `ParquetAES256GCM`. SQL/options/manifests carry the key identity, not key bytes. This is an export API; it does not expose a general encrypted-file read key provider.
+
+### Export recovery
+
+Local/S3 and remote file-protocol single-file `CopyTo` and SQL COPY write v2 manifests under `Config.ManifestDir`. Each invocation generates a fresh random 32-character lowercase hexadecimal JobID; `ExportResult.JobID` identifies a successful typed export. Format and compression tails finish before the protocol Seal; durable PREPARED and COMMITTING snapshots precede publication. The final file is verified against the physical output size and SHA-256 before COMMITTED is saved. Verification uses managed 64 KiB buffers and reads raw output, including compression/encryption, without applying source decompression.
+
+`CopyOptions.PublishMode` accepts `CopyPublishStrict` (default) and `CopyPublishCompatible`; SQL uses `PUBLISH_MODE 'strict'` or `'compatible'`. Both retain Local/S3 atomic no-replace publication; an existing target conflicts even when its contents match. Strict never silently downgrades. Remote protocol prerequisites and compatible limitations are listed in [Remote protocols](#remote-protocols).
+
+SFTP/FTP/WebDAV staging names are fixed in WRITING intent before creation. Successful creation is durably recorded before accepting payload. Seal finishes the private stream, records its identity and verifies its complete physical size/SHA-256; it never renames, links or moves the final target. Publication and recovery use the same coordinator. Staging verification may perform several full reads before publication, followed by a complete final read, so budget network bandwidth and read permissions as well as upload permissions. Protocol/metadata workspace reserves 512 KiB per active file-publication handle, with a separate managed 64 KiB readback buffer. Zero-byte files use the same staging lifecycle.
+
+WebDAV publication first requests `LOCK If-None-Match: *`, `Depth: 0`, and `Timeout: Infinite`. The grant must be an infinite exclusive write lock; finite leases are rejected before payload writes. The manifest stores only a SHA-256 digest of the lock token. Recovery reauthorizes current credentials, retrieves DAV:lockdiscovery, matches that digest, and uses a tagged `If` condition on staging operations. A missing, replaced or administratively broken lock cannot authorize staging publication or deletion; cleanup remains pending. A lost LOCK reply also leaves unknown ownership for administrator cleanup. MOVE removes the source lock; Abort never unlocks or deletes the final object. Only LOCK 405/501 selects the older strong-ETag creation protocol; later HEAD cannot replace its creation proof. Existing intents retain their original strong-ETag protocol.
+
+Default Apache 2.4.65 `mod_dav_fs` is supported in compatible mode through DAV locks, including its missing creation ETag and omitted DAV:lockroot. Its concurrent MOVE implementation has an observed destination overwrite window. Strict mode therefore requires a separately verified deployment, for example request serialization combined with same-filesystem atomic rename and exclusive access through that server; the default concurrent configuration must keep `AtomicMoveVerified` false. Weak ETags are never submitted as HTTP If-Match, and weak-to-strong promotion of the same opaque tag is accepted during full-byte publication verification.
+
+WebDAV recovery checks the currently configured credential scope and, for committed jobs, the recorded final ETag. SFTP/FTP servers generally expose only size and second-resolution modification time: these are checked before/after physical readback, but cannot identify a same-byte replacement or every concurrent rewrite. Full SHA-256, rather than those weak metadata fields, verifies content. Recovery also requires the original protocol/mode/endpoint/security scope; changing the SFTP extension/version or WebDAV atomicity declaration invalidates the old token.
+
+```go
+result, err := db.CopyTo(ctx, querySQL, destination, gosql.CopyOptions{
+    Format: gosql.CopyFormatCSV,
+    PublishMode: gosql.CopyPublishStrict,
+})
+if err != nil {
+    var uncertain *gosql.CommitUncertainError
+    if errors.As(err, &uncertain) {
+        // Preserve the same ManifestDir and reopen with the target driver enabled.
+        _, recoverErr := db.RecoverExport(ctx, uncertain.JobID)
+        return recoverErr
+    }
+    return err
+}
+_, err = db.RecoverExport(ctx, result.JobID) // read-only verification after commit
+```
+
+`errors.Is(err, gosql.ErrCommitUncertain)` means publication may have taken effect; the error exposes `JobID` through `CommitUncertainError`. It preserves COMMITTING evidence and staging. Other errors after ownership creation expose `ExportJobError.JobID`; having a JobID alone does not mean a commit is uncertain. `ErrCommitConflict` reports a known target conflict/content mismatch; `ErrExportNotRecoverable` reports missing or unsealed evidence. Recovery never binds or reruns the query and does not need the original source snapshot; it uses an independent managed memory scope and currently configured target authorization.
+
+Only PREPARED/COMMITTING jobs may resume publication. WRITING/FAILED jobs may clean proven job-owned staging but cannot publish. Unknown ownership remains `cleanup_pending`. COMMITTED recovery only verifies the final object and retries staging cleanup: a missing final returns `ErrExportNotRecoverable`, changed bytes or recorded stable identity return `ErrCommitConflict`, and neither recreates the target. Cleanup failure after durable COMMITTED preserves success and leaves `cleanup_pending` for a later call. Cleanup never deletes final output.
+
+S3 multipart parts use the final key but remain unpublished until CompleteMultipartUpload. Ownership snapshots record UploadID and confirmed part number, ETag, size and available SHA/CRC checksums before further payload actions. Seal fixes the complete part list and full physical SHA-256 without completing the upload. Recovery first verifies an existing final object; when explicitly absent, it reconciles all sealed parts with paginated ListParts before continuing. A completed UploadID may have disappeared, so final verification does not depend on it. Complete success is determined from its full XML response; HTTP 200 can contain an Error. See the [AWS CompleteMultipartUpload contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CompleteMultipartUpload.html).
+
+Actual zero-byte output uses a sealed `empty_put` descriptor; only COMMITTING publication issues its conditional PUT. Zero rows may still emit a CSV header, JSON array, compressed frame or Parquet footer and therefore use multipart. S3 final verification pins VersionID where available, checks the current target identity, and reads the complete physical output; ETag and multipart/composite checksums do not replace the full SHA-256. This verification incurs a full-object download. Recovery requires current target credentials and permissions for these reads, part listing and exact-upload cleanup. Recovery tokens are bounded to 4 MiB and metadata/part buffers use the DB memory budget.
+
+An unknown UploadID after a lost create response cannot be safely recovered by listing and aborting every upload for the final key. Such a job retains `cleanup_pending` and needs a deployment lifecycle rule such as AbortIncompleteMultipartUpload to reclaim the unknown upload. Known uploads are cleaned only by their recorded UploadID. Create and final publish requests are not implicitly replayed after a lost response; an uncertain publication is reconciled using the same JobID.
+
+Recovery accepts new 32-character v2 IDs and legacy 64-character lowercase hexadecimal v1 IDs, validates the manifest's internal ID/version, and rejects paths or other encodings. V1 recovery only confirms an already visible file with reliable recorded identity; local v1 also requires its full recorded SHA-256. It does not fabricate staging tokens or upgrade the manifest. Normal writes and recovery hold the same cancelable OS job lock through reload, publication, verification and state updates; persistent `.lock` files are intentional. Coordination is limited to a local ManifestDir shared by processes on one host, not distributed hosts or unverified network filesystems.
+
+Runnable Go examples for preserving error JobIDs and recovering with a fresh context/DB are in [remote_export.go](../examples/quickstart/remote_export.go).
 
 ### Go table and scalar functions
 

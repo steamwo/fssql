@@ -16,5 +16,28 @@ var _ vfs.AtomicPublishDriver = (*Driver)(nil)
 // successful publish point. This method is intentionally explicit rather than a
 // Registry fallback from AtomicPublishWrite to ordinary OpenWrite.
 func (d *Driver) OpenAtomicPublishWrite(ctx context.Context, u vfs.URI, opts vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (vfs.WriteHandle, error) {
-	return d.OpenWrite(ctx, u, opts, scope, bm)
+	job, err := vfs.NewPublishJobID()
+	if err != nil {
+		return nil, err
+	}
+	intent, err := d.PlanPublish(ctx, u, job, vfs.PublishStrict)
+	if err != nil {
+		return nil, err
+	}
+	h, err := d.BeginPublish(ctx, intent, func(context.Context, []byte) error { return nil }, scope, bm)
+	if err != nil {
+		if h != nil {
+			_ = h.Release()
+		}
+		return nil, err
+	}
+	// Legacy AtomicPublishWrite supports explicit overwrite/CAS as before;
+	// coordinated COPY always retains its independently validated no-replace mode.
+	h.(*s3PublishHandle).writer.opts = opts
+	writer := h.(*s3PublishHandle).writer
+	writer.legacy = vfs.NewPublishWriteAdapter(job, h, func(ctx context.Context) (vfs.ObjectIdentity, error) {
+		info, err := d.Stat(ctx, u)
+		return info.Identity, err
+	})
+	return writer, nil
 }

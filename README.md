@@ -12,9 +12,9 @@ fssql 当前专注于一条明确的数据处理路径：
 
 **读取数据 → SQL 查询/转换 → 导出结果**
 
-- **数据读取**：CSV、JSON、NDJSON、Parquet，以及本地文件和 S3 / MinIO。
+- **数据读取**：CSV、JSON、NDJSON、Parquet，来源包括本地文件、S3 / MinIO、FTP/FTPS、SFTP、WebDAV 和 HTTP/HTTPS。
 - **SQL 查询**：过滤、投影、聚合、JOIN、窗口函数、子查询、集合操作、CTE 等分析型 SQL。
-- **数据导出**：CSV、JSON、NDJSON、Parquet，支持本地文件和已配置的 S3 目标。
+- **数据导出**：CSV、JSON、NDJSON、Parquet，支持本地文件及已配置的 S3、FTP/FTPS、SFTP、WebDAV 目标和提交恢复。
 - **Go 嵌入**：既可使用原生 Chunk API，也可直接通过 `database/sql` 查询。
 - **资源控制**：提供内存、临时存储、spill、worker 和队列限制，适合在 Go 服务内嵌运行。
 - **可扩展数据源与函数**：支持 Go Table Function、Scalar UDF 和物化快照。
@@ -339,6 +339,8 @@ fmt.Printf("rows=%d bytes=%d\n", result.Rows, result.Bytes) // rows=3
 
 将 `Format` 换成 `CopyFormatCSV`、`CopyFormatJSON` 或 `CopyFormatNDJSON`，并修改目标扩展名，即可导出其他格式。文本格式压缩支持 `identity`/`gzip`/`zstd`，Parquet 页压缩支持 `snappy`/`identity`。CSV 默认输出表头，分隔符等通过 `CopyOptions` 配置。目标已存在时不会覆盖；成功返回表示最终文件已提交。
 
+Local/S3 及远程文件协议的单文件导出使用 v2 清单和随机 JobID，先完成 Seal，再持久化 PREPARED/COMMITTING 后发布。`CopyOptions.PublishMode` 默认 strict；Local/S3 的 compatible 也保持不覆盖保证。提交应答丢失等情况返回携带 JobID 的 `CommitUncertainError`，可通过 `db.RecoverExport(ctx, jobID)` 核对或恢复，恢复不会重新执行查询。S3 Seal 不 Complete，零字节输出不提前 PUT；恢复先核验 final，再按需要核对分片。核验会完整读取物理输出，远程协议因此有额外下载成本。已提交目标被删除时不会重建；清理失败或未知 ownership 保留 `cleanup_pending`。请保留相同 `ManifestDir`，详见 [导出恢复 API](docs/public-api.md#export-recovery)。
+
 也可通过 `ExecContext` 执行 SQL COPY，目标 URI 作为参数传入：
 
 ```go
@@ -434,12 +436,16 @@ if err := sqlDB.QueryRowContext(ctx,
 | 原生查询 | `Open` → `QueryChunks`；Chunk 仅在回调期间有效，结果列信息通过 `[]Column` 返回。 |
 | 行式查询 | `OpenSQLDB` 返回 `*sql.DB`；支持值参数、`PrepareContext` 及上下文取消。 |
 | 控制语句与导出 | `DB.Exec` 执行 DDL、控制语句和 COPY；`DB.CopyTo` 提供结构化选项及导出统计。目标由已配置的 VFS driver 支持。 |
-| 数据源 | `Config.LocalFiles` 开启受根目录限制的本地文件访问，`Config.S3` 开启 S3；内建读取函数支持 Parquet、CSV、JSON、NDJSON。 |
+| 数据源 | `Config.LocalFiles` 开启受根目录限制的本地文件访问，`Config.S3` 开启 S3；`Config.FTP`、`Config.SFTP`、`Config.WebDAV` 开启对应远程协议，`Config.HTTP` 授权多个 HTTP/HTTPS 端点。内建读取函数支持 Parquet、CSV、JSON、NDJSON。 |
 | Go 扩展 | `Config.TableFunctions` 注册固定 schema 的零参数批量表函数；`Config.ScalarFunctions` 注册标量函数，另有 HMAC-SHA256 辅助构造器。 |
 | Catalog | `Open` 当前使用 MemoryCatalog；其元数据保存在当前 DB 实例内。 |
 | 资源控制 | `Config` 配置内存、临时存储、spill、worker 和队列限制；`MemoryUsed` 统计引擎受管内存。 |
 
-当前 `Config` 没有 SQLiteCatalog、自定义 VFS、SFTP、FTP 或 WebDAV 的注入入口，也没有公共 HTTP 服务构造器。内部模块的实现范围与外部项目可直接使用的范围，请以[公共 API 文档](docs/public-api.md)为准。
+`Config.FTP` 支持 FTP/隐式 TLS FTPS，`Config.SFTP` 使用系统 OpenSSH 并要求配置 `KnownHostsFile`，`Config.WebDAV` 支持 WebDAV/WebDAVS。各配置绑定一个端点，未配置的协议保持禁用。FTP 明文连接须显式设置 `AllowPlainFTP`；FTP/WebDAV 默认拒绝私网、回环和链路本地地址，可通过 `RemoteNetworkConfig` 按需开启。读取和单文件 COPY/CopyTo 均已接入。SFTP strict 要求握手声明 `hardlink@openssh.com=1`；WebDAV strict 要求部署方验证后设置 `AtomicMoveVerified: true`。FTP/FTPS 仅支持显式 compatible，其目标检查与 rename 之间存在 TOCTOU 窗口，可能覆盖竞争创建的目标；SFTP compatible 也不承诺严格不覆盖，WebDAV compatible 不承诺服务端的崩溃原子可见性。配置及服务端前提见[公共 API 文档](docs/public-api.md#remote-protocols)。
+
+当前 `Config` 没有 SQLiteCatalog、自定义 VFS 的注入入口，也没有公共 HTTP 服务构造器。内部模块的实现范围与外部项目可直接使用的范围，请以[公共 API 文档](docs/public-api.md)为准。
+
+`Config.HTTP` 支持匿名、Basic、Bearer 和固定 API Key 请求头，保留签名 URL 的原始路径和 query。只访问已配置的源站，重定向逐跳切换目标认证并禁止 HTTPS 降级；默认拒绝私网、回环及链路本地地址。有效强 ETag Range 视图按需读取，默认 `materialize` 策略在能力不足时将完整对象写入受 `TempLimitBytes` 管理的查询临时空间，也可配置 `require_range` 要求稳定物理 Range。支持 HTTP identity/gzip；文本读取函数及现有别名统一接受 `compression='auto'|'none'|'gzip'|'zstd'`，默认按内容魔数自动识别。HTTP 解码和文件解压串联后只写一个查询临时对象，解压后字节受 TempLimit 管理，解码工作区受 MemoryLimit 管理。详见 [HTTP/HTTPS 配置](docs/public-api.md#http-and-https-sources)与[压缩文本读取](docs/public-api.md#compressed-text-sources)。
 
 值参数可用于 SELECT、已支持的 CREATE、COPY、DESCRIBE 和 SET 等语句。当前引擎面向只读查询与导出工作负载，事务暂不支持。DECIMAL/HUGEINT 和 UBIGINT 的行式结果以精确十进制文本返回；原生 DECIMAL 访问器返回未缩放整数，需结合 `Type.Scale` 解释。日期/时间的行式结果为 UTC `time.Time`。LIST/STRUCT 可通过原生 `Chunk.Value`/`List`/`Struct` 读取，`database/sql` 对非 NULL 嵌套值仍返回错误。
 

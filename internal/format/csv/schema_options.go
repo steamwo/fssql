@@ -9,6 +9,7 @@ import (
 	"github.com/steamwo/fssql/internal/core/types"
 "github.com/steamwo/fssql/internal/semantics"
 	"github.com/steamwo/fssql/internal/tablefunc"
+	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
 const (
@@ -28,6 +29,8 @@ func ParseTableFunctionSource(token string) (string, SourceBindOptions, error) {
 	autoDetect := true
 	for key, value := range raw {
 		switch key {
+		case "compression":
+			mode,err:=vfs.ParseFileCompression(value);if err!=nil{return "",SourceBindOptions{},err};if mode==""{return "",SourceBindOptions{},fmt.Errorf("csv: compression must not be empty")};opts.FileSet.View.FileCompression=mode
 		case "header":
 			flag, err := parseCSVBoolOption(key, value)
 			if err != nil {

@@ -53,6 +53,7 @@ func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
 		vfs.StreamingWrite,
 		vfs.ServerSideList,
 		vfs.AtomicPublishWrite,
+		vfs.NoReplacePublish,
 		vfs.ConditionalWrite,
 	)
 }
@@ -149,7 +150,7 @@ func (d *Driver) List(ctx context.Context, u vfs.URI, opts vfs.ListOptions) (vfs
 	if err != nil {
 		return vfs.ListPage{}, err
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].URI.String() < entries[j].URI.String() })
+	sort.Slice(entries, func(i, j int) bool { return entries[i].URI.Path < entries[j].URI.Path })
 	start := 0
 	if opts.ContinuationToken != "" {
 		n, err := strconv.Atoi(opts.ContinuationToken)

@@ -14,8 +14,8 @@ import (
 )
 
 var (
-	// ErrCommitConflict 表示 final manifest 已存在但内容不是当前导出作业的 committed Manifest。
-	ErrCommitConflict = errors.New("export: final manifest conflicts with current job")
+	// ErrCommitConflict covers no-replace conflicts and verified final content mismatches.
+	ErrCommitConflict = errors.New("export: final object conflicts with current job")
 )
 
 // CommitOptions 描述 dataset commit 的唯一公开控制点；FinalManifestURI 必须由调用方显式给出。
@@ -129,6 +129,9 @@ func (c *Committer) Commit(ctx context.Context) error {
 	}
 	identity, err := handle.Close(ctx)
 	if err != nil {
+		if errors.Is(err, ErrCommitUncertain) {
+			return err
+		}
 		abortErr := handle.Abort(context.Background())
 		if errors.Is(err, vfs.ErrObjectChanged) && abortErr == nil {
 			return c.reconcileCommittedManifest(ctx, payload)
@@ -212,7 +215,16 @@ func manifestJSONUpperBound(manifest *Manifest) (int64, error) {
 	total := int64(4096)
 	stringsToCount := []string{
 		manifest.JobID, manifest.QueryFingerprint, manifest.SourceSnapshot.Fingerprint,
-		manifest.Destination.URI, manifest.Format, manifest.Compression, manifest.Consistency,
+		manifest.Destination.URI, manifest.Format, manifest.Compression, manifest.Consistency, manifest.Codec, manifest.EncryptionAlgorithm, manifest.KeyID,
+	}
+	if manifest.Publish != nil {
+		p := manifest.Publish
+		stringsToCount = append(stringsToCount, p.Intent.JobID, p.Intent.Destination, p.Intent.Protocol, string(p.Intent.Mode), p.Intent.ScopeKey, p.Failure)
+		total += int64(len(p.Intent.Token)+len(p.Ownership)) * 6
+		if p.Sealed != nil {
+			stringsToCount = append(stringsToCount, p.Sealed.Checksum)
+			total += int64(len(p.Sealed.RecoveryToken)) * 6
+		}
 	}
 	if manifest.SegmentPlan != nil {
 		stringsToCount = append(stringsToCount, manifest.SegmentPlan.Strategy, manifest.SegmentPlan.PlannerFingerprint)
@@ -223,6 +235,9 @@ func manifestJSONUpperBound(manifest *Manifest) (int64, error) {
 		}
 		total += 256
 		stringsToCount = append(stringsToCount, entry.Path, entry.Checksum)
+		if entry.PublishedIdentity != nil {
+			stringsToCount = append(stringsToCount, entry.PublishedIdentity.ETag, entry.PublishedIdentity.VersionID)
+		}
 	}
 	for _, value := range stringsToCount {
 		if int64(len(value)) > (math.MaxInt64-total)/6 {

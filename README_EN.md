@@ -13,7 +13,7 @@ fssql focuses on a deliberately narrow data-processing path:
 **Read data → Query / transform with SQL → Export results**
 
 - **Input formats**: CSV, JSON, NDJSON, and Parquet.
-- **Storage**: local files and S3-compatible object storage such as MinIO.
+- **Storage**: local files, S3-compatible object storage such as MinIO, FTP/FTPS, SFTP, and WebDAV; HTTP/HTTPS sources are also supported.
 - **Analytical SQL**: filtering, projection, aggregation, JOINs, window functions, subqueries, set operations, CTEs, and related features.
 - **Output formats**: CSV, JSON, NDJSON, and Parquet.
 - **Go embedding**: native Chunk callbacks or standard `database/sql`.
@@ -184,7 +184,9 @@ Supported export formats include:
 | NDJSON | `CopyFormatNDJSON` | identity / gzip / zstd |
 | Parquet | `CopyFormatParquet` | snappy / identity |
 
-SQL `COPY` is also supported through the configured local or S3 driver.
+SQL `COPY` uses the same configured local, S3, FTP/FTPS, SFTP, or WebDAV driver as `CopyTo`. Publication defaults to strict mode; FTP/FTPS requires an explicit `CopyPublishCompatible`. SFTP strict requires `hardlink@openssh.com=1`; WebDAV strict requires a deployment verified for atomic MOVE and concurrent no-overwrite behavior. Default concurrent Apache must use compatible mode, which can overwrite a competing destination. See the [protocol guarantees](docs/public-api.md#remote-protocols).
+
+Preserve the returned JobID and `ManifestDir`. After `ErrCommitUncertain`, call `db.RecoverExport(ctx, jobID)` to reconcile the existing export without rerunning SQL. HTTP/HTTPS sources and gzip/zstd text input use the same query engine and resource limits; configuration and boundaries are documented in the [public API](docs/public-api.md).
 
 ## S3 / MinIO
 
@@ -290,12 +292,17 @@ Queries accept `context.Context`; cancellation, failures, and early result closu
 | Structured export | `DB.CopyTo` |
 | Local files | `Config.LocalFiles` |
 | S3 / MinIO | `Config.S3` |
+| HTTP / HTTPS sources | `Config.HTTP` |
+| FTP / implicit-TLS FTPS | `Config.FTP` |
+| SFTP | `Config.SFTP` |
+| WebDAV / WebDAVS | `Config.WebDAV` |
+| Export recovery | `DB.RecoverExport` |
 | Go table functions | `Config.TableFunctions` |
 | Go scalar functions | `Config.ScalarFunctions` |
 | Catalog | in-memory catalog scoped to the DB instance |
 | Resource limits | `gosql.Config` |
 
-The public configuration currently does not expose SQLiteCatalog, custom VFS injection, SFTP, FTP, WebDAV, or an HTTP server constructor, even if some related implementations exist internally.
+The public configuration currently does not expose SQLiteCatalog, custom VFS injection, or an HTTP server constructor, even if some related implementations exist internally.
 
 ## Current boundaries and non-goals
 

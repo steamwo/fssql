@@ -385,7 +385,7 @@ func (b *QueryBinder) bindTableFunction(ctx context.Context, t *ast.TableFunctio
 	}
 	r, err := b.TableFunctions.BindTableFunction(ctx, def, args)
 	if err != nil {
-		return nil, b.errorAt(t.Span, "bind table function: "+err.Error())
+		return nil, fmt.Errorf("%s: %w", b.errorAt(t.Span, "bind table function"), err)
 	}
 	if r.ID == "" || len(r.Columns) == 0 {
 		return nil, b.errorAt(t.Span, "table-function Bind returned no identity/schema")

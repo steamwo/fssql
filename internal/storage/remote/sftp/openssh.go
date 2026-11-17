@@ -96,11 +96,16 @@ func (f OpenSSHFactory) buildArgs(key remote.ClientKey) (string, []string, error
 	return binary, args, nil
 }
 func (f OpenSSHFactory) Dial(ctx context.Context, key remote.ClientKey) (Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	binary, args, err := f.buildArgs(key)
 	if err != nil {
 		return nil, err
 	}
-	cmd := exec.CommandContext(ctx, binary, args...)
+	// The dialing query does not own the pooled process's lifetime. Cancellation
+	// closes it during handshake; subsequent operations install their own guards.
+	cmd := exec.Command(binary, args...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -115,7 +120,13 @@ func (f OpenSSHFactory) Dial(ctx context.Context, key remote.ClientKey) (Session
 		return nil, classifySSHError(stderr.String(), err)
 	}
 	tr := &processTransport{stdin: stdin, stdout: stdout, cmd: cmd, stderr: stderr}
+	stop := context.AfterFunc(ctx, func() { _ = tr.Close() })
 	session, err := NewWireSession(tr)
+	stopped := stop()
+	if ctx.Err() != nil || !stopped {
+		_ = tr.Close()
+		return nil, ctx.Err()
+	}
 	if err != nil {
 		_ = tr.Close()
 		return nil, classifySSHError(stderr.String(), err)

@@ -19,6 +19,9 @@ var fuzzing = false
 
 // Reader implements [io.Reader] to read a zstd compressed stream.
 type Reader struct {
+	// WindowResize reserves before an allocation; its returned callback runs
+	// after replacing the old window. Nil preserves the unmanaged codec API.
+	WindowResize func(oldCapacity, newSize int) (func(), error)
 	// The underlying Reader.
 	r io.Reader
 
@@ -308,7 +311,18 @@ retry:
 	r.repeatedOffset2 = 4
 	r.repeatedOffset3 = 8
 	r.huffmanTableBits = 0
-	r.window.reset(int(windowSize))
+	if r.WindowResize != nil {
+		done, err := r.WindowResize(cap(r.window.data), int(windowSize))
+		if err != nil {
+			return err
+		}
+		r.window.reset(int(windowSize))
+		if done != nil {
+			done()
+		}
+	} else {
+		r.window.reset(int(windowSize))
+	}
 	r.seqTables[0] = nil
 	r.seqTables[1] = nil
 	r.seqTables[2] = nil
@@ -359,7 +373,7 @@ func (r *Reader) skipFrame() error {
 	}
 
 	var skip []byte
-	const chunk = 1 << 20 // 1M
+	const chunk = 64 << 10
 	for size >= chunk {
 		if len(skip) == 0 {
 			skip = make([]byte, chunk)
@@ -374,7 +388,7 @@ func (r *Reader) skipFrame() error {
 		if len(skip) == 0 {
 			skip = make([]byte, size)
 		}
-		if _, err := io.ReadFull(r.r, skip); err != nil {
+		if _, err := io.ReadFull(r.r, skip[:size]); err != nil {
 			return r.wrapNonEOFError(relativeOffset, err)
 		}
 		relativeOffset += int(size)

@@ -47,7 +47,8 @@ type WritableDriver interface {
 //
 // 语义由 CapabilityAtomicPublishWrite 冻结：调用方传入的 URI 是 final destination；
 // OpenAtomicPublishWrite 返回后产生的 incomplete bytes 不得作为 final object 可见；
-// Close 成功才发布完整新对象，Close/Abort 失败必须保持此前完整 final object 不变。
+// 确定失败不改变此前目标；提交应答丢失可返回 ErrCommitUncertain，
+// 此时 Abort 仅释放本地资源，不能删除可能仍可恢复的 ownership 或 final。
 // staging 名称、multipart token 与协议特有 ownership 必须留在 driver 内部。
 type AtomicPublishDriver interface {
 	WritableDriver

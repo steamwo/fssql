@@ -103,6 +103,12 @@ func (s *VFSByteSink) Close(ctx context.Context) (WriteResult, error) {
 	}
 	identity, err := s.handle.Close(ctx)
 	if err != nil {
+		if errors.Is(err, vfs.ErrCommitUncertain) {
+			s.terminal = true
+			if resource, ok := s.handle.(interface{ Release() error }); ok {
+				err = errors.Join(err, resource.Release())
+			}
+		}
 		// Close 失败时保留非终态，让上层 PooledWriter 能继续调用 Abort 清理 incomplete file。
 		return WriteResult{}, err
 	}

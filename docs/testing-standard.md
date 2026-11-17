@@ -433,6 +433,20 @@ python test/interop/parquet_writer/run.py
 
 该现有入口主要验证普通 Parquet 的小样本互读。其他阶段脚本按其实际依赖准备后执行；没有装在锁定环境中的 Spark/Polars 等不能宣称已验证。扩展类型、压缩和自编译加密仍需新增互操作矩阵，不能由此小样本推导通过。
 
+### 9.5 远程单文件导出与恢复
+
+真实 SFTP、WebDAV、FTP/隐式 TLS FTPS、MinIO 的四格式导出、故障注入、进程终止及恢复入口：
+
+```sh
+go test -count=1 -v -timeout=15m ./pkg/gosql -run '^TestRealRemote'
+```
+
+通过环境注入 `FSSQL_REAL_PROTOCOL`（sftp/webdav/ftp/ftps/s3）、`FSSQL_REAL_ENDPOINT`、专用目录 `FSSQL_REAL_DIR`、`FSSQL_REAL_USER` 和认证信息。SFTP 使用 `FSSQL_REAL_IDENTITY`、`FSSQL_REAL_KNOWN_HOSTS`；其他协议使用 `FSSQL_REAL_PASSWORD`，FTPS 另设可信 CA 文件 `FSSQL_REAL_CA`。S3 endpoint 使用 `s3://fssql-agent-test-...` 的专用 bucket，服务地址通过 `FSSQL_MINIO_ENDPOINT` 提供。
+
+`FSSQL_REAL_MODE` 可选 strict/compatible。默认并发 Apache 使用 compatible；只有验证部署的原子 MOVE 和并发不覆盖保证后，才设置 `FSSQL_REAL_ATOMIC_MOVE_VERIFIED=1`。协议前提及保证边界见 [公共 API](public-api.md#remote-protocols)。
+
+可选 `FSSQL_REAL_RESTART_ARGV` 为 JSON argv 数组，指定重启该专用测试服务并等待就绪的命令。测试会留下随机命名的对象，创建应答丢失用例还会留下未知 ownership；应在专用环境执行并在结束后回收。未配置外部服务时这些用例会跳过，不能计为真实服务验收通过。
+
 ## 10. 证据格式与报告模板
 
 建议运行目录：`.cache/test-evidence/<run-id>/`。这是本标准约定的新归档布局；现有脚本输出应在后续收集器中映射，不能假称它们已经写入此目录。

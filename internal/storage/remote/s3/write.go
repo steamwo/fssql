@@ -31,9 +31,19 @@ const (
 // multipartPart 保存已完成 part 的小型提交 metadata；payload 已经释放/复用，不保存在这里。
 type multipartPart struct {
 	// Number 是从 1 开始的 S3 part number。
-	Number int
+	Number int `json:"number"`
 	// ETag 是 UploadPart 返回的实体标签。
-	ETag string
+	ETag              string `json:"etag"`
+	Size              int64  `json:"size"`
+	ChecksumSHA256    string `json:"checksum_sha256,omitempty"`
+	ChecksumSHA1      string `json:"checksum_sha1,omitempty"`
+	ChecksumCRC32     string `json:"checksum_crc32,omitempty"`
+	ChecksumCRC32C    string `json:"checksum_crc32c,omitempty"`
+	ChecksumCRC64NVME string `json:"checksum_crc64nvme,omitempty"`
+}
+
+func (p multipartPart) checksums() [5]string {
+	return [5]string{p.ChecksumSHA256, p.ChecksumSHA1, p.ChecksumCRC32, p.ChecksumCRC32C, p.ChecksumCRC64NVME}
 }
 
 // s3WriteHandle 把 Managed part buffer、multipart upload identity 与 VFS WriteHandle 生命周期绑定。
@@ -63,10 +73,29 @@ type s3WriteHandle struct {
 	// terminal 表示成功 Close 或 Abort 后禁止再次使用。
 	terminal bool
 	mu       sync.Mutex
+	// stagedRecord makes ownership durable before the next remote payload action.
+	stagedRecord    func(context.Context) error
+	createAttempted bool
+	legacy          vfs.WriteHandle
+}
+
+func (h *s3WriteHandle) Release() error {
+	if h.legacy != nil {
+		return h.legacy.(interface{ Release() error }).Release()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.terminal = true
+	h.releaseLocked()
+	return nil
 }
 
 // OpenWrite 创建一个有界 S3 writer；先 Reserve/Allocate part buffer，再允许任何远端 multipart 生命周期开始。
 func (d *Driver) OpenWrite(ctx context.Context, u vfs.URI, opts vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (vfs.WriteHandle, error) {
+	return d.OpenAtomicPublishWrite(ctx, u, opts, scope, bm)
+}
+
+func (d *Driver) openMultipartWriter(ctx context.Context, u vfs.URI, opts vfs.WriteOptions, scope *memory.Scope, bm *memory.BufferManager) (vfs.WriteHandle, error) {
 	if u.Scheme != "s3" {
 		return nil, fmt.Errorf("s3: unexpected scheme %q", u.Scheme)
 	}
@@ -110,6 +139,13 @@ func (d *Driver) Delete(ctx context.Context, u vfs.URI, expected *vfs.ObjectIden
 
 // Write 把 caller bytes 分块复制进固定 Managed part buffer；满 part 立即上传并复用同一 buffer。
 func (h *s3WriteHandle) Write(ctx context.Context, data []byte) (int, error) {
+	if h.legacy != nil {
+		return h.legacy.Write(ctx, data)
+	}
+	return h.writePayload(ctx, data)
+}
+
+func (h *s3WriteHandle) writePayload(ctx context.Context, data []byte) (int, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.terminal || h.partBuffer == nil {
@@ -151,54 +187,19 @@ func (h *s3WriteHandle) Write(ctx context.Context, data []byte) (int, error) {
 	return written, nil
 }
 
-// Close 完成最后 part/empty PUT，并在成功后 HEAD 最终对象 identity；失败时保留 Abort 能力。
+// Close is retained only as the legacy adapter; raw staged writers cannot publish implicitly.
 func (h *s3WriteHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
-	h.mu.Lock()
-	if h.terminal || h.partBuffer == nil {
-		h.mu.Unlock()
-		return vfs.ObjectIdentity{}, vfs.ErrWriteClosed
+	if h.legacy != nil {
+		return h.legacy.Close(ctx)
 	}
-	if h.failed != nil {
-		err := h.failed
-		h.mu.Unlock()
-		return vfs.ObjectIdentity{}, err
-	}
-	if h.uploadID == "" && h.total == 0 {
-		if err := h.putEmptyLocked(ctx); err != nil {
-			h.failLocked(err)
-			h.mu.Unlock()
-			return vfs.ObjectIdentity{}, err
-		}
-	} else {
-		if h.used > 0 {
-			if err := h.uploadCurrentPartLocked(ctx); err != nil {
-				h.failLocked(err)
-				h.mu.Unlock()
-				return vfs.ObjectIdentity{}, err
-			}
-		}
-		if err := h.completeMultipartLocked(ctx); err != nil {
-			h.failLocked(err)
-			h.mu.Unlock()
-			return vfs.ObjectIdentity{}, err
-		}
-	}
-	h.terminal = true
-	h.releaseLocked()
-	h.mu.Unlock()
-	info, err := h.driver.Stat(ctx, h.uri)
-	if err != nil {
-		// 对象已提交但 HEAD 失败，不能 Abort 已提交数据；把 identity 获取失败向上传播。
-		return vfs.ObjectIdentity{}, err
-	}
-	if info.Size != h.total {
-		return vfs.ObjectIdentity{}, fmt.Errorf("%w: S3 final size=%d written=%d", io.ErrShortWrite, info.Size, h.total)
-	}
-	return info.Identity, nil
+	return vfs.ObjectIdentity{}, vfs.ErrWriteClosed
 }
 
 // Abort 显式 AbortMultipartUpload，保证 Query 终态不遗留 multipart；空对象/未启动 multipart 只释放本地 ownership。
 func (h *s3WriteHandle) Abort(ctx context.Context) error {
+	if h.legacy != nil {
+		return h.legacy.Abort(ctx)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.terminal {
@@ -218,6 +219,13 @@ func (h *s3WriteHandle) ensureMultipartLocked(ctx context.Context) error {
 	if h.uploadID != "" {
 		return nil
 	}
+	if h.stagedRecord != nil {
+		res, err := h.scope.Reserve(memory.TagMetadata, publishControlBytes*4)
+		if err != nil {
+			return err
+		}
+		defer res.Release()
+	}
 	u, err := h.driver.objectURL(h.uri, "")
 	if err != nil {
 		return err
@@ -225,7 +233,12 @@ func (h *s3WriteHandle) ensureMultipartLocked(ctx context.Context) error {
 	q := u.Query()
 	q.Set("uploads", "")
 	u.RawQuery = q.Encode()
-	resp, err := h.driver.doPayload(ctx, http.MethodPost, u, nil, nil)
+	h.createAttempted = true
+	request := h.driver.doPayload
+	if h.stagedRecord != nil {
+		request = h.driver.doPayloadOnce
+	}
+	resp, err := request(ctx, http.MethodPost, u, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -234,15 +247,26 @@ func (h *s3WriteHandle) ensureMultipartLocked(ctx context.Context) error {
 		return err
 	}
 	var result struct {
-		UploadID string `xml:"UploadId"`
+		XMLName  xml.Name `xml:"InitiateMultipartUploadResult"`
+		UploadID string   `xml:"UploadId"`
 	}
-	if err := xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+	decode := func() error { return xml.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result) }
+	if h.stagedRecord != nil {
+		decode = func() error { return decodePublishXML(resp.Body, &result) }
+	}
+	if err := decode(); err != nil {
 		return fmt.Errorf("s3: decode CreateMultipartUpload: %w", err)
 	}
 	if strings.TrimSpace(result.UploadID) == "" {
 		return errors.New("s3: CreateMultipartUpload returned empty upload id")
 	}
 	h.uploadID = result.UploadID
+	if len(h.uploadID) > 4096 {
+		return vfs.ErrInvalidSealedObject
+	}
+	if h.stagedRecord != nil {
+		return h.stagedRecord(ctx)
+	}
 	return nil
 }
 
@@ -279,74 +303,24 @@ func (h *s3WriteHandle) uploadCurrentPartLocked(ctx context.Context) error {
 	if etag == "" {
 		return errors.New("s3: UploadPart returned empty ETag")
 	}
-	if err := h.metadataReservation.Resize(int64((len(h.parts) + 1) * 96)); err != nil {
+	if len(etag) > 256 {
+		return vfs.ErrInvalidSealedObject
+	}
+	if err := h.metadataReservation.Resize(int64((len(h.parts) + 1) * 4096)); err != nil {
 		return err
 	}
-	h.parts = append(h.parts, multipartPart{Number: partNumber, ETag: etag})
+	part := multipartPart{Number: partNumber, ETag: etag, Size: int64(h.used), ChecksumSHA256: resp.Header.Get("x-amz-checksum-sha256"), ChecksumSHA1: resp.Header.Get("x-amz-checksum-sha1"), ChecksumCRC32: resp.Header.Get("x-amz-checksum-crc32"), ChecksumCRC32C: resp.Header.Get("x-amz-checksum-crc32c"), ChecksumCRC64NVME: resp.Header.Get("x-amz-checksum-crc64nvme")}
+	for _, s := range part.checksums() {
+		if len(s) > 128 {
+			return vfs.ErrInvalidSealedObject
+		}
+	}
+	h.parts = append(h.parts, part)
 	h.used = 0
+	if h.stagedRecord != nil {
+		return h.stagedRecord(ctx)
+	}
 	return nil
-}
-
-// completeMultipartLocked 写最终 part manifest；条件写只在原子完成点应用，而不是在 staging 阶段模拟 rename。
-func (h *s3WriteHandle) completeMultipartLocked(ctx context.Context) error {
-	if h.uploadID == "" || len(h.parts) == 0 {
-		return errors.New("s3: cannot complete empty multipart upload")
-	}
-	// XML 大小随 part 数增长，因此先在 MemoryManager 中 reservation，再允许 Go heap builder 增长。
-	estimate := int64(128 + len(h.parts)*128)
-	res, err := h.scope.Reserve(memory.TagMetadata, estimate)
-	if err != nil {
-		return err
-	}
-	defer res.Release()
-	var b strings.Builder
-	b.Grow(int(estimate))
-	b.WriteString("<CompleteMultipartUpload>")
-	for _, part := range h.parts {
-		b.WriteString("<Part><PartNumber>")
-		b.WriteString(strconv.Itoa(part.Number))
-		b.WriteString("</PartNumber><ETag>&quot;")
-		xml.EscapeText(&b, []byte(part.ETag))
-		b.WriteString("&quot;</ETag></Part>")
-	}
-	b.WriteString("</CompleteMultipartUpload>")
-	body := []byte(b.String())
-	u, err := h.driver.objectURL(h.uri, "")
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("uploadId", h.uploadID)
-	u.RawQuery = q.Encode()
-	headers := make(http.Header)
-	applyConditionalWriteHeaders(headers, h.opts)
-	resp, err := h.driver.doPayload(ctx, http.MethodPost, u, headers, body)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if err := statusError(resp); err != nil {
-		return err
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
-	h.uploadID = ""
-	return nil
-}
-
-// putEmptyLocked 使用普通 PutObject 创建空文件，并在同一个原子请求上应用条件写。
-func (h *s3WriteHandle) putEmptyLocked(ctx context.Context) error {
-	u, err := h.driver.objectURL(h.uri, "")
-	if err != nil {
-		return err
-	}
-	headers := make(http.Header)
-	applyConditionalWriteHeaders(headers, h.opts)
-	resp, err := h.driver.doPayload(ctx, http.MethodPut, u, headers, nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	return statusError(resp)
 }
 
 // abortMultipart 调用 S3 AbortMultipartUpload；成功后远端不再持有 incomplete multipart ownership。
@@ -363,11 +337,24 @@ func (d *Driver) abortMultipart(ctx context.Context, u vfs.URI, uploadID string)
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
 	return statusError(resp)
 }
 
 // doPayload 对可重放 byte payload 执行 endpoint-scoped SigV4 请求；每次 retry 都重建 body reader。
 func (d *Driver) doPayload(ctx context.Context, method string, u *url.URL, headers http.Header, payload []byte) (*http.Response, error) {
+	return d.doPayloadAttempts(ctx, method, u, headers, payload, d.cfg.MaxRetries)
+}
+
+// Final publication and ownership creation are never replayed implicitly: a
+// lost success followed by 412/NoSuchUpload must stay an uncertain result.
+func (d *Driver) doPayloadOnce(ctx context.Context, method string, u *url.URL, headers http.Header, payload []byte) (*http.Response, error) {
+	return d.doPayloadAttempts(ctx, method, u, headers, payload, 0)
+}
+
+func (d *Driver) doPayloadAttempts(ctx context.Context, method string, u *url.URL, headers http.Header, payload []byte, retries int) (*http.Response, error) {
 	key := remote.ClientKey{Endpoint: d.endpoint.String(), CredentialScope: d.cfg.CredentialScope, CredentialVersion: d.cfg.CredentialVersion, SecurityProfile: d.cfg.SecurityProfile}
 	client, err := d.clients.Client(key)
 	if err != nil {
@@ -376,7 +363,7 @@ func (d *Driver) doPayload(ctx context.Context, method string, u *url.URL, heade
 	hash := sha256.Sum256(payload)
 	payloadHash := hex.EncodeToString(hash[:])
 	var lastErr error
-	for attempt := 0; attempt <= d.cfg.MaxRetries; attempt++ {
+	for attempt := 0; attempt <= retries; attempt++ {
 		var body io.Reader
 		if len(payload) > 0 {
 			body = bytes.NewReader(payload)
@@ -395,7 +382,7 @@ func (d *Driver) doPayload(ctx context.Context, method string, u *url.URL, heade
 			return nil, err
 		}
 		resp, err := client.Do(req)
-		if err == nil && !retryableStatus(resp.StatusCode) {
+		if err == nil && (!retryableStatus(resp.StatusCode) || retries == 0) {
 			return resp, nil
 		}
 		if err == nil {
@@ -408,7 +395,7 @@ func (d *Driver) doPayload(ctx context.Context, method string, u *url.URL, heade
 				return nil, err
 			}
 		}
-		if attempt == d.cfg.MaxRetries {
+		if attempt == retries {
 			break
 		}
 		if err := d.sleep(ctx, time.Duration(1<<attempt)*10*time.Millisecond); err != nil {

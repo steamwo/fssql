@@ -47,15 +47,27 @@ func (d *Driver) OpenAtomicPublishWrite(ctx context.Context, u vfs.URI, opts vfs
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	finalPath, err := d.localPath(u, false)
+	job, err := vfs.NewPublishJobID()
 	if err != nil {
 		return nil, err
 	}
-	staging, err := os.CreateTemp(filepath.Dir(finalPath), ".fssql-"+filepath.Base(finalPath)+"-*.tmp")
+	intent, err := d.PlanPublish(ctx, u, job, vfs.PublishStrict)
 	if err != nil {
 		return nil, err
 	}
-	return &writeHandle{file: staging, finalPath: finalPath, cleanupPath: staging.Name(), atomic: true, noReplace: opts.IfNoneMatch}, nil
+	h, err := d.BeginPublish(ctx, intent, func(context.Context, []byte) error { return nil }, scope, bm)
+	if err != nil {
+		if h != nil {
+			_ = h.Release()
+		}
+		return nil, err
+	}
+	h.(*localPublishHandle).legacyReplace = !opts.IfNoneMatch
+	h.(*localPublishHandle).legacyWrite = true
+	return vfs.NewPublishWriteAdapter(job, h, func(ctx context.Context) (vfs.ObjectIdentity, error) {
+		info, err := d.Stat(ctx, u)
+		return info.Identity, err
+	}), nil
 }
 
 func (d *Driver) Delete(ctx context.Context, u vfs.URI, expected *vfs.ObjectIdentity) error {

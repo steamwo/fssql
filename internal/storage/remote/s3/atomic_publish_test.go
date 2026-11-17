@@ -44,6 +44,7 @@ func (s *atomicPublishTestServer) handler(w http.ResponseWriter, r *http.Request
 			s.final = append(s.final, part...)
 		}
 		w.WriteHeader(http.StatusOK)
+		_,_=io.WriteString(w,`<CompleteMultipartUploadResult><ETag>"atomic-final"</ETag></CompleteMultipartUploadResult>`)
 	case r.Method == http.MethodDelete && q.Get("uploadId") != "":
 		s.aborts++
 		w.WriteHeader(http.StatusNoContent)

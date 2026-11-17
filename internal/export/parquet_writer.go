@@ -251,7 +251,10 @@ func (w *ParquetWriter) Close(ctx context.Context) (WriteResult, error) {
 	result, err := w.sink.Close(ctx)
 	w.releaseResources()
 	if err != nil {
-		abortErr := w.sink.Abort(context.Background())
+		var abortErr error
+		if !errors.Is(err, ErrCommitUncertain) {
+			abortErr = w.sink.Abort(context.Background())
+		}
 		return WriteResult{}, errors.Join(err, abortErr)
 	}
 	return result, nil
@@ -625,7 +628,10 @@ func (w *ParquetWriter) writeBytes(ctx context.Context, p []byte) error {
 }
 
 func (w *ParquetWriter) fail(cause error) error {
-	abortErr := w.sink.Abort(context.Background())
+	var abortErr error
+	if !errors.Is(cause, ErrCommitUncertain) {
+		abortErr = w.sink.Abort(context.Background())
+	}
 	w.releaseResources()
 	return errors.Join(cause, abortErr)
 }

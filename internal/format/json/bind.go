@@ -82,7 +82,11 @@ func (b *JSONBinder) Bind(ctx context.Context, pattern string, opts JSONBindOpti
 	if b == nil || b.registry == nil || b.planner == nil || b.scope == nil || b.bm == nil {
 		return JSONBinding{}, errors.New("json: uninitialized source binder")
 	}
-	scanSet, err := b.planner.Plan(ctx, pattern, opts.FileSet)
+	pattern, fileOpts, err := fileViewOptions(pattern, opts.FileSet, b.registry)
+	if err != nil {
+		return JSONBinding{}, err
+	}
+	scanSet, err := b.planner.Plan(ctx, pattern, fileOpts)
 	if err != nil {
 		return JSONBinding{}, err
 	}

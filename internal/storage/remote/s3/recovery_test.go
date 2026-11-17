@@ -169,9 +169,11 @@ func TestS3RecoveryCapabilityAndOrphanAfterProcessStateLoss(t *testing.T) {
 		handle.mu.Unlock()
 		t.Fatal(err)
 	}
-	handle.terminal = true
-	handle.releaseLocked()
 	handle.mu.Unlock()
+	// Drop both the multipart engine and the staged adapter's metadata, without
+	// aborting the remote upload, as the operating system would on process exit.
+	adapter := handle.legacy
+	_ = adapter.(interface{ Release() error }).Release()
 	if scope.Used() != 0 {
 		t.Fatalf("simulated process loss retained local memory=%d", scope.Used())
 	}

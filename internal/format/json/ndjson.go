@@ -100,7 +100,11 @@ func NewNDJSONBinder(r *vfs.Registry, s *memory.Scope, bm *memory.BufferManager)
 	return &NDJSONBinder{registry: r, planner: fileset.NewPlanner(r), scope: s, bm: bm}, nil
 }
 func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBindOptions) (NDJSONBinding, error) {
-	scanSet, err := b.planner.Plan(ctx, pattern, opts.FileSet)
+	pattern, fileOpts, err := fileViewOptions(pattern, opts.FileSet, b.registry)
+	if err != nil {
+		return NDJSONBinding{}, err
+	}
+	scanSet, err := b.planner.Plan(ctx, pattern, fileOpts)
 	if err != nil {
 		return NDJSONBinding{}, err
 	}

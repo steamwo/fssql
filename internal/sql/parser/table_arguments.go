@@ -21,7 +21,8 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 		call.Function.Parts[0].Name = name
 	}
 	jsonAuto := name == "read_json_auto"
-	if name != "read_csv" && !jsonAuto {
+	jsonReader:=jsonAuto||name=="read_json"||name=="read_ndjson"
+	if name != "read_csv" && !jsonReader {
 		return nil
 	}
 	if len(call.Args) == 0 {
@@ -63,9 +64,6 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 	if jsonAuto {
 		format, has := opts["format"]
 		delete(opts, "format")
-		if len(opts) != 0 {
-			return fmt.Errorf("read_json_auto: unsupported option")
-		}
 		name = "read_json"
 		if has {
 			if format != "newline_delimited" {
@@ -74,7 +72,12 @@ func foldStaticTableArguments(call *ast.CallExpr) error {
 			name = "read_ndjson"
 		}
 		call.Function.Parts[0].Name = name
-		call.Args = []ast.Expr{first}
+	}
+	if jsonReader {
+		for key:=range opts { if key!="compression" { return fmt.Errorf("%s: unsupported option %s",name,key) } }
+		if len(opts)==0 {call.Args=[]ast.Expr{first};return nil}
+		token:=tablefunc.Encode(first.Value,opts)
+		call.Args=[]ast.Expr{&ast.LiteralExpr{Span:call.Span,Kind:ast.LiteralString,Value:token}}
 		return nil
 	}
 	// SQL CSV 默认将空字段（包括引号空字段）识别为 NULL

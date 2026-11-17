@@ -39,7 +39,9 @@ func (d *Driver) Scheme() string { return "sftp" }
 // StaticCapabilities 只声明驱动已真正实现的能力；SFTP v3 流式写由 WritableSession/WriteHandle 提供，
 // 但 ConditionalWrite/AtomicRename 仍未实现，因此不得在这里虚假宣称。
 func (d *Driver) StaticCapabilities() vfs.CapabilitySet {
-	caps := vfs.Capabilities(vfs.RandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList)
+	// NoReplacePublish is an upper bound; Probe requires the negotiated hardlink
+	// extension. It does not imply the legacy AtomicPublishWrite interface.
+	caps := vfs.Capabilities(vfs.RandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList, vfs.NoReplacePublish)
 	if d.Pools != nil && d.Pools.MaxSessions() > 1 {
 		caps = caps.With(vfs.ParallelRandomRead)
 	}
@@ -54,8 +56,15 @@ func (d *Driver) Probe(ctx context.Context) (vfs.ProbeResult, error) {
 	if err != nil {
 		return vfs.ProbeResult{}, err
 	}
+	supported := d.StaticCapabilities().Without(vfs.NoReplacePublish)
+	if publisher, ok := s.(PublishSession); ok {
+		version, link := publisher.PublishExtensions()
+		if version == 3 && link == "1" {
+			supported = supported.With(vfs.NoReplacePublish)
+		}
+	}
 	p.Release(s, false)
-	return vfs.ProbeResult{Supported: d.StaticCapabilities(), Endpoint: d.Key.Endpoint, CredentialScope: d.Key.CredentialScope, CredentialVersion: d.Key.CredentialVersion, SecurityProfile: d.Key.SecurityProfile}, nil
+	return vfs.ProbeResult{Known: d.StaticCapabilities(), Supported: supported, Endpoint: d.Key.Endpoint, CredentialScope: d.Key.CredentialScope, CredentialVersion: d.Key.CredentialVersion, SecurityProfile: d.Key.SecurityProfile}, nil
 }
 func infoIdentity(info FileInfo) vfs.ObjectIdentity {
 	return vfs.ObjectIdentity{Size: info.Size, ModifiedAt: time.Unix(info.ModUnix, 0).UTC()}

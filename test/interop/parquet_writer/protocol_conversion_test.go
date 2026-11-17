@@ -110,6 +110,7 @@ func (s *protocolS3Server) handler(w http.ResponseWriter, r *http.Request) {
 		delete(s.uploads, id)
 		delete(s.uploadKeys, id)
 		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `<CompleteMultipartUploadResult><ETag>"completed"</ETag></CompleteMultipartUploadResult>`)
 	case r.Method == http.MethodDelete && q.Get("uploadId") != "":
 		id := q.Get("uploadId")
 		delete(s.uploads, id)

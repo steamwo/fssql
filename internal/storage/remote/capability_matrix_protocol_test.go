@@ -56,13 +56,13 @@ func TestProtocolStaticCapabilityMatrix(t *testing.T) {
 			name: "s3", driver: s3Driver,
 			want: vfs.Capabilities(
 				vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingWrite, vfs.MultipartWrite,
-				vfs.AtomicPublishWrite, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject,
+				vfs.AtomicPublishWrite, vfs.NoReplacePublish, vfs.ConditionalRead, vfs.ConditionalWrite, vfs.StableETag, vfs.VersionedObject,
 				vfs.ServerSideList, vfs.IncompleteWriteRecovery,
 			),
 		},
 		{
 			name: "sftp", driver: sftpDriver,
-			want: vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList),
+			want: vfs.Capabilities(vfs.RandomRead, vfs.ParallelRandomRead, vfs.StreamingRead, vfs.StreamingWrite, vfs.ServerSideList, vfs.NoReplacePublish),
 		},
 		{
 			name: "ftp", driver: ftpDriver,

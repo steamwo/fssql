@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 )
 
@@ -34,10 +35,12 @@ const (
 )
 
 type wireSession struct {
-	rw        io.ReadWriteCloser
-	opMu      sync.Mutex
-	closeOnce sync.Once
-	nextID    uint32
+	rw              io.ReadWriteCloser
+	opMu            sync.Mutex
+	closeOnce       sync.Once
+	nextID          uint32
+	version         uint32
+	hardlinkVersion string
 }
 
 func NewWireSession(rw io.ReadWriteCloser) (Session, error) {
@@ -86,6 +89,24 @@ func (s *wireSession) handshake() error {
 	version := binary.BigEndian.Uint32(data[:4])
 	if version < 3 {
 		return fmt.Errorf("sftp: server version %d < 3", version)
+	}
+	s.version = version
+	p := parser{b: data[4:]}
+	for p.off < len(p.b) {
+		name, err := p.str()
+		if err != nil {
+			return err
+		}
+		value, err := p.str()
+		if err != nil {
+			return err
+		}
+		if name == "hardlink@openssh.com" {
+			if s.hardlinkVersion != "" {
+				return errors.New("sftp: duplicate hardlink extension")
+			}
+			s.hardlinkVersion = value
+		}
 	}
 	return nil
 }
@@ -219,6 +240,10 @@ func parseStatus(data []byte) error {
 		return nil
 	case fxEOF:
 		return io.EOF
+	case 2:
+		return fmt.Errorf("%w: sftp status %d", os.ErrNotExist, code)
+	case 3:
+		return fmt.Errorf("%w: sftp status %d", os.ErrPermission, code)
 	default:
 		return fmt.Errorf("sftp: status %d: %s", code, msg)
 	}
