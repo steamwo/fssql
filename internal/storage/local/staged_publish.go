@@ -223,6 +223,15 @@ func (h *localPublishHandle) Verify(ctx context.Context, s vfs.SealedObject, fin
 		return vfs.ObjectIdentity{}, err
 	}
 	defer f.Close()
+	if final {
+		id, err := publishFileID(f)
+		if err != nil {
+			return vfs.ObjectIdentity{}, err
+		}
+		if h.owner == "" || id != h.owner {
+			return vfs.ObjectIdentity{}, vfs.ErrPublishConflict
+		}
+	}
 	before, err := f.Stat()
 	if err != nil {
 		return vfs.ObjectIdentity{}, err

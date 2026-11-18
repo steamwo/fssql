@@ -1,7 +1,6 @@
 package sftp
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -38,7 +37,6 @@ type processTransport struct {
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	cmd    *exec.Cmd
-	stderr *bytes.Buffer
 	once   sync.Once
 }
 
@@ -58,6 +56,20 @@ func (p *processTransport) Close() error {
 }
 
 type OpenSSHFactory struct{ Config OpenSSHConfig }
+
+// Keep enough startup diagnostics to classify SSH errors, even for a pooled
+// process that keeps writing to stderr after the handshake.
+type sshDiagnostics struct {
+	data [16 << 10]byte
+	used int
+}
+
+func (d *sshDiagnostics) Write(p []byte) (int, error) {
+	d.used += copy(d.data[d.used:], p)
+	return len(p), nil
+}
+
+func (d *sshDiagnostics) String() string { return string(d.data[:d.used]) }
 
 func (f OpenSSHFactory) buildArgs(key remote.ClientKey) (string, []string, error) {
 	if err := f.Config.Validate(); err != nil {
@@ -114,12 +126,12 @@ func (f OpenSSHFactory) Dial(ctx context.Context, key remote.ClientKey) (Session
 	if err != nil {
 		return nil, err
 	}
-	stderr := new(bytes.Buffer)
+	stderr := new(sshDiagnostics)
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		return nil, classifySSHError(stderr.String(), err)
 	}
-	tr := &processTransport{stdin: stdin, stdout: stdout, cmd: cmd, stderr: stderr}
+	tr := &processTransport{stdin: stdin, stdout: stdout, cmd: cmd}
 	stop := context.AfterFunc(ctx, func() { _ = tr.Close() })
 	session, err := NewWireSession(tr)
 	stopped := stop()

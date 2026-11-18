@@ -73,7 +73,8 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 	if err != nil {
 		return nil, nil, err
 	}
-	resolver, err := NewStableTableFunctionResolver(registry, parquetBinder, csvBinder, jsonBinder, ndjsonBinder)
+	// glob() uses listing metadata. Only the readers need logical object views.
+	resolver, err := NewStableTableFunctionResolver(f.Registry, parquetBinder, csvBinder, jsonBinder, ndjsonBinder)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -98,7 +99,7 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 	if err != nil {
 		return nil, nil, err
 	}
-	globScan, err := NewGlobScanOpenAdapter(registry, q.Memory, f.Buffers)
+	globScan, err := NewGlobScanOpenAdapter(f.Registry, q.Memory, f.Buffers)
 	if err != nil {
 		return nil, nil, err
 	}

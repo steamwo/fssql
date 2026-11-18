@@ -36,9 +36,9 @@ type FilePublisher struct {
 	Move               func(context.Context, vfs.URI, vfs.URI, vfs.PublishMode, vfs.ObjectIdentity) error
 	Delete             func(context.Context, vfs.URI, vfs.ObjectIdentity) error
 	// Optional protocol ownership proof. It must contain no bearer token or
-	// credentials. RestoreProof binds it to the validated staging path.
+	// credentials. RestoreProof binds it and the recorded identity to staging.
 	OwnershipProof func() string
-	RestoreProof   func(vfs.URI, string) error
+	RestoreProof   func(vfs.URI, string, vfs.ObjectIdentity) error
 	// Optional metadata equivalence, in addition to full physical SHA-256.
 	IdentityMatches func(vfs.ObjectIdentity, vfs.ObjectIdentity) bool
 }
@@ -208,7 +208,7 @@ func (p FilePublisher) Resume(ctx context.Context, i vfs.PublishIntent, b []byte
 		h.own = own
 	}
 	if h.own.Owned && p.RestoreProof != nil {
-		if err = p.RestoreProof(h.stage, h.own.Proof); err != nil {
+		if err = p.RestoreProof(h.stage, h.own.Proof, h.own.Identity); err != nil {
 			_ = h.Release()
 			return nil, err
 		}

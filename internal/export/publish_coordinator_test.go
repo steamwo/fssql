@@ -312,6 +312,34 @@ func TestStagedPublishFailureClassification(t *testing.T) {
 	}
 }
 
+func TestLocalRecoveryRejectsCompetingIdenticalExport(t *testing.T) {
+	ctx := context.Background()
+	first := newPublishFixture(t)
+	first.driver.hook = func(event string) error {
+		if event == "publish-before" {
+			return errors.New("interrupted before publication")
+		}
+		return nil
+	}
+	if _, err := first.c.Run(ctx, first.manifest, publishBytes); !errors.Is(err, ErrCommitUncertain) {
+		t.Fatalf("first export should be uncertain: %v", err)
+	}
+	job, err := NewJobID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := newPublishFixtureAt(t, first.dir, string(job))
+	if _, err := second.c.Run(ctx, second.manifest, publishBytes); err != nil {
+		t.Fatalf("competing export failed: %v", err)
+	}
+	if _, err := first.c.Recover(ctx, first.manifest.JobID); !errors.Is(err, ErrCommitConflict) {
+		t.Fatalf("expected commit conflict, got %v", err)
+	}
+	if _, err := second.c.Recover(ctx, second.manifest.JobID); err != nil {
+		t.Fatalf("competing export no longer recoverable: %v", err)
+	}
+}
+
 func TestStagedPublishConflictAndStateGates(t *testing.T) {
 	for _, same := range []bool{false, true} {
 		t.Run(fmt.Sprint(same), func(t *testing.T) {

@@ -25,6 +25,7 @@ type publishLock struct {
 	driver       *Driver
 	stage        vfs.URI
 	proof, token string
+	expectedETag string
 }
 
 type activePublishLock struct {
@@ -41,12 +42,25 @@ func lockDigest(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (g *publishLock) restore(stage vfs.URI, proof string) error {
+func (g *publishLock) restore(stage vfs.URI, proof string, id vfs.ObjectIdentity) error {
 	if proof != "etag" && (len(proof) != 64 || strings.Trim(proof, "0123456789abcdef") != "") {
 		return vfs.ErrInvalidSealedObject
 	}
+	if proof == "etag" {
+		if !strongPublishETag(id.ETag) {
+			return vfs.ErrInvalidSealedObject
+		}
+		g.expectedETag = id.ETag
+	}
 	g.stage, g.proof = stage, proof
 	return nil
+}
+
+func (g *publishLock) stagingETag(u vfs.URI) string {
+	if g.proof == "etag" && u.IdentityKey() == g.stage.IdentityKey() {
+		return g.expectedETag
+	}
+	return ""
 }
 
 func (g *publishLock) valid(l activePublishLock) bool {

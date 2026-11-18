@@ -45,7 +45,7 @@ func TestApachePublishLockResponseAndLeasePolicy(t *testing.T) {
 		t.Fatal("accepted injected If header")
 	}
 	for _, proof := range []string{"", "token", strings.Repeat("A", 64)} {
-		if g.restore(stage, proof) == nil {
+		if g.restore(stage, proof, vfs.ObjectIdentity{}) == nil {
 			t.Fatal("invalid ownership proof")
 		}
 	}

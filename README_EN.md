@@ -139,7 +139,7 @@ The engine supports analytical SQL features including:
 - sampling;
 - common string, date/time, numeric, and regular-expression functions.
 
-For the precise supported surface and known deviations, see the [feature contract](docs/architecture/feature-contract.md), [public API](docs/public-api.md), and [compatibility deviations](compatibility/deviations.yaml).
+For the supported Go and SQL entry points and known deviations, see the [public API](docs/public-api.md) and [compatibility deviations](compatibility/deviations.yaml).
 
 ## Export query results
 
@@ -323,26 +323,15 @@ These boundaries are intentional for the current project direction, rather than 
 
 DuckDB is used to validate SQL behavior, file interoperability, and performance characteristics. fssql does not aim to match the entire DuckDB feature set.
 
-The repository's 2026-11-07 comparison against DuckDB 2.0.0 reports:
-
-- **262 / 262 differential cases matched** for the tested corpus;
-- **28 timed scenarios** across local storage and MinIO;
-- **812 formal timing samples**;
-- an overall median `time_ratio` of **3.86** in that report.
-
-Those numbers are useful as correctness evidence and as an optimization baseline. They are not a claim that fssql is a DuckDB replacement.
-
-See the [comparison report](docs/validation/2026-11-07-full-duckdb-comparison/report.md) and [testing standard](docs/testing-standard.md).
+The [testing standard](docs/testing-standard.md) defines the DuckDB baseline, differential checks, and performance measurement methodology.
 
 ## Documentation
 
 - [Public API, defaults, and boundaries](docs/public-api.md)
-- [SQL, source, and execution feature contract](docs/architecture/feature-contract.md)
-- [Subquery and LATERAL lowering](docs/architecture/subquery-lowering.md)
+- [Table functions and source contracts](docs/contracts/table-functions.md)
 - [Architecture constraints](ARCHITECTURE.md)
 - [Testing standard and DuckDB differential/performance baseline](docs/testing-standard.md)
-- [2026-11-07 DuckDB comparison report](docs/validation/2026-11-07-full-duckdb-comparison/report.md)
-- [Optimization review](docs/optimization-review-2026-11-06.md)
+- [Performance optimization progress](docs/performance-optimization-progress-2026-11-04.md)
 - [SQL compatibility deviations](compatibility/deviations.yaml)
 - [DuckDB compatibility roadmap](docs/duckdb-compatibility-roadmap.md)
 

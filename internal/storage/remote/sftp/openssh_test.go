@@ -32,3 +32,18 @@ func TestClassifyWrongHostKey(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestSSHDiagnosticsRetainsBoundedStartupOutput(t *testing.T) {
+	var diagnostics sshDiagnostics
+	message := "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!"
+	_, _ = diagnostics.Write([]byte(message))
+	later := strings.Repeat("x", 32<<10)
+	for range 2 {
+		if n, err := diagnostics.Write([]byte(later)); n != len(later) || err != nil {
+			t.Fatalf("write = %d, %v", n, err)
+		}
+	}
+	if output := diagnostics.String(); len(output) != 16<<10 || !strings.HasPrefix(output, message) {
+		t.Fatalf("diagnostics lost its prefix or exceeded the limit: %d bytes", len(output))
+	}
+}

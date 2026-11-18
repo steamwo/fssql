@@ -202,11 +202,15 @@ func (h *writeHandle) Close(ctx context.Context) (vfs.ObjectIdentity, error) {
 		}
 	}
 	if h.putOnly {
+		var id vfs.ObjectIdentity
+		if response != nil {
+			id.ETag = response.Header.Get("ETag")
+		}
 		h.mu.Lock()
 		h.terminal = true
 		h.mu.Unlock()
 		h.cancel()
-		return vfs.ObjectIdentity{}, nil
+		return id, nil
 	}
 	if err := h.driver.move(ctx, h.stagingURI, h.finalURI); err != nil {
 		h.fail(err)

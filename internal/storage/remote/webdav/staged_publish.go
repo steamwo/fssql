@@ -41,7 +41,7 @@ func (d *Driver) publisher(ctx context.Context, mode vfs.PublishMode) (remote.Fi
 		if err != nil {
 			return vfs.ObjectInfo{}, err
 		}
-		return d.publishStatIf(ctx, u, condition)
+		return d.publishStatIf(ctx, u, condition, guard.stagingETag(u))
 	}
 	p.Create = func(ctx context.Context, u vfs.URI) (remote.FileUpload, vfs.ObjectIdentity, error) {
 		locked, err := guard.create(ctx, u)
@@ -77,15 +77,15 @@ func (d *Driver) publisher(ctx context.Context, mode vfs.PublishMode) (remote.Fi
 		id := vfs.ObjectIdentity{ETag: resp.Header.Get("ETag")}
 		// If-Match guards the staging upload against replacement. Weak or
 		// missing validators cannot establish this exclusive-create contract.
-		if id.ETag == "" || len(id.ETag) > 4096 || strings.HasPrefix(id.ETag, "W/") {
+		if !strongPublishETag(id.ETag) {
 			return nil, id, fmt.Errorf("%w: WebDAV exclusive staging PUT must return a strong ETag", vfs.ErrInvalidSealedObject)
 		}
-		guard.proof = "etag"
+		guard.proof, guard.expectedETag = "etag", id.ETag
 		h, err := d.openPUT(ctx, u, u, http.Header{"If-Match": []string{id.ETag}}, true)
 		if err != nil {
 			return nil, id, err
 		}
-		return &publishUpload{h: h}, id, nil
+		return &publishUpload{h: h, etagGuard: guard}, id, nil
 	}
 	p.Read = func(ctx context.Context, u vfs.URI, id vfs.ObjectIdentity, w io.Writer, b []byte) error {
 		r, err := d.newRequest(ctx, http.MethodGet, u, nil)
@@ -195,6 +195,18 @@ func publishIdentityMatches(a, b vfs.ObjectIdentity) bool {
 	return a.Matches(b)
 }
 
+func strongPublishETag(tag string) bool {
+	if len(tag) < 2 || len(tag) > 4096 || tag[0] != '"' || tag[len(tag)-1] != '"' {
+		return false
+	}
+	for i := 1; i < len(tag)-1; i++ {
+		if tag[i] < 0x21 || tag[i] == '"' || tag[i] == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func (d *Driver) doPublish(r *http.Request) (*http.Response, error) {
 	client, err := d.Clients.Client(d.Key)
 	if err != nil {
@@ -206,10 +218,10 @@ func (d *Driver) doPublish(r *http.Request) (*http.Response, error) {
 }
 
 func (d *Driver) publishStat(ctx context.Context, u vfs.URI) (vfs.ObjectInfo, error) {
-	return d.publishStatIf(ctx, u, "")
+	return d.publishStatIf(ctx, u, "", "")
 }
 
-func (d *Driver) publishStatIf(ctx context.Context, u vfs.URI, condition string) (vfs.ObjectInfo, error) {
+func (d *Driver) publishStatIf(ctx context.Context, u vfs.URI, condition, etag string) (vfs.ObjectInfo, error) {
 	r, err := d.newRequest(ctx, http.MethodHead, u, nil)
 	if err != nil {
 		return vfs.ObjectInfo{}, err
@@ -217,6 +229,9 @@ func (d *Driver) publishStatIf(ctx context.Context, u vfs.URI, condition string)
 	r.Header.Set("Accept-Encoding", "identity")
 	if condition != "" {
 		r.Header.Set("If", condition)
+	}
+	if etag != "" {
+		r.Header.Set("If-Match", etag)
 	}
 	resp, err := d.doPublish(r)
 	if err != nil {
@@ -233,6 +248,9 @@ func (d *Driver) publishStatIf(ctx context.Context, u vfs.URI, condition string)
 		return vfs.ObjectInfo{}, vfs.ErrInvalidSealedObject
 	}
 	id, err := identityFromResponse(resp)
+	if err == nil && etag != "" && id.ETag != etag {
+		return vfs.ObjectInfo{}, vfs.ErrInvalidSealedObject
+	}
 	return vfs.ObjectInfo{URI: u, Size: id.Size, Identity: id}, err
 }
 
@@ -265,13 +283,32 @@ func (d *Driver) ResumePublish(ctx context.Context, i vfs.PublishIntent, o []byt
 	}
 	if json.Unmarshal(i.Token, &legacy) == nil && legacy.Evidence == fmt.Sprintf("MOVE Overwrite:F;AtomicMoveVerified=%t", d.AtomicMoveVerified) {
 		p.Evidence = legacy.Evidence
-		p.RestoreProof = nil
+		restore := p.RestoreProof
+		p.RestoreProof = func(u vfs.URI, proof string, id vfs.ObjectIdentity) error {
+			if proof != "" {
+				return vfs.ErrInvalidSealedObject
+			}
+			return restore(u, "etag", id)
+		}
 	}
 	return p.Resume(ctx, i, o, z, s, b)
 }
 
-type publishUpload struct{ h *writeHandle }
+type publishUpload struct {
+	h         *writeHandle
+	etagGuard *publishLock
+}
 
 func (u *publishUpload) Write(ctx context.Context, b []byte) (int, error) { return u.h.Write(ctx, b) }
-func (u *publishUpload) Close(ctx context.Context) error                  { _, err := u.h.Close(ctx); return err }
-func (u *publishUpload) Release() error                                   { return u.h.Release() }
+func (u *publishUpload) Close(ctx context.Context) error {
+	id, err := u.h.Close(ctx)
+	if err != nil || u.etagGuard == nil {
+		return err
+	}
+	if !strongPublishETag(id.ETag) {
+		return fmt.Errorf("%w: WebDAV staging upload must return a strong ETag", vfs.ErrInvalidSealedObject)
+	}
+	u.etagGuard.expectedETag = id.ETag
+	return nil
+}
+func (u *publishUpload) Release() error { return u.h.Release() }

@@ -155,6 +155,40 @@ func fileIntent(t *testing.T, p vfs.StagedPublishDriver, u vfs.URI, mode vfs.Pub
 	return i
 }
 
+func TestWebDAVETagRecoveryRetainsUnverifiedStaging(t *testing.T) {
+	store := filetest.New()
+	_, driver, dest, mode := fileDriver(t, "webdav/strict", store)
+	scope, bm := fileMemory(t)
+	ctx := context.Background()
+	intent := fileIntent(t, driver, dest, mode)
+	var ownership []byte
+	handle, err := driver.BeginPublish(ctx, intent, func(_ context.Context, token []byte) error {
+		ownership = append([]byte(nil), token...)
+		return nil
+	}, scope, bm)
+	if handle != nil {
+		_ = handle.Release()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stage := "/.fssql-" + intent.JobID + ".staging"
+	store.Put(stage, []byte("different staging contents"))
+	handle, err = driver.ResumePublish(ctx, intent, ownership, nil, scope, bm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handle.Release()
+	if err := handle.Abort(ctx, nil); !errors.Is(err, vfs.ErrInvalidSealedObject) {
+		t.Fatalf("cleanup without recorded ETag returned %v", err)
+	}
+	data, exists := store.Get(stage)
+	if !exists || string(data) != "different staging contents" || store.Count("DELETE") != 0 {
+		t.Fatal("cleanup changed staging without matching ownership")
+	}
+}
+
 func TestWebDAVLockOwnershipSurvivesRestartAndRejectsLostLock(t *testing.T) {
 	for _, loseLock := range []bool{false, true} {
 		t.Run(fmt.Sprint(loseLock), func(t *testing.T) {
