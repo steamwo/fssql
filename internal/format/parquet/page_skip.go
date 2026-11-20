@@ -56,7 +56,7 @@ func (c *ColumnCursor) nextDataPageHeader(ctx context.Context) (PageHeader, int,
 		case PageData, PageDataV2:
 			return header, length, nil
 		case PageDictionary:
-			body, err := c.readPageBody(ctx, bodyOffset, bodyLen)
+			body, err := c.readDecodedPageBody(ctx, bodyOffset, header)
 			if err != nil {
 				return PageHeader{}, 0, err
 			}
@@ -95,7 +95,7 @@ func (c *ColumnCursor) scalarPageInfo(header PageHeader) (int64, *Statistics, er
 		h := header.DataV2
 		count, stats, encoding = int64(h.NumValues), h.Statistics, h.Encoding
 		levels := int64(h.DefinitionLevelsByteLength) + int64(h.RepetitionLevelsByteLength)
-		if h.NumNulls < 0 || h.NumNulls > h.NumValues || h.NumRows < 0 || h.NumRows > h.NumValues || h.DefinitionLevelsByteLength < 0 || h.RepetitionLevelsByteLength < 0 || levels > int64(header.CompressedPageSize) || levels > int64(header.UncompressedPageSize) || (c.leaf.MaxRep == 0 && h.NumRows != h.NumValues) {
+		if h.NumNulls < 0 || h.NumNulls > h.NumValues || h.NumRows < 0 || h.NumRows > h.NumValues || h.DefinitionLevelsByteLength < 0 || h.RepetitionLevelsByteLength < 0 || levels > int64(c.pagePayloadSize(header)) || levels > int64(header.UncompressedPageSize) || (c.leaf.MaxRep == 0 && h.NumRows != h.NumValues) {
 			return 0, nil, errors.New("parquet: invalid data v2 page counts or levels")
 		}
 	default:
@@ -118,6 +118,7 @@ func (c *ColumnCursor) scalarPageInfo(header PageHeader) (int64, *Statistics, er
 
 func (c *ColumnCursor) advanceSkippedPage(headerLen int, bodyLen, rows int64) {
 	c.offset += int64(headerLen) + bodyLen
+	c.pageOrdinal++
 	c.consumed += rows
 	c.metrics.PagesSkipped++
 	c.metrics.UsefulBytes += int64(headerLen)

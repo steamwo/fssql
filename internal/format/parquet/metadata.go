@@ -158,6 +158,7 @@ type ColumnMetaData struct {
 	IndexPageOffset       *int64
 	DictionaryPageOffset  *int64
 	Statistics            *Statistics
+	crypto                *columnDecryption
 }
 
 type ColumnChunk struct {
@@ -168,6 +169,7 @@ type ColumnChunk struct {
 	OffsetIndexLength *int32
 	ColumnIndexOffset *int64
 	ColumnIndexLength *int32
+	usesFooterKey     bool
 }
 
 type RowGroup struct {
