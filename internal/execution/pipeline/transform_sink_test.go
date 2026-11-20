@@ -129,3 +129,49 @@ func TestTransformSinkFinalizeAndClosePassThrough(t *testing.T) {
 		t.Fatalf("finalized=%d closed=%d", downstream.finalized.Load(), downstream.closed.Load())
 	}
 }
+
+func TestTransformSinkTransfersOwnedReplacementThroughChain(t *testing.T) {
+	consumeErr := errors.New("consumer failed")
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{{name: "success"}, {name: "downstream error", err: consumeErr}, {name: "canceled", err: context.Canceled}} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := memory.NewManager(1 << 20)
+			scope := manager.NewScope()
+			bm := memory.NewBufferManager(nil)
+			v, err := vector.NewFlat(scope, bm, types.LogicalType{ID: types.BigInt}, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input, _ := vector.NewDataChunk(v)
+			downstream := &transformSinkCollector{consumeErr: tc.err}
+			mode := &ownershipModeTransform{}
+			tail, err := NewTransformSink([]TransformOperator{mode}, downstream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sink, err := NewTransformSink([]TransformOperator{replacementTransform{scope: scope, buffers: bm, value: 9}}, tail)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			wantCalls := int32(1)
+			if tc.err == context.Canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+				wantCalls = 0
+			}
+			if err := ConsumeOwnedChunk(ctx, sink, input); !errors.Is(err, tc.err) {
+				t.Fatalf("consume error=%v want=%v", err, tc.err)
+			}
+			if got := mode.owned.Load(); got != wantCalls || mode.borrowed.Load() != 0 {
+				t.Fatalf("owned=%d borrowed=%d want owned=%d", got, mode.borrowed.Load(), wantCalls)
+			}
+			if used := manager.Used(); used != 0 {
+				t.Fatalf("managed leak=%d", used)
+			}
+		})
+	}
+}

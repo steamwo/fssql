@@ -49,6 +49,7 @@ type PhysicalPlan struct {
 	Aggregates []AggregateSpec           // Aggregates 用于 hash aggregate。
 	Join       JoinType                  // Join 保存 SQL join 语义。
 	Sort       []SortKey                 // Sort 保存排序语义。
+	TopNRows   uint64                    // TopNRows 为当前排序最多需要保留的行数，0 表示无上界。
 	Limit      uint64                    // Limit 是 physical limit。
 	Offset     uint64                    // Offset 是 physical offset。
 	Estimate   CardinalityEstimate       // Estimate 是 optimizer 估计。

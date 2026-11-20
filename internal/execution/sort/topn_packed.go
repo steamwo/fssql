@@ -5,6 +5,7 @@ package sort
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -183,12 +184,17 @@ func (p *PackedTopN) Consume(ctx context.Context, chunk *vector.DataChunk) error
 		return ctx.Err()
 	}
 	firstKey := p.cfg.Keys[0]
-	firstView, fixedFirst := chunk.Columns[firstKey.Column].BorrowFixedWidth()
+	firstColumn := chunk.Columns[firstKey.Column]
+	firstView, fixedFirst := firstColumn.BorrowFixedWidth()
 	var firstData []byte
 	var firstValid bool
 	rootFirstReady := false
 	scratch := p.scratch.Bytes()
-	for row := 0; row < chunk.Cardinality; row++ {
+	start := 0
+	if firstColumn.Type.Same(p.cfg.InputTypes[firstKey.Column]) {
+		start = firstPackedCandidate(firstView, firstColumn.Type, firstKey.Desc, chunk.Cardinality, p.cfg.N)
+	}
+	for row := start; row < chunk.Cardinality; row++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -241,6 +247,27 @@ func (p *PackedTopN) Consume(ctx context.Context, chunk *vector.DataChunk) error
 		rootFirstReady = false
 	}
 	return nil
+}
+
+// A strictly improving BIGINT batch needs only its last N rows. Every
+// earlier row is already outranked by N rows from this same batch on key one.
+func firstPackedCandidate(view vector.FixedWidthView, typ types.LogicalType, descending bool, count, n int) int {
+	if n > count/2 || typ.ID != types.BigInt || typ.IsUnsignedInteger() {
+		return 0
+	}
+	data, validity, flat := view.FlatData()
+	if !flat || !validity.AllValid(count) {
+		return 0
+	}
+	previous := int64(binary.LittleEndian.Uint64(data))
+	for row := 1; row < count; row++ {
+		value := int64(binary.LittleEndian.Uint64(data[row*8:]))
+		if (descending && value <= previous) || (!descending && value >= previous) {
+			return 0
+		}
+		previous = value
+	}
+	return count - n
 }
 
 // sortedSlots 把当前最大堆原地变为升序槽位序列，避免额外索引分配。

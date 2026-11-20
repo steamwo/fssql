@@ -595,10 +595,7 @@ func (e *emitter) flush(ctx context.Context) error {
 		return nil
 	}
 	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := e.downstream.Consume(ctx, chunk)
-	for _, v := range e.cols {
-		v.Release()
-	}
+	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
 	e.cols = nil
 	e.count = 0
 	return err

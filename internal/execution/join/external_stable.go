@@ -200,6 +200,8 @@ type stableExternalProbeSink struct {
 	downstream pipeline.Sink
 }
 
+func (s *stableExternalProbeSink) Finished() bool { return pipeline.SinkFinished(s.downstream) }
+
 // Consume 保持 outer/semi/anti 语义，并让 INNER 复用已验证的整数直接索引。
 func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	j := s.join
@@ -228,6 +230,9 @@ func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.Dat
 	}
 	core.mu.Unlock()
 
+	if s.Finished() {
+		return ctx.Err()
+	}
 	emitter := newBatchEmitter(core.config.Type, core.config.Scope, core.config.Buffers, core.config.LeftTypes, core.config.RightTypes, core.buildSide, core.buildLayout, s.downstream)
 	emitter.required = core.config.RequiredOutput
 	if err := core.probeChunk(ctx, chunk, &emitter, j); err != nil {
@@ -248,6 +253,9 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 	if err := ctx.Err(); err != nil { return j.failLocked(err) }
 	if core.failed != nil { return core.failed }
 	if core.closed || !core.built { return j.failLocked(errors.New("external join not ready for finalize")) }
+	if s.Finished() {
+		return s.finishLocked(ctx)
+	}
 	for i := range core.partitions {
 		partition := &core.partitions[i]
 		if partition.probeSpill != nil {
@@ -256,6 +264,9 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 	}
 	emitter := newStableStoredEmitter(j, s.downstream)
 	for i := range core.partitions {
+		if s.Finished() {
+			break
+		}
 		partition := &core.partitions[i]
 		if !partition.spilled { continue }
 		buildSet := partition.buildSpill.set()
@@ -265,7 +276,7 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 		partition.buildSpill.pages = nil
 		if partition.probeSpill != nil { partition.probeSpill.pages = nil }
 	}
-	if core.config.Type == Full {
+	if core.config.Type == Full && !s.Finished() {
 		for i := range core.partitions {
 			partition := &core.partitions[i]
 			if partition.spilled || partition.resident == nil { continue }
@@ -280,9 +291,16 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 		}
 	}
 	if err := emitter.flush(ctx); err != nil { emitter.abort(); return j.failLocked(err) }
-	if err := s.downstream.Finalize(ctx); err != nil { return j.failLocked(err) }
+	return s.finishLocked(ctx)
+}
+
+func (s *stableExternalProbeSink) finishLocked(ctx context.Context) error {
+	j := s.join
+	if err := s.downstream.Finalize(ctx); err != nil {
+		return j.failLocked(err)
+	}
 	j.releaseMatchedLocked()
-	core.releaseLocked()
+	j.core.releaseLocked()
 	return nil
 }
 func (s *stableExternalProbeSink) Close() error { s.join.Close(); return nil }
@@ -500,7 +518,7 @@ func (e *stableStoredEmitter) outputTypes() []types.LogicalType {
 }
 func (e *stableStoredEmitter) ensure() error {
 	if e.cols != nil { return nil }
-	cols, err := newOutputColumns(e.join.core.config.Scope, e.join.core.config.Buffers, e.outputTypes(), e.join.core.config.RequiredOutput)
+	cols, err := newOutputColumns(e.join.core.config.Scope, e.join.core.config.Buffers, e.outputTypes(), e.join.core.config.RequiredOutput, vector.DefaultVectorSize)
 	if err != nil { return err }
 	e.cols = cols
 	return nil
@@ -535,5 +553,14 @@ func (e *stableStoredEmitter) appendBuildOnly(ctx context.Context, buildRow []by
 }
 func setNullRow(columns []*vector.Vector,row int){for _,column:=range columns{if column.Kind != vector.Constant {column.SetNull(row)}}}
 func (e *stableStoredEmitter) advance(ctx context.Context) error { e.count++;if e.count==vector.DefaultVectorSize{return e.flush(ctx)};return nil }
-func (e *stableStoredEmitter) flush(ctx context.Context) error { if e.count==0{return nil};chunk:=&vector.DataChunk{Columns:e.cols,Cardinality:e.count};err:=e.downstream.Consume(ctx,chunk);for _,v:=range e.cols{v.Release()};e.cols=nil;e.count=0;return err }
+func (e *stableStoredEmitter) flush(ctx context.Context) error {
+	if e.count == 0 {
+		return nil
+	}
+	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
+	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
+	e.cols = nil
+	e.count = 0
+	return err
+}
 func (e *stableStoredEmitter) abort(){for _,v:=range e.cols{if v!=nil{v.Release()}};e.cols=nil;e.count=0}

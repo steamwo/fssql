@@ -34,8 +34,8 @@ type TransformOperator interface {
 }
 
 // OwnedTransform may move input columns only after all fallible preparation
-// succeeds. On error input ownership remains unchanged. Only the runner's
-// exclusively owned input uses this extension; borrowed TransformSink does not.
+// succeeds. On error input ownership remains unchanged. Callers use this
+// extension only when they exclusively own the input.
 type OwnedTransform interface {
 	TransformOperator
 	TransformOwned(context.Context, *vector.DataChunk) (*vector.DataChunk, error)
@@ -50,12 +50,37 @@ type Sink interface {
 	Finalize(context.Context) error
 }
 
+// SinkFinished propagates normal early completion through streaming sinks.
+func SinkFinished(sink Sink) bool {
+	finishing, ok := sink.(FinishingTransform)
+	return ok && finishing.Finished()
+}
+
 // OwnershipTakingSink 是最终 Native Chunk/ResultCursor 一类 Sink 的可选扩展。
 // Consume 成功后若返回 true，chunk ownership 转移给 Sink，调用方不得再 Release；
 // Consume 返回 error 时 ownership 永远没有转移，调用方仍负责 Release。
 type OwnershipTakingSink interface {
 	Sink
 	TakesChunkOwnership() bool
+}
+
+// OwnedInputSink can consume an exclusively owned chunk without copying it.
+// The sink takes responsibility for releasing it even when it returns an error.
+type OwnedInputSink interface {
+	ConsumeOwned(context.Context, *vector.DataChunk) error
+}
+
+// ConsumeOwnedChunk gives up ownership to an accepting sink or releases the
+// chunk after ordinary borrowed consumption.
+func ConsumeOwnedChunk(ctx context.Context, sink Sink, chunk *vector.DataChunk) error {
+	if owned, ok := sink.(OwnedInputSink); ok {
+		return owned.ConsumeOwned(ctx, chunk)
+	}
+	err := sink.Consume(ctx, chunk)
+	if err != nil || !SinkTakesChunkOwnership(sink) {
+		chunk.Release()
+	}
+	return err
 }
 
 // SinkTakesChunkOwnership 统一判断 Sink 的成功消费 ownership 语义，供 Pipeline 与直接 push 的 join emitter 共用。
@@ -110,7 +135,9 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 						return scheduler.DONE, nil
 					}
 				}
-				if finishing,ok:=p.Sink.(interface{Finished()bool});ok&&finishing.Finished(){return scheduler.DONE,nil}
+				if SinkFinished(p.Sink) {
+					return scheduler.DONE, nil
+				}
 				chunk, ok, err := p.Source.Next(ctx)
 				if err != nil {
 					return scheduler.FAILED, err
@@ -149,12 +176,8 @@ func (p *Pipeline) Run(ctx context.Context, workers int, obs scheduler.Observer)
 						owned = next
 					}
 				}
-				if err := p.Sink.Consume(ctx, owned); err != nil {
-					owned.Release()
+				if err := ConsumeOwnedChunk(ctx, p.Sink, owned); err != nil {
 					return scheduler.FAILED, err
-				}
-				if !SinkTakesChunkOwnership(p.Sink) {
-					owned.Release()
 				}
 			}
 		})
