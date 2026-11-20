@@ -82,6 +82,60 @@ func TestPackedTopNEqualsFullSortLimit(t *testing.T) {
 	}
 }
 
+func TestPackedTopNMonotoneBatchKeepsBestRows(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		desc    bool
+		outlier bool
+		want    []int64
+	}{
+		{name: "descending sort", desc: true, want: []int64{59, 58, 57, 56, 55}},
+		{name: "ascending sort", want: []int64{-59, -58, -57, -56, -55}},
+		{name: "out of order first row", desc: true, outlier: true, want: []int64{1000, 59, 58, 57, 56}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, clean := newSortHarness(t, 1<<20)
+			defer clean()
+			top, err := NewPackedTopN(PackedTopNConfig{
+				InputTypes: []types.LogicalType{{ID: types.BigInt}, {ID: types.Double}},
+				Keys:       []Key{{Column: 0, Desc: tc.desc}, {Column: 1}},
+				N:          len(tc.want), MemoryBudget: 64 << 10, Scope: h.scope, Buffers: h.bm,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer top.Release()
+			for base := 0; base < 160; base += 80 {
+				chunk := makeFixedTopNChunk(t, h, base, 80)
+				for row := 0; row < chunk.Cardinality; row++ {
+					value := int64(base + row - 100)
+					if !tc.desc {
+						value = -value
+					}
+					if tc.outlier && base == 0 && row == 0 {
+						value = 1000
+					}
+					chunk.Columns[0].SetInt64(row, value)
+				}
+				err := top.Consume(context.Background(), chunk)
+				chunk.Release()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := collectPackedTopN(t, top)
+			if len(got) != len(tc.want) {
+				t.Fatalf("rows=%d want=%d", len(got), len(tc.want))
+			}
+			for i, want := range tc.want {
+				if got[i].id != want {
+					t.Fatalf("row %d id=%d want=%d", i, got[i].id, want)
+				}
+			}
+		})
+	}
+}
+
 // TestPackedTopNPreallocatesAndRejectsSmallBudget 验证构造阶段预留全部状态，预算不足时无泄漏地失败。
 func TestPackedTopNPreallocatesAndRejectsSmallBudget(t *testing.T) {
 	h, clean := newSortHarness(t, 1<<20)

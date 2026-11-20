@@ -286,11 +286,37 @@ func (o *Optimizer) lower(ctx context.Context, p *planner.LogicalPlan) (*planner
 		out.Kind = planner.PhysicalSort
 	case planner.LogicalLimit:
 		out.Kind = planner.PhysicalLimit
+		boundSortBelowLimit(out)
 	default:
 		return nil, fmt.Errorf("optimizer: unsupported logical kind %d", p.Kind)
 	}
 	out.Cost = cost(out)
 	return out, nil
+}
+
+// boundSortBelowLimit limits exactly the sort whose output this LIMIT reads.
+// A column-only projection can drop hidden keys without changing the row prefix.
+func boundSortBelowLimit(limit *planner.PhysicalPlan) {
+	if limit.Limit == 0 || limit.Limit == planner.UnlimitedRows || limit.Offset > math.MaxUint64-limit.Limit {
+		return
+	}
+	node := limit.Children[0]
+	for node.Kind == planner.PhysicalProject {
+		if _, ok := projectionColumns(node.Projection); !ok {
+			return
+		}
+		node = node.Children[0]
+	}
+	if node.Kind != planner.PhysicalSort || len(node.Sort) == 0 {
+		return
+	}
+	for _, key := range node.Sort {
+		// SAMPLE, CTE and window markers also use a physical sort node.
+		if key.Expr == nil || key.Expr.Kind != binder.BoundColumn {
+			return
+		}
+	}
+	node.TopNRows = limit.Offset + limit.Limit
 }
 
 // estimate 计算 conservative cardinality；Unknown statistics 保持低置信度而不是伪造精确结果。

@@ -113,6 +113,25 @@ func TestLimitTransformZeroAndOffsetOnly(t *testing.T) {
 	}
 }
 
+func TestLimitTransformOwnedReusesWholeBatch(t *testing.T) {
+	manager := memory.NewManager(1 << 20)
+	scope := manager.NewScope()
+	bm := memory.NewBufferManager(nil)
+	limit, err := NewLimit(expression.NewExecutor(scope, bm), 0, 4, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := makeLimitChunk(t, scope, bm, 0, 4)
+	defer in.Release()
+	out, err := limit.TransformOwned(context.Background(), in)
+	if out != nil && out != in {
+		defer out.Release()
+	}
+	if err != nil || out != in || !limit.Finished() {
+		t.Fatalf("owned batch reused=%t finished=%t err=%v", out == in, limit.Finished(), err)
+	}
+}
+
 // TestLimitTransformConcurrentGlobalCount 验证多 Pipeline worker 共享 transform 时总输出不超过全局 LIMIT。
 func TestLimitTransformConcurrentGlobalCount(t *testing.T) {
 	manager := memory.NewManager(4 << 20)

@@ -86,6 +86,9 @@ func (j *ExternalHashJoin) probeBatch(ctx context.Context, chunk *vector.DataChu
 		if err := j.probeResidentBatch(ctx, chunk, hashes, comparer, emitter, part, rows, stable, &scratch); err != nil {
 			return err
 		}
+		if emitter.stopped {
+			return nil
+		}
 	}
 	return nil
 }
@@ -145,6 +148,9 @@ func (j *ExternalHashJoin) probeResidentBatch(ctx context.Context, chunk *vector
 					return err
 				}
 			}
+		}
+		if emitter.stopped {
+			return nil
 		}
 		kept := 0
 		for i, row := range activeRows[:n] {

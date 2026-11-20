@@ -27,10 +27,9 @@ type ExternalSortRuntimeConfig struct {
 }
 
 type ExternalSortFactory struct {
-	query    *query.Context
-	buffers  *memory.BufferManager
-	config   ExternalSortRuntimeConfig
-	topNRows uint64
+	query   *query.Context
+	buffers *memory.BufferManager
+	config  ExternalSortRuntimeConfig
 }
 
 func NewExternalSortFactory(q *query.Context, buffers *memory.BufferManager, config ExternalSortRuntimeConfig) (*ExternalSortFactory, error) {
@@ -51,13 +50,15 @@ func NewExternalSortFactory(q *query.Context, buffers *memory.BufferManager, con
 	}
 	return &ExternalSortFactory{query: q, buffers: buffers, config: config}, nil
 }
-func (f *ExternalSortFactory) setTopNRows(rows uint64) {
-	if f != nil {
-		f.topNRows = rows
-	}
+func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Column, keys []planner.SortKey, _ planner.CardinalityEstimate) (blocking.Operator, error) {
+	return f.openSort(ctx, columns, keys, 0)
 }
 
-func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Column, keys []planner.SortKey, estimate planner.CardinalityEstimate) (blocking.Operator, error) {
+func (f *ExternalSortFactory) OpenTopNSort(ctx context.Context, columns []planner.Column, keys []planner.SortKey, _ planner.CardinalityEstimate, rows uint64) (blocking.Operator, error) {
+	return f.openSort(ctx, columns, keys, rows)
+}
+
+func (f *ExternalSortFactory) openSort(ctx context.Context, columns []planner.Column, keys []planner.SortKey, topNRows uint64) (blocking.Operator, error) {
 	if f == nil || f.query == nil || f.query.Memory == nil || f.query.Temp == nil || f.buffers == nil {
 		return nil, fmt.Errorf("session: external SORT factory is uninitialized")
 	}
@@ -88,7 +89,6 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 	if len(columns) == 0 || len(keys) == 0 {
 		return nil, fmt.Errorf("session: SORT requires input columns and sort keys")
 	}
-	_ = estimate
 	inputTypes, executionKeys, err := prepareSortRuntime(columns, keys)
 	if err != nil {
 		return nil, err
@@ -97,15 +97,17 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 	if topNBudget <= 0 {
 		topNBudget = f.config.MemoryBudget
 	}
-	if f.topNRows > 0 && f.topNRows <= uint64(math.MaxInt) && fixedWidthSortInput(inputTypes) {
-		packed, packedErr := execsort.NewPackedTopN(execsort.PackedTopNConfig{InputTypes: inputTypes, Keys: executionKeys, N: int(f.topNRows), MemoryBudget: topNBudget, Scope: f.query.Memory, Buffers: f.buffers})
+	fixedWidth := fixedWidthSortInput(inputTypes)
+	// The packed heap needs at least four bytes per candidate before row data.
+	if topNRows > 0 && topNRows <= uint64(topNBudget/4) && topNRows <= uint64(math.MaxInt/4) && fixedWidth {
+		packed, packedErr := execsort.NewPackedTopN(execsort.PackedTopNConfig{InputTypes: inputTypes, Keys: executionKeys, N: int(topNRows), MemoryBudget: topNBudget, Scope: f.query.Memory, Buffers: f.buffers})
 		if packedErr == nil {
 			return packed, nil
 		}
 		if !errors.Is(packedErr, memory.ErrLimitExceeded) {
 			return nil, packedErr
 		}
-		topN, err := execsort.NewTopN(execsort.TopNConfig{InputTypes: inputTypes, Keys: executionKeys, N: int(f.topNRows), MemoryBudget: topNBudget, Scope: f.query.Memory, Buffers: f.buffers, PreallocateFixed: true})
+		topN, err := execsort.NewTopN(execsort.TopNConfig{InputTypes: inputTypes, Keys: executionKeys, N: int(topNRows), MemoryBudget: topNBudget, Scope: f.query.Memory, Buffers: f.buffers, PreallocateFixed: true})
 		if err == nil {
 			return topN, nil
 		}
@@ -113,8 +115,8 @@ func (f *ExternalSortFactory) OpenSort(ctx context.Context, columns []planner.Co
 			return nil, err
 		}
 	}
-	if f.topNRows > 0 && f.topNRows <= uint64(math.MaxInt) && !fixedWidthSortInput(inputTypes) {
-		op, err := execsort.NewSpillableTopN(execsort.Config{InputTypes: inputTypes, Keys: executionKeys, MemoryBudget: f.config.MemoryBudget, SpillBlockBytes: f.config.SpillBlockBytes, Scope: f.query.Memory, Buffers: f.buffers, Temp: f.query.Temp, Compression: f.config.Compression}, int(f.topNRows))
+	if topNRows > 0 && topNRows <= uint64(math.MaxInt) && !fixedWidth {
+		op, err := execsort.NewSpillableTopN(execsort.Config{InputTypes: inputTypes, Keys: executionKeys, MemoryBudget: f.config.MemoryBudget, SpillBlockBytes: f.config.SpillBlockBytes, Scope: f.query.Memory, Buffers: f.buffers, Temp: f.query.Temp, Compression: f.config.Compression}, int(topNRows))
 		if err != nil {
 			return nil, err
 		}

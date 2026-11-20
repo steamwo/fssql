@@ -11,16 +11,17 @@ func (w *CSVWriter) writeScalarField(ctx context.Context, vec *vector.Vector, ty
 		raw, _ := vec.Int64(row)
 		plain := typ
 		plain.Timestamp.AdjustedToUTC = false
-		return w.writeStringField(ctx, string(appendTimestampText(nil, raw, plain))+"+00", w.opts.ForceQuote)
+		text := appendTimestampText(w.out.scalarScratch[:0], raw, plain)
+		return w.writeTextField(ctx, append(text, "+00"...))
 	}
 	if !w.opts.ForceQuote {
-		return writeCSVScalar(ctx, w.out, vec, typ, row)
+		return writeCSVScalar(ctx, w.out, w.out.scalarScratch[:0], vec, typ, row)
 	}
 	if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
 		return err
 	}
 	quoted := csvQuotedOutput{out: w.out, quote: w.opts.Quote}
-	if err := writeCSVScalar(ctx, &quoted, vec, typ, row); err != nil {
+	if err := writeCSVScalar(ctx, &quoted, w.out.scalarScratch[:0], vec, typ, row); err != nil {
 		return err
 	}
 	return w.out.WriteContextByte(ctx, w.opts.Quote)

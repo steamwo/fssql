@@ -36,6 +36,11 @@ type SortFactory interface {
 	OpenSort(context.Context, []planner.Column, []planner.SortKey, planner.CardinalityEstimate) (blocking.Operator, error)
 }
 
+// TopNSortFactory optionally retains only a sorted prefix for the bound sort.
+type TopNSortFactory interface {
+	OpenTopNSort(context.Context, []planner.Column, []planner.SortKey, planner.CardinalityEstimate, uint64) (blocking.Operator, error)
+}
+
 // AggregateFactory 把 generic PhysicalHashAggregate 映射为真实 blocking aggregate operator。
 type AggregateFactory interface {
 	OpenAggregate(context.Context, []planner.Column, []*binder.BoundExpression, []planner.AggregateSpec, planner.CardinalityEstimate) (blocking.Operator, error)
@@ -304,7 +309,13 @@ func (b *Builder) openBlockingOperator(ctx context.Context, plan *planner.Physic
 		if b.Sorts == nil || len(plan.Children) != 1 || len(plan.Sort) == 0 {
 			return nil, "", fmt.Errorf("physical SORT requires SortFactory, one child and at least one key")
 		}
-		op, err := b.Sorts.OpenSort(ctx, append([]planner.Column(nil), plan.Children[0].Output...), append([]planner.SortKey(nil), plan.Sort...), plan.Estimate)
+		columns := append([]planner.Column(nil), plan.Children[0].Output...)
+		keys := append([]planner.SortKey(nil), plan.Sort...)
+		if factory, ok := b.Sorts.(TopNSortFactory); ok && plan.TopNRows > 0 {
+			op, err := factory.OpenTopNSort(ctx, columns, keys, plan.Estimate, plan.TopNRows)
+			return op, "sort", err
+		}
+		op, err := b.Sorts.OpenSort(ctx, columns, keys, plan.Estimate)
 		return op, "sort", err
 	default:
 		return nil, "", fmt.Errorf("physical operator %d is not blocking-lowerable", plan.Kind)
@@ -390,6 +401,8 @@ type binaryLifecycleSink struct {
 	pipeline.Sink
 	runtime pipeline.BinaryOperator
 }
+
+func (s *binaryLifecycleSink) Finished() bool { return pipeline.SinkFinished(s.Sink) }
 
 func (s *binaryLifecycleSink) Close() error {
 	var sinkErr error

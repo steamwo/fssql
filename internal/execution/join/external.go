@@ -1240,7 +1240,7 @@ func (e *storedEmitter) ensure() error {
 	typesOut := make([]types.LogicalType, 0, len(e.join.config.LeftTypes)+len(e.join.config.RightTypes))
 	typesOut = append(typesOut, e.join.config.LeftTypes...)
 	typesOut = append(typesOut, e.join.config.RightTypes...)
-	cols, err := newOutputColumns(e.join.config.Scope, e.join.config.Buffers, typesOut, e.join.config.RequiredOutput)
+	cols, err := newOutputColumns(e.join.config.Scope, e.join.config.Buffers, typesOut, e.join.config.RequiredOutput, vector.DefaultVectorSize)
 	if err != nil { return err }
 	e.cols = cols
 	return nil
@@ -1280,10 +1280,7 @@ func (e *storedEmitter) flush(ctx context.Context) error {
 		return nil
 	}
 	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := e.downstream.Consume(ctx, chunk)
-	for _, v := range e.cols {
-		v.Release()
-	}
+	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
 	e.cols = nil
 	e.count = 0
 	return err

@@ -105,6 +105,22 @@ func (e *Executor) executeSQLBigIntBinary(expr *binder.BoundExpression, chunk *v
 	if err != nil {
 		return nil, err
 	}
+	var arithmetic Kind
+	switch expr.Op {
+	case "+":
+		arithmetic = Add
+	case "-":
+		arithmetic = Subtract
+	case "*":
+		arithmetic = Multiply
+	}
+	if handled, err := int64ArithmeticBatch(arithmetic, left, right, out, chunk.Cardinality); handled {
+		if err != nil {
+			out.Release()
+			return nil, err
+		}
+		return out, nil
+	}
 	for row := 0; row < chunk.Cardinality; row++ {
 		x, xok := left.Int64(row)
 		y, yok := right.Int64(row)
