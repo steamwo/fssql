@@ -5,7 +5,7 @@ import "context"
 // writeBlobField quotes the hexadecimal representation without buffering it.
 func (w *CSVWriter) writeBlobField(ctx context.Context, data []byte) error {
 	if len(data) == 0 {
-		return w.writeStringField(ctx, "", w.opts.NullString == "")
+		return w.writeTextField(ctx, nil)
 	}
 	const digits = "0123456789ABCDEF"
 	quote := w.opts.ForceQuote

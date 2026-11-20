@@ -53,7 +53,7 @@ func TestCSVWriterEscapingNullAndHeader(t *testing.T) {
 	id.SetInt32(0, 1)
 	id.SetNull(1)
 	name := newVector(t, scope, bm, types.LogicalType{ID: types.Varchar}, 2)
-	_ = name.SetString(0, "a,b")
+	_ = name.SetString(0, "a,\"b中文\"")
 	_ = name.SetString(1, "")
 	chunk, err := vector.NewDataChunk(id, name)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestCSVWriterEscapingNullAndHeader(t *testing.T) {
 	if _, err := w.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := "id,name\n1,\"a,b\"\n,\"\"\n"
+	want := "id,name\n1,\"a,\"\"b中文\"\"\"\n,\"\"\n"
 	if got := sink.buf.String(); got != want {
 		t.Fatalf("CSV mismatch\ngot:  %q\nwant: %q", got, want)
 	}
@@ -98,7 +98,7 @@ func TestJSONWriterTypedNestedValues(t *testing.T) {
 	flag := newVector(t, scope, bm, structType.Fields[0].Type, 1)
 	flag.SetBool(0, true)
 	text := newVector(t, scope, bm, structType.Fields[1].Type, 1)
-	_ = text.SetString(0, "x\ny")
+	_ = text.SetString(0, "x\"\\\x01\ny中文")
 	meta.SetChildren(flag, text)
 	chunk, err := vector.NewDataChunk(items, meta)
 	if err != nil {
@@ -115,7 +115,7 @@ func TestJSONWriterTypedNestedValues(t *testing.T) {
 	if _, err := w.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	want := "[{\"items\":[7,null],\"meta\":{\"flag\":true,\"text\":\"x\\ny\"}}]"
+	want := `[{"items":[7,null],"meta":{"flag":true,"text":"x\"\\\u0001\ny中文"}}]`
 	if got := sink.buf.String(); got != want {
 		t.Fatalf("JSON mismatch\ngot:  %s\nwant: %s", got, want)
 	}

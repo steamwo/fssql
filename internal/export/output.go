@@ -27,6 +27,8 @@ type managedOutput struct {
 	sink ByteSink
 	// buffer 是由 BufferManager 分配的固定容量 ExportBuffer。
 	buffer *memory.Buffer
+	// scalarScratch is reused by the CSV and JSON scalar encoders.
+	scalarScratch [96]byte
 	// used 是当前 buffer 已填充的有效字节数。
 	used int
 	// terminal 表示输出已 Close/Abort。
@@ -77,9 +79,21 @@ func (o *managedOutput) Write(ctx context.Context, p []byte) error {
 
 // WriteContextByte 写入一个字节并显式携带调用上下文，不冒充 io.ByteWriter。
 func (o *managedOutput) WriteContextByte(ctx context.Context, b byte) error {
-	var one [1]byte
-	one[0] = b
-	return o.Write(ctx, one[:])
+	if o == nil || o.terminal || o.buffer == nil {
+		return ErrWriterClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	data := o.buffer.Bytes()
+	if o.used == len(data) {
+		if err := o.flushBuffer(ctx); err != nil {
+			return err
+		}
+	}
+	data[o.used] = b
+	o.used++
+	return nil
 }
 
 // WriteString 分块写入字符串；不会把整个字符串复制到普通 Go heap。
