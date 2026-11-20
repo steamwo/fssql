@@ -69,6 +69,8 @@ type Config struct {
 	ScalarFunctions        []ScalarFunction
 	// ParquetKeys resolves encrypted-export key bytes without placing keys in SQL or manifests.
 	ParquetKeys ParquetKeyResolver
+	// ParquetReadKeys resolves the raw 16- or 32-byte footer key for encrypted reads.
+	ParquetReadKeys ParquetReadKeyResolver
 	// SampleCompatibility enables DuckDB reservoir sampling. Empty preserves the
 	// native stream; duckdb uses libstdc++, duckdb-msvc uses the Windows wheel.
 	// Input order and chunk boundaries must match the reference engine.
@@ -182,6 +184,7 @@ func Open(config Config) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	baseSources.ParquetReadKeys = parquet.ReadKeyResolver(config.ParquetReadKeys)
 	spillBudget := config.SpillMemoryBudgetBytes
 	spillBlock := config.SpillBlockBytes
 	joinBudget := spillBudget

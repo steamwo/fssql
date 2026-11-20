@@ -294,6 +294,8 @@ func (r *compactReader) fileMeta() (FileMetaData, error) {
 				return m, e
 			}
 			m.ColumnOrders = v
+		case 8, 9:
+			return m, errors.New("parquet: plaintext-footer encryption is unsupported")
 		default:
 			if e := r.skip(f.typ, 1); e != nil {
 				return m, e
@@ -811,6 +813,26 @@ func (r *compactReader) columnChunk() (ColumnChunk, error) {
 				return c, e
 			}
 			c.ColumnIndexLength = &v
+		case 8:
+			if f.typ != ctStruct {
+				return c, errors.New("parquet: invalid column crypto metadata")
+			}
+			crypto, _, err := r.field(0)
+			if err != nil {
+				return c, err
+			}
+			if crypto.id != 1 || crypto.typ != ctStruct {
+				return c, errors.New("parquet: only encryption with the footer key is supported")
+			}
+			if err := r.skip(ctStruct, 1); err != nil {
+				return c, err
+			}
+			if err := r.expectCryptoStop(); err != nil {
+				return c, err
+			}
+			c.usesFooterKey = true
+		case 9:
+			return c, errors.New("parquet: encrypted column metadata requires an unsupported column key")
 		default:
 			if e := r.skip(f.typ, 1); e != nil {
 				return c, e

@@ -11,6 +11,10 @@ import (
 // Implementations should return exactly 16 bytes for AES-128-GCM or 32 bytes for AES-256-GCM.
 type ParquetKeyResolver func(context.Context, string, string) ([]byte, error)
 
+// ParquetReadKeyResolver resolves a footer key by the ID stored in the file.
+// AES_GCM_V1 stores no key size, so the resolver selects the key by ID.
+type ParquetReadKeyResolver func(ctx context.Context, keyID string) ([]byte, error)
+
 type CopyFormat string
 
 const (

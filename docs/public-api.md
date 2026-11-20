@@ -273,7 +273,9 @@ if err != nil { return err }
 
 Parquet export automatically considers `RLE_DICTIONARY` for low-cardinality VARCHAR/BLOB column chunks, including encrypted output. Dictionaries are limited to 256 entries and 32 KiB of PLAIN dictionary bytes; small chunks, high cardinality, insufficient estimated savings or a preparation-time memory limit retain PLAIN encoding. Encoding selection is internal and does not change SQL values, NULL handling or the compression option. Page/column statistics remain available independently of encoding.
 
-For encrypted Parquet export, set `CopyOptions.Encryption` to `ParquetEncryptionOptions{Algorithm: gosql.ParquetAES256GCM, KeyID: keyID}` and provide `Config.ParquetKeys`. The resolver receives `(context.Context, keyID, algorithm)` and must return 16 bytes for `ParquetAES128GCM` or 32 bytes for `ParquetAES256GCM`. SQL/options/manifests carry the key identity, not key bytes. This is an export API; it does not expose a general encrypted-file read key provider.
+For encrypted Parquet export, set `CopyOptions.Encryption` to `ParquetEncryptionOptions{Algorithm: gosql.ParquetAES256GCM, KeyID: keyID}` and provide `Config.ParquetKeys`. The resolver receives `(context.Context, keyID, algorithm)` and must return 16 bytes for `ParquetAES128GCM` or 32 bytes for `ParquetAES256GCM`. The Go export options and export manifest carry the key ID.
+
+To query these files with `read_parquet(...)`, set `Config.ParquetReadKeys` when opening the database with `gosql.Open` or `gosql.OpenSQLDB`. The callback receives `(context.Context, keyID)` and returns the corresponding raw key. A file records `AES_GCM_V1` without the key size, so the reader accepts either a 16-byte or a 32-byte key from the callback. Reads support the fssql writer's encrypted-footer (`PARE`) files with a direct footer key shared by all columns. Plaintext-footer encryption, independent column keys, and wrapped key metadata are unsupported. A query authenticates its footer and the page headers and bodies it reads.
 
 ### Export recovery
 

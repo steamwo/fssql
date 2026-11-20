@@ -77,6 +77,7 @@ type ColumnCursor struct {
 	offset          int64
 	end             int64
 	consumed        int64
+	pageOrdinal     int
 	page            *columnPageState
 	pending         ColumnEntry
 	hasPending      bool
@@ -209,6 +210,9 @@ func (c *ColumnCursor) readPageHeader(ctx context.Context) (PageHeader, int, err
 	if remaining <= 0 {
 		return PageHeader{}, 0, io.EOF
 	}
+	if c.meta.crypto != nil {
+		return c.readEncryptedPageHeader(ctx, remaining)
+	}
 	if c.headerSize > 0 && c.headerAt == c.offset {
 		h, used, err := DecodePageHeader(c.headerTail.Bytes()[:c.headerSize])
 		c.headerSize = 0
@@ -304,11 +308,12 @@ func (c *ColumnCursor) loadPageSkipping(ctx context.Context, rows int64) (int64,
 			}
 			continue
 		}
-		body, err := c.readPageBody(ctx, bodyOffset, bodyLen)
+		body, err := c.readDecodedPageBody(ctx, bodyOffset, header)
 		if err != nil {
 			return skipped, err
 		}
 		c.offset = bodyOffset + bodyLen
+		c.pageOrdinal++
 		c.metrics.PagesRead++
 		c.metrics.UsefulBytes += int64(headerLen) + bodyLen
 
@@ -344,7 +349,7 @@ func (c *ColumnCursor) loadDictionary(header PageHeader, body *memory.Buffer) er
 	if header.Dictionary.Encoding != EncodingPlain {
 		return fmt.Errorf("parquet: unsupported dictionary encoding %d", header.Dictionary.Encoding)
 	}
-	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes()[:int(header.CompressedPageSize)], int(header.UncompressedPageSize))
+	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, c.pagePayload(body, header), int(header.UncompressedPageSize))
 	if err != nil {
 		return err
 	}
@@ -377,7 +382,7 @@ func (c *ColumnCursor) loadDataV1(header PageHeader, body *memory.Buffer) (*colu
 	if h == nil || h.NumValues < 0 {
 		return nil, errors.New("parquet: invalid data page v1")
 	}
-	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, body.Bytes()[:int(header.CompressedPageSize)], int(header.UncompressedPageSize))
+	decoded, err := DecompressManaged(c.scope, c.bm, c.meta.Codec, c.pagePayload(body, header), int(header.UncompressedPageSize))
 	if err != nil {
 		return nil, err
 	}
@@ -413,13 +418,13 @@ func (c *ColumnCursor) loadDataV2(header PageHeader, body *memory.Buffer) (*colu
 		return nil, errors.New("parquet: invalid data page v2")
 	}
 	levelLen64 := int64(h.RepetitionLevelsByteLength) + int64(h.DefinitionLevelsByteLength)
-	if levelLen64 < 0 || levelLen64 > int64(header.CompressedPageSize) || levelLen64 > int64(header.UncompressedPageSize) {
+	if levelLen64 < 0 || levelLen64 > int64(c.pagePayloadSize(header)) || levelLen64 > int64(header.UncompressedPageSize) {
 		return nil, errors.New("parquet: invalid data page v2 level lengths")
 	}
 	levelLen := int(levelLen64)
 	repEnd := int(h.RepetitionLevelsByteLength)
 	defEnd := levelLen
-	raw := body.Bytes()[:int(header.CompressedPageSize)]
+	raw := c.pagePayload(body, header)
 	rep, err := newLevelsV2(raw[:repEnd], c.leaf.MaxRep)
 	if err != nil {
 		return nil, err

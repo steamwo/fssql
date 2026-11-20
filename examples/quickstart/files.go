@@ -17,9 +17,16 @@ var demoExportKey = bytes.Repeat([]byte{0x42}, 32)
 
 // demoKeyResolver 是 Config.ParquetKeys 的实现：按 keyID+algorithm 返回密钥字节。
 // AES-128-GCM 必须返回 16 字节，AES-256-GCM 必须返回 32 字节。
-func demoKeyResolver(_ context.Context, keyID, algorithm string) ([]byte, error) {
-	if keyID != "quickstart-key" || algorithm != gosql.ParquetAES256GCM {
-		return nil, fmt.Errorf("unexpected key request: keyID=%q algorithm=%q", keyID, algorithm)
+func demoKeyResolver(ctx context.Context, keyID, algorithm string) ([]byte, error) {
+	if algorithm != gosql.ParquetAES256GCM {
+		return nil, fmt.Errorf("unexpected key algorithm %q", algorithm)
+	}
+	return demoReadKeyResolver(ctx, keyID)
+}
+
+func demoReadKeyResolver(_ context.Context, keyID string) ([]byte, error) {
+	if keyID != "quickstart-key" {
+		return nil, fmt.Errorf("unknown key ID %q", keyID)
 	}
 	return append([]byte(nil), demoExportKey...), nil
 }
@@ -33,7 +40,7 @@ func demoKeyResolver(_ context.Context, keyID, algorithm string) ([]byte, error)
 //   - read_csv 的静态选项只支持 header、auto_detect、allow_quoted_nulls、
 //     columns；read_csv_auto/read_json_auto 是兼容别名；
 //   - CopyTo 的目标必须由已配置的 VFS driver 支持；目标已存在时不会覆盖；
-//   - 加密 Parquet 是导出接口，公共包没有通用加密文件读取密钥注入入口。
+//   - 原生加密 Parquet 通过 ParquetKeys 导出，通过 ParquetReadKeys 读回。
 func demoFiles(ctx context.Context, w io.Writer, env *environment) error {
 	// 1. 写入一个 CSV 源文件。示例数据与 demo_rows() 保持一致的前四列。
 	csvPath := filepath.Join(env.root, "input.csv")
@@ -259,8 +266,12 @@ func demoFiles(ctx context.Context, w io.Writer, env *environment) error {
 	if err != nil {
 		return err
 	}
-	if err := writef(w, "-- 加密 Parquet 导出: rows=%d bytes=%d（公共 API 不提供读回密钥注入）\n",
+	if err := writef(w, "-- 加密 Parquet 导出: rows=%d bytes=%d\n",
 		encryptedResult.Rows, encryptedResult.Bytes); err != nil {
+		return err
+	}
+	if err := printQuery(ctx, w, env.sqlDB, "读回加密 Parquet",
+		"SELECT id, note FROM read_parquet("+quoteSQL(encryptedURI)+") ORDER BY id"); err != nil {
 		return err
 	}
 

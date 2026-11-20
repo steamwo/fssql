@@ -40,6 +40,10 @@ type Footer struct {
 
 // DiscoverFooter 复用可选文件句柄完成 trailer 与元数据读取；所有范围仍保持身份校验。
 func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64) (Footer, error) {
+	return discoverFooter(ctx, driver, src, scope, bm, maxFooterBytes, nil)
+}
+
+func discoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64, keys ReadKeyResolver) (Footer, error) {
 	var out Footer
 	if driver == nil || scope == nil || bm == nil {
 		return out, errors.New("parquet: footer discovery requires driver and managed memory")
@@ -76,12 +80,34 @@ func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		return out, fmt.Errorf("%w: trailer length", ErrInvalidFooter)
 	}
 	b := trailer.Buffer.Bytes()
-	if string(b[4:8]) != "PAR1" {
-		trailer.Buffer.Release()
-		return out, ErrInvalidMagic
-	}
+	magic := string(b[4:8])
 	metaLen := int64(binary.LittleEndian.Uint32(b[:4]))
 	trailer.Buffer.Release()
+	switch magic {
+	case "PAR1":
+	case "PARE":
+		if keys == nil {
+			return out, errEncryptedKeyRequired
+		}
+		head, err := read(ctx, vfs.RangeRequest{URI: src.URI, Offset: 0, Length: 4, Expected: &identity, Tag: memory.TagParquetRange}, scope, bm)
+		if err != nil {
+			return out, err
+		}
+		if head.Buffer == nil {
+			return out, ErrInvalidMagic
+		}
+		valid := string(head.Buffer.Bytes()) == "PARE"
+		head.Buffer.Release()
+		if !valid {
+			return out, ErrInvalidMagic
+		}
+		out.Metrics.Requests++
+		out.Metrics.PlannedBytes += 4
+		out.Metrics.TransferredBytes += 4
+		out.Metrics.UsefulBytes += 4
+	default:
+		return out, ErrInvalidMagic
+	}
 	if metaLen <= 0 || metaLen > maxFooterBytes || metaLen > src.Size-12 {
 		return out, fmt.Errorf("%w: metadata length %d", ErrInvalidFooter, metaLen)
 	}
@@ -104,7 +130,12 @@ func DiscoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		}
 		return out, fmt.Errorf("%w: metadata short read", ErrInvalidFooter)
 	}
-	decoded, err := DecodeFileMetaData(meta.Buffer.Bytes())
+	var decoded FileMetaData
+	if magic == "PARE" {
+		decoded, err = decodeEncryptedFooter(ctx, meta.Buffer.Bytes(), keys)
+	} else {
+		decoded, err = DecodeFileMetaData(meta.Buffer.Bytes())
+	}
 	meta.Buffer.Release()
 	if err != nil {
 		return out, err

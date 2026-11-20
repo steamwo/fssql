@@ -43,6 +43,7 @@ type metadataFlight struct {
 type MetadataCache struct {
 	shared     *MetadataCache
 	queryLocal bool
+	readKeys   ReadKeyResolver
 	mu         sync.Mutex
 	maxEntries int
 	lru        *list.List
@@ -53,11 +54,11 @@ type MetadataCache struct {
 	evictions  uint64
 }
 
-// NewQueryMetadataCache keeps HTTP/materialized footers within the query while
-// preserving the established cross-query cache for other physical objects.
-func NewQueryMetadataCache(shared *MetadataCache) *MetadataCache {
+// NewQueryMetadataCache keeps encrypted, HTTP, and materialized footers within
+// the query while sharing plaintext footers for other physical objects.
+func NewQueryMetadataCache(shared *MetadataCache, readKeys ReadKeyResolver) *MetadataCache {
 	local, _ := NewMetadataCache(shared.maxEntries)
-	local.shared, local.queryLocal = shared, true
+	local.shared, local.queryLocal, local.readKeys = shared, true, readKeys
 	return local
 }
 
@@ -105,7 +106,10 @@ func metadataKey(src FooterSource) (metadataCacheKey, bool) {
 }
 
 func (c *MetadataCache) Get(src FooterSource) (Footer, bool) {
-	c = c.route(src)
+	return c.route(src).lookup(src)
+}
+
+func (c *MetadataCache) lookup(src FooterSource) (Footer, bool) {
 	if c == nil {
 		return Footer{}, false
 	}
@@ -164,16 +168,32 @@ func (c *MetadataCache) putLocked(key metadataCacheKey, footer Footer) {
 // path. Concurrent misses for the same stable object are coalesced into one
 // footer discovery. Waiting callers may cancel without cancelling the owner.
 func (c *MetadataCache) GetOrDiscover(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64) (Footer, error) {
-	c = c.route(src)
 	if c == nil {
 		return DiscoverFooter(ctx, driver, src, scope, bm, maxFooterBytes)
 	}
+	if shared := c.route(src); shared != c {
+		if c.readKeys != nil {
+			if footer, ok := c.lookup(src); ok {
+				return footer, nil
+			}
+		}
+		footer, err := shared.getOrDiscover(ctx, driver, src, scope, bm, maxFooterBytes)
+		if c.readKeys == nil || !errors.Is(err, errEncryptedKeyRequired) {
+			return footer, err
+		}
+		// The shared cache only discovers plaintext footers. Authenticated
+		// metadata and the decryption state belong to this query.
+	}
+	return c.getOrDiscover(ctx, driver, src, scope, bm, maxFooterBytes)
+}
+
+func (c *MetadataCache) getOrDiscover(ctx context.Context, driver vfs.Driver, src FooterSource, scope *memory.Scope, bm *memory.BufferManager, maxFooterBytes int64) (Footer, error) {
 	key, cacheable := c.key(src)
 	if !cacheable {
 		c.mu.Lock()
 		c.misses++
 		c.mu.Unlock()
-		return DiscoverFooter(ctx, driver, src, scope, bm, maxFooterBytes)
+		return discoverFooter(ctx, driver, src, scope, bm, maxFooterBytes, c.readKeys)
 	}
 
 	c.mu.Lock()
@@ -198,7 +218,7 @@ func (c *MetadataCache) GetOrDiscover(ctx context.Context, driver vfs.Driver, sr
 	c.misses++
 	c.mu.Unlock()
 
-	footer, err := DiscoverFooter(ctx, driver, src, scope, bm, maxFooterBytes)
+	footer, err := discoverFooter(ctx, driver, src, scope, bm, maxFooterBytes, c.readKeys)
 
 	c.mu.Lock()
 	if err == nil {

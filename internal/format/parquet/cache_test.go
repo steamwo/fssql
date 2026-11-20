@@ -79,7 +79,7 @@ func TestMetadataCacheRejectsUnstableIdentity(t *testing.T) {
 
 func TestHTTPMetadataIsQueryLocalAndUsesFullIdentity(t *testing.T) {
 	shared, _ := NewMetadataCache(8)
-	first, second := NewQueryMetadataCache(shared), NewQueryMetadataCache(shared)
+	first, second := NewQueryMetadataCache(shared, nil), NewQueryMetadataCache(shared, nil)
 	a := cacheSource(t, "https://example.test/data?sig=one", "same", 100)
 	b := cacheSource(t, "https://example.test/data?sig=two", "same", 100)
 	if shared.Put(a, Footer{}) {

@@ -23,6 +23,8 @@ type StableQuerySourceFactory struct {
 	CSVScan        csv.ScanOptions              // CSVScan 是 runtime scan policy；零值使用格式层既有默认。
 	NDJSONScan     jsonformat.NDJSONScanOptions // NDJSONScan 是 runtime range/worker policy。
 	JSONRangeBytes int64                        // JSONRangeBytes 控制普通 JSON 串行 range 窗口；<=0 使用 runtime 默认。
+
+	ParquetReadKeys parquet.ReadKeyResolver
 }
 
 var _ QuerySourceFactory = (*StableQuerySourceFactory)(nil)
@@ -52,7 +54,7 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 		return nil, nil, err
 	}
 	registry := views.Registry()
-	cache := parquet.NewQueryMetadataCache(f.ParquetCache)
+	cache := parquet.NewQueryMetadataCache(f.ParquetCache, f.ParquetReadKeys)
 	if err := q.AddCleanup(func() error { cache.Clear(); return nil }); err != nil {
 		cache.Clear()
 		return nil, nil, err
