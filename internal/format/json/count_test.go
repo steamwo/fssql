@@ -92,6 +92,26 @@ func TestNDJSONCountValidationErrorsAndAllocationFailure(t *testing.T) {
 	}
 }
 
+func TestNDJSONCountWideSchemaWithAndWithoutIndex(t *testing.T) {
+	ctx := context.Background()
+	schema := wideDecodeSchema(64)
+	bm := memory.NewBufferManager(nil)
+	for _, budget := range []int64{256, 1 << 20} {
+		scope := memory.NewManager(budget).NewScope()
+		valid := [][]byte{[]byte(`{"c63":63,"\u006300":0}`), []byte(`{"c00":1}`)}
+		if err := validateCountRecords(ctx, valid, schema, scope, bm); err != nil {
+			t.Fatalf("budget=%d: valid records rejected: %v", budget, err)
+		}
+		duplicate := [][]byte{[]byte(`{"c00":0,"\u006300":1}`)}
+		if err := validateCountRecords(ctx, duplicate, schema, scope, bm); err == nil {
+			t.Fatalf("budget=%d: duplicate field accepted", budget)
+		}
+		if used := scope.Used(); used != 0 {
+			t.Fatalf("budget=%d: managed leak=%d", budget, used)
+		}
+	}
+}
+
 func TestNDJSONCountRangeFailureCancellationAndClose(t *testing.T) {
 	driver := &trackingNDJSONDriver{memDriver: newMem(t, fixture(20), vfs.Capabilities(vfs.RandomRead))}
 	registry, _ := vfs.NewRegistry(driver)
