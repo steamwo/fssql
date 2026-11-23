@@ -35,7 +35,11 @@ func TestRangeReaderRetainsSnapshotAndReadBoundaries(t *testing.T) {
 	scope, bm := managed(t, 16)
 	defer scope.Close()
 	for offset := int64(0); offset < 4; offset++ {
-		result, err := reader.ReadRange(context.Background(), vfs.RangeRequest{URI: uri, Offset: offset, Length: 3, Expected: &info.Identity}, scope, bm)
+		requestURI := uri
+		if offset != 0 {
+			requestURI.Raw = ""
+		}
+		result, err := reader.ReadRange(context.Background(), vfs.RangeRequest{URI: requestURI, Offset: offset, Length: 3, Expected: &info.Identity}, scope, bm)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -44,6 +48,11 @@ func TestRangeReaderRetainsSnapshotAndReadBoundaries(t *testing.T) {
 		if got != "abcdef"[offset:offset+3] {
 			t.Fatalf("offset=%d data=%q", offset, got)
 		}
+	}
+	other := mustURI(t, filepath.Join(root, "other.bin"))
+	if result, err := reader.ReadRange(context.Background(), vfs.RangeRequest{URI: other, Length: 1}, scope, bm); err == nil {
+		result.Buffer.Release()
+		t.Fatal("range reader accepted a different object")
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -43,18 +43,18 @@ func neededColumns(mask []bool, start, width int) []bool {
 	return mask[start : start+width]
 }
 
-func newOutputColumns(scope *memory.Scope, bm *memory.BufferManager, ts []types.LogicalType, needed []bool) ([]*vector.Vector, error) {
+func newOutputColumns(scope *memory.Scope, bm *memory.BufferManager, ts []types.LogicalType, needed []bool, count int) ([]*vector.Vector, error) {
 	cols := make([]*vector.Vector, len(ts))
 	for i, typ := range ts {
 		var v *vector.Vector
 		var err error
 		if needed != nil && !needed[i] {
-			v, err = vector.NewConstant(scope, bm, typ, vector.DefaultVectorSize)
+			v, err = vector.NewConstant(scope, bm, typ, count)
 			if err == nil {
 				v.SetNull(0)
 			}
 		} else {
-			v, err = vector.NewFlat(scope, bm, typ, vector.DefaultVectorSize)
+			v, err = vector.NewFlat(scope, bm, typ, count)
 		}
 		if err != nil {
 			for _, column := range cols {

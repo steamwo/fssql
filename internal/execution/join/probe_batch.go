@@ -29,6 +29,7 @@ type batchEmitter struct {
 	probeRows  [vector.DefaultVectorSize]int    // probeRows 保存当前批次的输入行号。
 	buildRows  [vector.DefaultVectorSize][]byte // buildRows 借用匹配的构建行。
 	count      int
+	stopped    bool
 }
 
 // newBatchEmitter 返回值对象，使每批约 64 KiB 的选择数组无需单独堆分配。
@@ -76,7 +77,7 @@ func (e *batchEmitter) ensure() error {
 	if e.cols != nil {
 		return nil
 	}
-	cols, err := newOutputColumns(e.scope, e.bm, e.outputTypes(), e.required)
+	cols, err := newOutputColumns(e.scope, e.bm, e.outputTypes(), e.required, e.count)
 	if err != nil {
 		return err
 	}
@@ -94,6 +95,9 @@ func (e *batchEmitter) beginChunk(ctx context.Context, chunk *vector.DataChunk) 
 
 // appendPair 批量收集输出，最多每 256 行检查一次取消，避免逐行加锁读取 context。
 func (e *batchEmitter) appendPair(ctx context.Context, chunk *vector.DataChunk, probeRow int, buildRow []byte) error {
+	if e.stopped {
+		return nil
+	}
 	if e.count&255 == 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -106,8 +110,11 @@ func (e *batchEmitter) appendPair(ctx context.Context, chunk *vector.DataChunk, 
 		if err := e.flush(ctx); err != nil {
 			return err
 		}
-		e.probeChunk = chunk
 	}
+	if e.stopped {
+		return nil
+	}
+	e.probeChunk = chunk
 	e.probeRows[e.count] = probeRow
 	e.buildRows[e.count] = buildRow
 	e.count++
@@ -177,16 +184,14 @@ func (e *batchEmitter) flush(ctx context.Context) error {
 		}
 	}
 	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := e.downstream.Consume(ctx, chunk)
-	for _, v := range e.cols {
-		v.Release()
-	}
+	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
 	for i := 0; i < e.count; i++ {
 		e.buildRows[i] = nil
 	}
 	e.cols = nil
 	e.probeChunk = nil
 	e.count = 0
+	e.stopped = err == nil && pipeline.SinkFinished(e.downstream)
 	return err
 }
 

@@ -56,7 +56,7 @@ func (r *fileRangeReader) ReadRange(ctx context.Context, request vfs.RangeReques
 	if r.closed.Load() {
 		return vfs.RangeResult{}, os.ErrClosed
 	}
-	if request.URI.IdentityKey() != r.uri.IdentityKey() {
+	if request.URI != r.uri && request.URI.RequestURL() != r.uri.RequestURL() {
 		return vfs.RangeResult{}, fmt.Errorf("local: range reader URI mismatch")
 	}
 	return readFileRange(ctx, request, scope, bm, r.file, r.path, &r.identity)

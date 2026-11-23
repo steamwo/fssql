@@ -16,7 +16,6 @@ func TestExternalSortFactoryUsesPackedTopNForFixedWidthInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory.setTopNRows(100)
 	columns := []planner.Column{
 		{Name: "id", Type: types.LogicalType{ID: types.BigInt}},
 		{Name: "value", Type: types.LogicalType{ID: types.Double}},
@@ -25,7 +24,7 @@ func TestExternalSortFactoryUsesPackedTopNForFixedWidthInput(t *testing.T) {
 		{Expr: &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[1].Type, ColumnIndex: 1}, Descending: true},
 		{Expr: &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}},
 	}
-	operator, err := factory.OpenSort(context.Background(), columns, keys, planner.CardinalityEstimate{Rows: 1_000_000, Confidence: 1})
+	operator, err := factory.OpenTopNSort(context.Background(), columns, keys, planner.CardinalityEstimate{Rows: 1_000_000, Confidence: 1}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,13 +47,12 @@ func TestExternalSortFactoryUsesSpillableTopNForVariableWidthInput(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory.setTopNRows(100)
 	columns := []planner.Column{
 		{Name: "id", Type: types.LogicalType{ID: types.BigInt}},
 		{Name: "payload", Type: types.LogicalType{ID: types.Varchar}},
 	}
 	key := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}
-	operator, err := factory.OpenSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{})
+	operator, err := factory.OpenTopNSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,10 +72,9 @@ func TestExternalSortFactoryTopNFallsBackWhenPreallocationExceedsBudget(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory.setTopNRows(10_000)
 	columns := []planner.Column{{Name: "id", Type: types.LogicalType{ID: types.BigInt}}}
 	key := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}
-	operator, err := factory.OpenSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{})
+	operator, err := factory.OpenTopNSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{}, 10_000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,13 +98,12 @@ func TestExternalSortFactoryTopNUsesQueryBudgetForFixedWidth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory.setTopNRows(1_000)
 	columns := []planner.Column{
 		{Name: "id", Type: types.LogicalType{ID: types.BigInt}},
 		{Name: "value", Type: types.LogicalType{ID: types.BigInt}},
 	}
 	key := &binder.BoundExpression{Kind: binder.BoundColumn, Type: columns[0].Type, ColumnIndex: 0}
-	operator, err := factory.OpenSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{})
+	operator, err := factory.OpenTopNSort(context.Background(), columns, []planner.SortKey{{Expr: key}}, planner.CardinalityEstimate{}, 1_000)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -103,6 +103,9 @@ func validateCountRecords(ctx context.Context, records [][]byte, schema []types.
 		return err
 	}
 	defer d.close()
+	if err := d.indexFields(schema, scope); err != nil {
+		return err
+	}
 	d.recordSeen = make([]bool, len(schema))
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {

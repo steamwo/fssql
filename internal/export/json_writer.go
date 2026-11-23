@@ -145,7 +145,7 @@ func (w *JSONWriter) writeObject(ctx context.Context, chunk *vector.DataChunk, r
 				return err
 			}
 		}
-		if err := writeJSONString(ctx, w.out, w.schema[col].Name); err != nil {
+		if err := writeJSONString(ctx, w.out, []byte(w.schema[col].Name)); err != nil {
 			return err
 		}
 		if err := w.out.WriteContextByte(ctx, ':'); err != nil {

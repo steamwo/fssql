@@ -15,11 +15,19 @@ type TransformSink struct {
 	Downstream Sink                // Downstream 接收最终 transformed chunk。
 }
 
-func(s *TransformSink)Finished()bool{for _,t:=range s.Transforms{if f,ok:=t.(FinishingTransform);ok&&f.Finished(){return true}};if f,ok:=s.Downstream.(interface{Finished()bool});ok{return f.Finished()};return false}
+func (s *TransformSink) Finished() bool {
+	for _, transform := range s.Transforms {
+		if finishing, ok := transform.(FinishingTransform); ok && finishing.Finished() {
+			return true
+		}
+	}
+	return SinkFinished(s.Downstream)
+}
 
 var _ Sink = (*TransformSink)(nil)
 var _ CloseableSink = (*TransformSink)(nil)
 var _ OwnershipTakingSink = (*TransformSink)(nil)
+var _ OwnedInputSink = (*TransformSink)(nil)
 
 // NewTransformSink 创建 streaming sink adapter；空 transform 仍允许，用于统一 Close/Finalize 透传。
 func NewTransformSink(transforms []TransformOperator, downstream Sink) (*TransformSink, error) {
@@ -42,54 +50,59 @@ func (s *TransformSink) TakesChunkOwnership() bool {
 // Consume 执行 replacement-aware transform chain；原始 input 默认属于上游。
 // downstream 成功声明 ownership transfer 时，最终 chunk（可能是 input，也可能是 replacement）不再由本 adapter Release。
 func (s *TransformSink) Consume(ctx context.Context, input *vector.DataChunk) error {
+	return s.consume(ctx, input, false)
+}
+
+// ConsumeOwned allows streaming transforms to move columns from this chunk.
+func (s *TransformSink) ConsumeOwned(ctx context.Context, input *vector.DataChunk) error {
+	return s.consume(ctx, input, true)
+}
+
+func (s *TransformSink) consume(ctx context.Context, current *vector.DataChunk, ownsCurrent bool) error {
+	defer func() {
+		if ownsCurrent && current != nil {
+			current.Release()
+		}
+	}()
 	if s == nil || s.Downstream == nil {
 		return fmt.Errorf("transform sink is uninitialized")
 	}
-	if input == nil {
+	if current == nil {
 		return fmt.Errorf("transform sink cannot consume nil chunk")
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	owned := input
-	ownsOwned := false
 	for _, transform := range s.Transforms {
-		next, err := transform.Transform(ctx, owned)
+		var next *vector.DataChunk
+		var err error
+		if move, ok := transform.(OwnedTransform); ownsCurrent && ok {
+			next, err = move.TransformOwned(ctx, current)
+		} else {
+			next, err = transform.Transform(ctx, current)
+		}
 		if err != nil {
-			if next != nil && next != owned {
+			if next != nil && next != current {
 				next.Release()
-			}
-			if ownsOwned {
-				owned.Release()
 			}
 			return err
 		}
 		if next == nil {
-			if ownsOwned {
-				owned.Release()
-			}
 			return errors.New("transform sink transform returned nil chunk")
 		}
-		if next != owned {
-			if ownsOwned {
-				owned.Release()
+		if next != current {
+			if ownsCurrent {
+				current.Release()
 			}
-			owned = next
-			ownsOwned = true
+			current = next
+			ownsCurrent = true
 		}
 	}
-	err := s.Downstream.Consume(ctx, owned)
-	if err != nil {
-		// Consume error 永不转移 ownership；replacement 仍由 adapter 回收，input 仍由上游回收。
-		if ownsOwned {
-			owned.Release()
-		}
-		return err
+	if ownsCurrent {
+		ownsCurrent = false
+		return ConsumeOwnedChunk(ctx, s.Downstream, current)
 	}
-	if ownsOwned && !SinkTakesChunkOwnership(s.Downstream) {
-		owned.Release()
-	}
-	return nil
+	return s.Downstream.Consume(ctx, current)
 }
 
 // Finalize 把 stage 终态传给真实 downstream；transform 自身无额外 finalize state。

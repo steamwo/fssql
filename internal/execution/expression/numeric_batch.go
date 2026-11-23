@@ -9,8 +9,8 @@ import (
 )
 
 // int64ArithmeticBatch chooses the operation and borrows managed buffers once.
-// The flat, non-null path also avoids resolving representation and validity for
-// every input value; constants and dictionaries retain the same SQL semantics.
+// Flat and constant non-null inputs avoid row-by-row representation and
+// validity lookups. Nullable and dictionary inputs use the borrowed views.
 func int64ArithmeticBatch(kind Kind, left, right, out *vector.Vector, count int) (bool, error) {
 	if left.Type.ID != types.BigInt || right.Type.ID != types.BigInt || out.Type.ID != types.BigInt || left.Type.IsUnsignedInteger() || right.Type.IsUnsignedInteger() {
 		return false, nil
@@ -29,17 +29,19 @@ func int64ArithmeticBatch(kind Kind, left, right, out *vector.Vector, count int)
 	l, _ := left.BorrowFixedWidth()
 	r, _ := right.BorrowFixedWidth()
 	dst, validity, _ := out.MutableFixedWidth()
-	ld, lv, lf := l.FlatData()
-	rd, rv, rf := r.FlatData()
-	if lf && rf && lv.AllValid(count) && rv.AllValid(count) {
+	ld, leftStride, leftValid := denseInt64Data(left, l, count)
+	rd, rightStride, rightValid := denseInt64Data(right, r, count)
+	if leftValid && rightValid {
 		for row := 0; row < count; row++ {
-			a := int64(binary.LittleEndian.Uint64(ld[row*8:]))
-			b := int64(binary.LittleEndian.Uint64(rd[row*8:]))
+			a := int64(binary.LittleEndian.Uint64(ld))
+			b := int64(binary.LittleEndian.Uint64(rd))
 			value, err := operation(a, b)
 			if err != nil {
 				return true, err
 			}
 			binary.LittleEndian.PutUint64(dst[row*8:], uint64(value))
+			ld = ld[leftStride:]
+			rd = rd[rightStride:]
 		}
 		return true, nil
 	}
@@ -57,4 +59,15 @@ func int64ArithmeticBatch(kind Kind, left, right, out *vector.Vector, count int)
 		binary.LittleEndian.PutUint64(dst[row*8:], uint64(value))
 	}
 	return true, nil
+}
+
+func denseInt64Data(v *vector.Vector, view vector.FixedWidthView, count int) ([]byte, int, bool) {
+	if v.Kind == vector.Constant {
+		data, valid := view.Value(0)
+		return data, 0, valid
+	}
+	if data, validity, flat := view.FlatData(); flat && validity.AllValid(count) {
+		return data, 8, true
+	}
+	return nil, 0, false
 }

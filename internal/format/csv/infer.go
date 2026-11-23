@@ -80,10 +80,14 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	scratchBytes := scratch.Bytes()
 	used := 0
 
+	type columnSample struct {
+		kind        inferredKind
+		pendingKind inferredKind
+		rejectedAt  []int // First rejecting record per candidate, numbered from one.
+	}
 	var names []string
-	var kinds []inferredKind
-	candidates:=inferenceCandidates(opts)
-	var possible [][]bool
+	var columns []columnSample
+	candidates := inferenceCandidates(opts)
 	row := 0
 	col := 0
 	dataRows := 0
@@ -107,20 +111,26 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	}
 	finishField := func() error {
 		raw := scratchBytes[:used]
-		nullLiteral := csvFieldNullLiteral(opts.NullLiteral, quotedField)
-		if !(row==0&&opts.Header){for len(possible)<=col{flags:=make([]bool,len(candidates));for i:=range flags{flags[i]=true};possible=append(possible,flags)};if nullLiteral==nil||!bytes.Equal(raw,nullLiteral){for i,c:=range candidates{if possible[col][i]&&!candidateAccepts(raw,c){possible[col][i]=false}}}}
 		if row == 0 {
-			if opts.Header {
-				names = append(names, string(raw))
-				kinds = append(kinds, kindUnknown)
-			} else {
-				kinds = append(kinds, observeKind(raw, nullLiteral))
-			}
+			columns = append(columns, columnSample{})
+		} else if col >= len(columns) {
+			return fmt.Errorf("csv: row %d has more than %d columns", row+1, len(columns))
+		}
+		if row == 0 && opts.Header {
+			names = append(names, string(raw))
 		} else {
-			if col >= len(kinds) {
-				return fmt.Errorf("csv: row %d has more than %d columns", row+1, len(kinds))
+			column := &columns[col]
+			column.pendingKind = observeKind(raw, csvFieldNullLiteral(opts.NullLiteral, quotedField))
+			if column.pendingKind != kindUnknown {
+				if column.rejectedAt == nil {
+					column.rejectedAt = make([]int, len(candidates))
+				}
+				for i, candidate := range candidates {
+					if column.rejectedAt[i] == 0 && !candidateAccepts(raw, candidate) {
+						column.rejectedAt[i] = row + 1
+					}
+				}
 			}
-			kinds[col] = mergeKind(kinds[col], observeKind(raw, nullLiteral))
 		}
 		used = 0
 		col++
@@ -129,13 +139,17 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 	}
 	finishRecord := func() error {
 		if row == 0 {
-			if len(kinds) == 0 {
+			if len(columns) == 0 {
 				return fmt.Errorf("csv: first row contains no columns")
 			}
-		} else if col != len(kinds) {
-			return fmt.Errorf("csv: row %d has %d columns, want %d", row+1, col, len(kinds))
+		} else if col != len(columns) {
+			return fmt.Errorf("csv: row %d has %d columns, want %d", row+1, col, len(columns))
 		}
 		if row > 0 || !opts.Header {
+			for i := range columns {
+				column := &columns[i]
+				column.kind = mergeKind(column.kind, column.pendingKind)
+			}
 			dataRows++
 		}
 		row++
@@ -185,24 +199,39 @@ func InferSchema(input []byte, opts InferenceOptions, scope *memory.Scope, bm *m
 			}
 		}
 	}
-	if len(kinds) == 0 {
+	if row == 0 {
 		return InferredSchema{}, fmt.Errorf("csv: no complete rows available for schema inference")
 	}
 	if opts.Header {
 		names = normalizeHeaderNames(names)
 	} else {
-		names = make([]string, len(kinds))
+		names = make([]string, len(columns))
 		for i := range names {
 			names[i] = fmt.Sprintf("column%d", i)
 		}
 	}
-	fields := make([]types.StructField, len(kinds))
-	formats:=make([]string,len(kinds))
-	for i := range kinds {
-		fields[i] = types.StructField{Name: names[i], Type: kindLogicalType(kinds[i])}
-		if kinds[i]!=kindUnknown&&(opts.Candidates!=nil||opts.DateFormat!=""||opts.TimestampFormat!=""||kinds[i]==kindVarchar){for j,c:=range candidates{if i<len(possible)&&possible[i][j]{if opts.Candidates!=nil||opts.DateFormat!=""||opts.TimestampFormat!=""||c.typ.ID==types.DateType||c.typ.ID==types.TimestampType{fields[i].Type=c.typ;formats[i]=c.format};break}}}
+	fields := make([]types.StructField, len(columns))
+	formats := make([]string, len(columns))
+	useCandidates := opts.Candidates != nil || opts.DateFormat != "" || opts.TimestampFormat != ""
+	for i, column := range columns {
+		fields[i] = types.StructField{Name: names[i], Type: kindLogicalType(column.kind)}
+		if column.kind == kindUnknown || (!useCandidates && column.kind != kindVarchar) {
+			continue
+		}
+		for j, rejectedAt := range column.rejectedAt {
+			// row counts complete records. A rejection from the truncated tail does not count.
+			if rejectedAt != 0 && rejectedAt <= row {
+				continue
+			}
+			candidate := candidates[j]
+			if useCandidates || candidate.typ.ID == types.DateType || candidate.typ.ID == types.TimestampType {
+				fields[i].Type = candidate.typ
+				formats[i] = candidate.format
+			}
+			break
+		}
 	}
-	return InferredSchema{Fields: fields, SampleRows: dataRows,Formats:formats}, nil
+	return InferredSchema{Fields: fields, SampleRows: dataRows, Formats: formats}, nil
 }
 
 // csvFieldNullLiteral 统一推断与执行的字段 NULL 字面量规则。

@@ -153,13 +153,41 @@ func TestInferSchemaBoundedRows(t *testing.T) {
 }
 
 func TestInferSchemaIgnoresIncompleteTailWhenNotFinal(t *testing.T) {
-	_, scope, bm := testMemory(1 << 20)
-	got, err := InferSchema([]byte("1,a\n2,partial"), InferenceOptions{Final: false}, scope, bm)
-	if err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name     string
+		input    string
+		options  InferenceOptions
+		wantRows int
+		wantType types.LogicalTypeID
+	}{
+		{name: "default types", input: "1,a\ntext,partial", wantRows: 1, wantType: types.BigInt},
+		{
+			name: "explicit candidates", input: "id,note\n42,a\n40000,partial",
+			options:  InferenceOptions{Header: true, Candidates: []types.LogicalType{{ID: types.SmallInt}, {ID: types.Integer}}},
+			wantRows: 1, wantType: types.SmallInt,
+		},
+		{name: "header only", input: "id,note\n42,partial", options: InferenceOptions{Header: true}, wantType: types.Varchar},
+		{name: "final row at EOF", input: "1,a\ntext,last", options: InferenceOptions{Final: true}, wantRows: 2, wantType: types.Varchar},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, scope, bm := testMemory(1 << 20)
+			got, err := InferSchema([]byte(tc.input), tc.options, scope, bm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.SampleRows != tc.wantRows || len(got.Fields) != 2 || got.Fields[0].Type.ID != tc.wantType {
+				t.Fatalf("schema=%+v, want %d rows, 2 columns, first column type %v", got, tc.wantRows, tc.wantType)
+			}
+		})
 	}
-	if got.SampleRows != 1 || len(got.Fields) != 2 {
-		t.Fatalf("result=%+v", got)
+}
+
+func TestInferSchemaRequiresCompleteFirstRecord(t *testing.T) {
+	_, scope, bm := testMemory(1 << 20)
+	for _, header := range []bool{false, true} {
+		if got, err := InferSchema([]byte("1,partial"), InferenceOptions{Header: header}, scope, bm); err == nil {
+			t.Fatalf("header=%t: inferred %v from an incomplete first record", header, got)
+		}
 	}
 }
 

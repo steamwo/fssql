@@ -20,11 +20,11 @@ type valueOutput interface {
 }
 
 // writeJSONValue 将一个核心 Vector 值直接编码到流，不建立 map[string]any 或 per-row JSON 对象。
-func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, typ types.LogicalType, row int) error {
+func writeJSONValue(ctx context.Context, out *managedOutput, vec *vector.Vector, typ types.LogicalType, row int) error {
 	if !vec.IsValid(row) {
 		return out.WriteString(ctx, "null")
 	}
-	var tmp [96]byte
+	tmp := out.scalarScratch[:0]
 	switch typ.ID {
 	case types.Boolean:
 		v, _ := vec.Bool(row)
@@ -67,7 +67,7 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 		v, _ := vec.Int128(row)
 		return out.Write(ctx, appendScaledInt128(tmp[:0], v, int(typ.Decimal.Scale)))
 	case types.Varchar:
-		v, _ := vec.String(row)
+		v, _ := vec.Bytes(row)
 		return writeJSONString(ctx, out, v)
 	case types.DateType:
 		v, _ := vec.Int32(row)
@@ -125,7 +125,7 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 					return err
 				}
 			}
-			if err := writeJSONString(ctx, out, typ.Fields[i].Name); err != nil {
+			if err := writeJSONString(ctx, out, []byte(typ.Fields[i].Name)); err != nil {
 				return err
 			}
 			if err := out.WriteContextByte(ctx, ':'); err != nil {
@@ -142,7 +142,7 @@ func writeJSONValue(ctx context.Context, out valueOutput, vec *vector.Vector, ty
 }
 
 // writeJSONString 流式转义 JSON 字符串，仅对 JSON 必须字符做转义并原样保留 UTF-8。
-func writeJSONString(ctx context.Context, out valueOutput, s string) error {
+func writeJSONString(ctx context.Context, out *managedOutput, s []byte) error {
 	if err := out.WriteContextByte(ctx, '"'); err != nil {
 		return err
 	}
@@ -153,7 +153,7 @@ func writeJSONString(ctx context.Context, out valueOutput, s string) error {
 			continue
 		}
 		if start < i {
-			if err := out.WriteString(ctx, s[start:i]); err != nil {
+			if err := out.Write(ctx, s[start:i]); err != nil {
 				return err
 			}
 		}
@@ -197,7 +197,7 @@ func writeJSONString(ctx context.Context, out valueOutput, s string) error {
 		start = i + 1
 	}
 	if start < len(s) {
-		if err := out.WriteString(ctx, s[start:]); err != nil {
+		if err := out.Write(ctx, s[start:]); err != nil {
 			return err
 		}
 	}

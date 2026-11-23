@@ -1,6 +1,7 @@
 package export
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math"
@@ -45,20 +46,56 @@ func(w *CSVWriter)WriteChunk(ctx context.Context,chunk *vector.DataChunk)error{i
 func(w *CSVWriter)Flush(ctx context.Context)error{if w==nil||w.out==nil{return ErrWriterClosed};if err:=w.ensureStarted(ctx);err!=nil{return err};return w.out.Flush(ctx)}
 func(w *CSVWriter)Close(ctx context.Context)(WriteResult,error){if w==nil||w.out==nil{return WriteResult{},ErrWriterClosed};if err:=w.ensureStarted(ctx);err!=nil{_ = w.out.Abort(context.Background());return WriteResult{},err};return w.out.Close(ctx)}
 func(w *CSVWriter)Abort(ctx context.Context)error{if w==nil||w.out==nil{return nil};return w.out.Abort(ctx)}
-func(w *CSVWriter)ensureStarted(ctx context.Context)error{if w.started{return nil};w.started=true;if !w.opts.Header{return nil};for i:=range w.schema{if i!=0{if err:=w.out.WriteContextByte(ctx,w.opts.Delimiter);err!=nil{return err}};if err:=w.writeStringField(ctx,w.schema[i].Name,false);err!=nil{return err}};return w.out.WriteString(ctx,w.opts.Newline)}
+func (w *CSVWriter) ensureStarted(ctx context.Context) error {
+	if w.started {
+		return nil
+	}
+	w.started = true
+	if !w.opts.Header {
+		return nil
+	}
+	for i, col := range w.schema {
+		if i != 0 {
+			if err := w.out.WriteContextByte(ctx, w.opts.Delimiter); err != nil {
+				return err
+			}
+		}
+		if err := w.writeTextField(ctx, []byte(col.Name)); err != nil {
+			return err
+		}
+	}
+	return w.out.WriteString(ctx, w.opts.Newline)
+}
 
 func(w *CSVWriter)writeField(ctx context.Context,vec *vector.Vector,typ types.LogicalType,row int)error{
 	if !vec.IsValid(row){return w.out.WriteString(ctx,w.opts.NullString)}
 	if w.opts.DuckDBCompatible && typ.IsBlob(){return w.writeDuckDBBlob(ctx,vec,row)}
 	if typ.IsBlob(){b,_:=vec.Bytes(row);return w.writeBlobField(ctx,b)}
-	if typ.ID==types.Varchar{b,_:=vec.Bytes(row);return w.writeStringField(ctx,string(b),w.opts.NullString==""&&len(b)==0)}
+	if typ.ID == types.Varchar {
+		value, _ := vec.Bytes(row)
+		return w.writeTextField(ctx, value)
+	}
 	if typ.ID==types.List||typ.ID==types.Struct{if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};quoted:=csvQuotedOutput{out:w.out,quote:w.opts.Quote};if err:=writeDuckDBTextValue(ctx,&quoted,vec,typ,row);err!=nil{return err};return w.out.WriteContextByte(ctx,w.opts.Quote)}
 	return w.writeScalarField(ctx,vec,typ,row)
 }
-func(w *CSVWriter)writeStringField(ctx context.Context,value string,forceQuote bool)error{needsQuote:=forceQuote||w.opts.ForceQuote||strings.IndexByte(value,w.opts.Delimiter)>=0||strings.IndexByte(value,w.opts.Quote)>=0||strings.ContainsAny(value,"\r\n")||value==w.opts.NullString;if !needsQuote{return w.out.WriteString(ctx,value)};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};for start:=0;;{i:=strings.IndexByte(value[start:],w.opts.Quote);if i<0{if err:=w.out.WriteString(ctx,value[start:]);err!=nil{return err};break};i+=start;if err:=w.out.WriteString(ctx,value[start:i]);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};if err:=w.out.WriteContextByte(ctx,w.opts.Quote);err!=nil{return err};start=i+1};return w.out.WriteContextByte(ctx,w.opts.Quote)}
+func (w *CSVWriter) writeTextField(ctx context.Context, value []byte) error {
+	needsQuote := w.opts.ForceQuote || string(value) == w.opts.NullString ||
+		bytes.IndexByte(value, w.opts.Delimiter) >= 0 ||
+		bytes.IndexByte(value, w.opts.Quote) >= 0 || bytes.ContainsAny(value, "\r\n")
+	if !needsQuote {
+		return w.out.Write(ctx, value)
+	}
+	if err := w.out.WriteContextByte(ctx, w.opts.Quote); err != nil {
+		return err
+	}
+	quoted := csvQuotedOutput{out: w.out, quote: w.opts.Quote}
+	if err := quoted.Write(ctx, value); err != nil {
+		return err
+	}
+	return w.out.WriteContextByte(ctx, w.opts.Quote)
+}
 
-func writeCSVScalar(ctx context.Context,out valueOutput,vec *vector.Vector,typ types.LogicalType,row int)error{
-	var tmp [96]byte
+func writeCSVScalar(ctx context.Context, out valueOutput, tmp []byte, vec *vector.Vector, typ types.LogicalType, row int) error {
 	if typ.IsUnsignedInteger(){switch typ.ID{case types.TinyInt:v,_:=vec.Uint8(row);return out.Write(ctx,strconv.AppendUint(tmp[:0],uint64(v),10));case types.SmallInt:v,_:=vec.Uint16(row);return out.Write(ctx,strconv.AppendUint(tmp[:0],uint64(v),10));case types.Integer:v,_:=vec.Uint32(row);return out.Write(ctx,strconv.AppendUint(tmp[:0],uint64(v),10));case types.BigInt:v,_:=vec.Uint64(row);return out.Write(ctx,strconv.AppendUint(tmp[:0],v,10))}}
 	switch typ.ID{
 	case types.Boolean:v,_:=vec.Bool(row);if v{return out.WriteString(ctx,"true")};return out.WriteString(ctx,"false")
@@ -78,17 +115,40 @@ func writeCSVScalar(ctx context.Context,out valueOutput,vec *vector.Vector,typ t
 func appendTimestampText(dst []byte,raw int64,typ types.LogicalType)[]byte{var t time.Time;var layout string;switch typ.Timestamp.Unit{case types.TimestampNanos:sec:=raw/1_000_000_000;nanos:=raw%1_000_000_000;t=time.Unix(sec,nanos).UTC();layout="2006-01-02 15:04:05.999999999";case types.TimestampMillis:t=time.UnixMilli(raw).UTC();layout="2006-01-02 15:04:05.999";default:t=time.UnixMicro(raw).UTC();layout="2006-01-02 15:04:05.999999"};if typ.Timestamp.AdjustedToUTC{return t.AppendFormat(dst,time.RFC3339Nano)};return t.AppendFormat(dst,layout)}
 
 type csvQuotedOutput struct{out *managedOutput;quote byte}
-func(q *csvQuotedOutput)Write(ctx context.Context,p []byte)error{for _,b:=range p{if err:=q.WriteContextByte(ctx,b);err!=nil{return err}};return nil}
+func (q *csvQuotedOutput) Write(ctx context.Context, p []byte) error {
+	for len(p) > 0 {
+		index := bytes.IndexByte(p, q.quote)
+		if index < 0 {
+			return q.out.Write(ctx, p)
+		}
+		if err := q.out.Write(ctx, p[:index]); err != nil {
+			return err
+		}
+		if err := q.WriteContextByte(ctx, q.quote); err != nil {
+			return err
+		}
+		p = p[index+1:]
+	}
+	return nil
+}
 func(q *csvQuotedOutput)WriteString(ctx context.Context,s string)error{for i:=0;i<len(s);i++{if err:=q.WriteContextByte(ctx,s[i]);err!=nil{return err}};return nil}
 func(q *csvQuotedOutput)WriteContextByte(ctx context.Context,b byte)error{if err:=q.out.WriteContextByte(ctx,b);err!=nil{return err};if b==q.quote{return q.out.WriteContextByte(ctx,b)};return nil}
 
-func writeDuckDBTextValue(ctx context.Context,out valueOutput,vec *vector.Vector,typ types.LogicalType,row int)error{
+func writeDuckDBTextValue(ctx context.Context, out *csvQuotedOutput, vec *vector.Vector, typ types.LogicalType, row int) error {
 	if !vec.IsValid(row){return out.WriteString(ctx,"NULL")}
 	if typ.ID==types.Varchar{b,_:=vec.Bytes(row);if err:=out.WriteContextByte(ctx,'\'');err!=nil{return err};for i:=0;i<len(b);i++{if b[i]=='\''{if err:=out.WriteContextByte(ctx,'\'');err!=nil{return err}};if err:=out.WriteContextByte(ctx,b[i]);err!=nil{return err}};return out.WriteContextByte(ctx,'\'')}
 	if typ.ID==types.List{entry,_:=vec.ListEntry(row);children:=vec.Children();if typ.Child==nil||len(children)!=1{return fmt.Errorf("malformed LIST vector")};if err:=out.WriteContextByte(ctx,'[');err!=nil{return err};for i:=uint32(0);i<entry.Length;i++{if i>0{if err:=out.WriteString(ctx,", ");err!=nil{return err}};if err:=writeDuckDBTextValue(ctx,out,children[0],*typ.Child,int(entry.Offset+i));err!=nil{return err}};return out.WriteContextByte(ctx,']')}
 	if typ.ID==types.Struct{children:=vec.Children();if len(children)!=len(typ.Fields){return fmt.Errorf("malformed STRUCT vector")};if err:=out.WriteContextByte(ctx,'{');err!=nil{return err};for i,f:=range typ.Fields{if i>0{if err:=out.WriteString(ctx,", ");err!=nil{return err}};if err:=out.WriteContextByte(ctx,'\'');err!=nil{return err};if err:=out.WriteString(ctx,f.Name);err!=nil{return err};if err:=out.WriteString(ctx,"': ");err!=nil{return err};if err:=writeDuckDBTextValue(ctx,out,children[i],f.Type,row);err!=nil{return err}};return out.WriteContextByte(ctx,'}')}
-	if typ.ID==types.DateType||typ.ID==types.TimestampType{if err:=out.WriteContextByte(ctx,'\'');err!=nil{return err};if err:=writeCSVScalar(ctx,out,vec,typ,row);err!=nil{return err};return out.WriteContextByte(ctx,'\'')}
+	if typ.ID == types.DateType || typ.ID == types.TimestampType {
+		if err := out.WriteContextByte(ctx, '\''); err != nil {
+			return err
+		}
+		if err := writeCSVScalar(ctx, out, out.out.scalarScratch[:0], vec, typ, row); err != nil {
+			return err
+		}
+		return out.WriteContextByte(ctx, '\'')
+	}
 	if typ.ID==types.Float{v,_:=vec.Float32(row);if math.IsNaN(float64(v)){return out.WriteString(ctx,"nan")}}
 	if typ.ID==types.Double{v,_:=vec.Float64(row);if math.IsNaN(v){return out.WriteString(ctx,"nan")}}
-	return writeCSVScalar(ctx,out,vec,typ,row)
+	return writeCSVScalar(ctx, out, out.out.scalarScratch[:0], vec, typ, row)
 }
