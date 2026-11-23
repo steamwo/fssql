@@ -316,7 +316,7 @@ func TestParquetBindAndCountUseMaterializedRanges(t *testing.T) {
 	d := &streamDriver{data: string(data)}
 	q, r, _, bm := setup(t, d, 8<<20, 1<<20)
 	shared, _ := parquet.NewMetadataCache(8)
-	cache := parquet.NewQueryMetadataCache(shared)
+	cache := parquet.NewQueryMetadataCache(shared, nil)
 	binder, err := parquet.NewSourceBinder(r.Registry(), cache, q.Memory, bm)
 	if err != nil {
 		t.Fatal(err)

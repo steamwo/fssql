@@ -200,10 +200,12 @@ func projectedReaderForNode(driver vfs.Driver, uri vfs.URI, identity vfs.ObjectI
 		if err != nil {
 			return nil, err
 		}
-		for _, chunk := range rg.Columns {
-			if chunk.MetaData == meta {
-				cursor.configurePageIndex(chunk)
-				break
+		if meta.crypto == nil {
+			for _, chunk := range rg.Columns {
+				if chunk.MetaData == meta {
+					cursor.configurePageIndex(chunk)
+					break
+				}
 			}
 		}
 		return &scalarColumnReader{cursor: cursor}, nil

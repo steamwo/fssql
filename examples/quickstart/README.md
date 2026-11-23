@@ -129,7 +129,7 @@ go test ./examples/quickstart -count=1
   - 目标已存在时不会覆盖。
 - SQL `COPY (...) TO '...' (FORMAT ..., COMPRESSION ...)` 与 `CopyTo` 共用 Export/VFS 原子提交路径。
 - `CREATE EXTERNAL TABLE name USING read_parquet('...')` 通过真实表函数 Bind 获取 schema，不保存 SQL 文本。
-- 加密导出：`CopyOptions.Encryption` + `Config.ParquetKeys`。resolver 按 `(keyID, algorithm)` 返回 16 字节（AES-128-GCM）或 32 字节（AES-256-GCM）；SQL 和清单只保存 key identity。公共包不提供通用加密文件读取密钥注入入口。
+- 加密导出：`CopyOptions.Encryption` + `Config.ParquetKeys`。resolver 按 `(keyID, algorithm)` 返回 16 字节（AES-128-GCM）或 32 字节（AES-256-GCM）。配置 `Config.ParquetReadKeys` 按 key ID 取钥后，可以用 `read_parquet()` 查回。
 
 ### 6. Catalog DDL、DESCRIBE 与元数据
 
@@ -173,7 +173,7 @@ go test ./examples/quickstart -count=1
 ## 边界与未覆盖项
 
 - S3/远程协议需要真实端点与凭据，quickstart 只展示配置结构。
-- 加密 Parquet 只演示导出；公共包没有通用加密读取密钥注入接口。
+- 加密 Parquet 读回支持 fssql 导出的加密 footer 文件，所有列共用同一密钥。
 - LIST/STRUCT 只公开类型元数据，`Chunk` 没有嵌套元素值访问器，行式适配器会拒绝非 NULL 嵌套值。
 - 能力矩阵中列出的 `parquet_schema`/`parquet_file_metadata` 在当前分支的公共函数目录中未注册；需要列定义时使用 `DESCRIBE SELECT * FROM read_parquet(...)`。
 - 事务、原生持久化表、`UPDATE`/`DELETE`/`MERGE`、递归 CTE、一般窗口 frame 等仍不在当前公共能力范围内。

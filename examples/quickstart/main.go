@@ -123,6 +123,7 @@ func openEnvironment(root string) (*environment, error) {
 	sqlConfig.TableFunctions = []gosql.TableFunction{demoRowsTableFunction(env.sqlSource)}
 	sqlConfig.ScalarFunctions = demoScalarFunctions(hmacFunction)
 	sqlConfig.ParquetKeys = demoKeyResolver
+	sqlConfig.ParquetReadKeys = demoReadKeyResolver
 	sqlDB, err := gosql.OpenSQLDB(sqlConfig)
 	if err != nil {
 		_ = native.Close()
