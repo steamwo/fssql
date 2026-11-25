@@ -338,14 +338,50 @@ type Column struct {
 }
 
 func (db *DB) QueryChunks(ctx context.Context, sql string, fn func(*Chunk) error) ([]Column, error) {
+	return db.QueryChunksWithArgs(ctx, sql, fn)
+}
+
+// QueryChunksWithArgs binds SQL value parameters and streams chunks to fn.
+func (db *DB) QueryChunksWithArgs(ctx context.Context, sql string, fn func(*Chunk) error, args ...any) ([]Column, error) {
+	return db.queryChunks(ctx, sql, fn, args, nil)
+}
+
+func (db *DB) queryChunks(ctx context.Context, sql string, fn func(*Chunk) error, args []any, stats *QueryStats) ([]Column, error) {
 	if fn == nil {
 		return nil, errors.New("gosql: nil chunk callback")
 	}
-	q, prepared, columns, err := db.prepare(ctx, sql)
+	var start time.Time
+	var inputStats *vfs.InputStats
+	if stats != nil {
+		ctx, inputStats = vfs.WithInputStats(ctx)
+		defer func() {
+			stats.FilesMatched, stats.FilesRead, stats.ReadRequests, stats.BytesRead = inputStats.Snapshot()
+		}()
+		start = time.Now()
+	}
+	q, prepared, columns, err := db.prepareWithArgs(ctx, sql, args)
+	if stats != nil {
+		stats.PlanningTime = time.Since(start)
+	}
 	if err != nil {
 		return nil, err
 	}
-	runErr := prepared.Run(q, &borrowedChunkSink{callback: fn})
+	var rows, chunks atomic.Int64
+	callback := fn
+	if stats != nil {
+		start = time.Now()
+		callback = func(chunk *Chunk) error {
+			rows.Add(int64(chunk.RowCount()))
+			chunks.Add(1)
+			return fn(chunk)
+		}
+	}
+	runErr := prepared.Run(q, &borrowedChunkSink{callback: callback})
+	if stats != nil {
+		stats.ExecutionTime = time.Since(start)
+		stats.Rows, stats.Chunks = rows.Load(), chunks.Load()
+		stats.PeakManagedBytes, stats.PeakTempBytes = q.Memory.Peak(), q.Temp.Peak()
+	}
 	closeErr := q.Close()
 	return columns, errors.Join(runErr, closeErr)
 }

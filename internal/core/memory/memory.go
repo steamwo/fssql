@@ -53,11 +53,13 @@ type Scope struct {
 	mu      sync.Mutex
 	closed  bool
 	used    int64
+	peak    int64
 	byTag   map[Tag]int64
 }
 
 func (m *Manager) NewScope() *Scope      { return &Scope{manager: m, byTag: make(map[Tag]int64)} }
 func (s *Scope) Used() int64             { s.mu.Lock(); defer s.mu.Unlock(); return s.used }
+func (s *Scope) Peak() int64             { s.mu.Lock(); defer s.mu.Unlock(); return s.peak }
 func (s *Scope) UsedByTag(tag Tag) int64 { s.mu.Lock(); defer s.mu.Unlock(); return s.byTag[tag] }
 func (s *Scope) Reserve(tag Tag, n int64) (*Reservation, error) {
 	s.mu.Lock()
@@ -69,6 +71,7 @@ func (s *Scope) Reserve(tag Tag, n int64) (*Reservation, error) {
 		return nil, err
 	}
 	s.used += n
+	s.peak = max(s.peak, s.used)
 	s.byTag[tag] += n
 	return &Reservation{scope: s, tag: tag, size: n}, nil
 }
@@ -118,6 +121,7 @@ func (r *Reservation) Resize(n int64) error {
 		s.manager.release(-delta)
 	}
 	s.used += delta
+	s.peak = max(s.peak, s.used)
 	s.byTag[r.tag] += delta
 	r.size = n
 	return nil

@@ -71,7 +71,12 @@ type ExportResult struct {
 // CopyTo binds query once and sends its native chunks through the same Export/VFS
 // atomic commit path used by SQL COPY. Failure returns a zero result.
 func (db *DB) CopyTo(ctx context.Context, querySQL, destination string, options CopyOptions) (ExportResult, error) {
-	q, prepared, columns, err := db.prepare(ctx, querySQL)
+	return db.CopyToWithArgs(ctx, querySQL, destination, options)
+}
+
+// CopyToWithArgs binds value parameters in the source query before exporting it.
+func (db *DB) CopyToWithArgs(ctx context.Context, querySQL, destination string, options CopyOptions, args ...any) (ExportResult, error) {
+	q, prepared, columns, err := db.prepareWithArgs(ctx, querySQL, args)
 	if err != nil {
 		return ExportResult{}, err
 	}
