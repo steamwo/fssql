@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steamwo/fssql/internal/core/stats"
 	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/execution/pipeline"
 	"github.com/steamwo/fssql/internal/function"
@@ -40,6 +41,7 @@ type InternalScanOpenAdapter struct {
 // RuntimeScanSourceFactory 实现 PhysicalPlan lowering 的 generic scan source factory。
 // 它只负责 FunctionCatalog 校验与 immutable dispatch，不包含任何格式/协议实现。
 type RuntimeScanSourceFactory struct {
+	relationStats stats.Provider
 	functions *function.Catalog                     // functions 是唯一 FunctionCatalog。
 	adapters  map[function.ID]ScanOpenFunc          // adapters 构造后不可变。
 	internal  map[string]ScanOpenFunc               // internal 保存 statement-scoped virtual source callback，不构成 SQL FunctionCatalog surface。
@@ -90,6 +92,7 @@ func (f *RuntimeScanSourceFactory) WithInternalAdapters(adapters []InternalScanO
 		return nil, fmt.Errorf("session: too many internal scan adapters: %d > %d", len(adapters), maxScanOpenAdapters)
 	}
 	out := &RuntimeScanSourceFactory{
+		relationStats: f.relationStats,
 		functions: f.functions,
 		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)),
 		internal:  make(map[string]ScanOpenFunc, len(f.internal)+len(adapters)),

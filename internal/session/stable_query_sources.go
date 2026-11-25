@@ -109,6 +109,7 @@ func (f *StableQuerySourceFactory) NewQuerySources(q *query.Context) ([]TableBin
 	if err != nil {
 		return nil, nil, err
 	}
+	scans.relationStats = resolver.statistics
 	// information_schema.columns 是 Planner-only virtual relation，不进入 FunctionCatalog。
 	// adapter 每 Query 绑定当前 MemoryScope；真正 Catalog snapshot 已在 Prepare 阶段编码进 internal ScanSpec。
 	scans, err = scans.WithInternalAdapters([]InternalScanOpenAdapter{informationSchemaScanAdapter(q.Memory, f.Buffers)})

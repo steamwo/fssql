@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/steamwo/fssql/internal/core/stats"
 	"github.com/steamwo/fssql/internal/core/types"
@@ -25,11 +26,25 @@ type fileSetBindFunc func(context.Context, string) (*fileset.ScanSet, error)
 // StableTableFunctionResolver 把 FunctionCatalog 的 Stable table function 映射到真实格式 Bind。
 // 它属于 session/engine composition boundary，不把 Parquet/CSV/JSON 类型泄漏进 SQL Binder ABI。
 type StableTableFunctionResolver struct {
-	parquet sourceBindFunc  // parquet 复用 parquet.SourceBinder.Bind。
-	csv     sourceBindFunc  // csv 复用 csv.SourceBinder.Bind。
-	json    sourceBindFunc  // json 复用 JSONBinder.Bind。
-	ndjson  sourceBindFunc  // ndjson 复用 NDJSONBinder.Bind。
-	glob    fileSetBindFunc // glob 只冻结并返回 FileSetPlanner ScanSet。
+	parquet    sourceBindFunc  // parquet 复用 parquet.SourceBinder.Bind。
+	csv        sourceBindFunc  // csv 复用 csv.SourceBinder.Bind。
+	json       sourceBindFunc  // json 复用 JSONBinder.Bind。
+	ndjson     sourceBindFunc  // ndjson 复用 NDJSONBinder.Bind。
+	glob       fileSetBindFunc // glob 只冻结并返回 FileSetPlanner ScanSet。
+	statistics *boundSourceStatistics
+}
+
+// Only the statement's own bindings populate these snapshot estimates.
+type boundSourceStatistics struct {
+	entries sync.Map
+}
+
+func (s *boundSourceStatistics) Lookup(_ context.Context, fp stats.DatasetFingerprint) (stats.RelationStatistics, bool, error) {
+	value, ok := s.entries.Load(fp)
+	if !ok {
+		return stats.RelationStatistics{}, false, nil
+	}
+	return value.(stats.RelationStatistics), true, nil
 }
 
 var _ binder.TableFunctionResolver = (*StableTableFunctionResolver)(nil)
@@ -46,11 +61,17 @@ func NewStableTableFunctionResolver(
 		return nil, fmt.Errorf("session: Stable table function resolver requires VFS and all Stable source binders")
 	}
 	planner := fileset.NewPlanner(registry)
+	statistics := &boundSourceStatistics{}
 	return &StableTableFunctionResolver{
+		statistics: statistics,
 		parquet: func(ctx context.Context, source string) ([]types.StructField, string, error) {
 			binding, err := parquetBinder.Bind(ctx, source, parquet.SourceBindOptions{})
 			if err != nil {
 				return nil, "", err
+			}
+			if rows, ok := binding.RowCount(); ok {
+				fp := stats.DatasetFingerprint(binding.Fingerprint())
+				statistics.entries.Store(fp, stats.RelationStatistics{Fingerprint: fp, Source: stats.StorageNative, Confidence: 1, Rows: rows})
 			}
 			return cloneStructFields(binding.Schema().Fields), binding.Fingerprint(), nil
 		},
@@ -58,6 +79,23 @@ func NewStableTableFunctionResolver(
 			binding, err := csvBinder.Bind(ctx, source, csv.SourceBindOptions{})
 			if err != nil {
 				return nil, "", err
+			}
+			// A coarse byte-to-row estimate provides relative input sizes without
+			// sampling explicit-schema CSVs or requiring an extra file read.
+			var rows uint64
+			for _, file := range binding.ScanSet().Files() {
+				if file.Size > 0 {
+					estimate := uint64(file.Size-1)/32 + 1
+					if estimate > ^uint64(0)-rows {
+						rows = ^uint64(0)
+						break
+					}
+					rows += estimate
+				}
+			}
+			if rows > 0 {
+				fp := stats.DatasetFingerprint(binding.Fingerprint())
+				statistics.entries.LoadOrStore(fp, stats.RelationStatistics{Fingerprint: fp, Source: stats.StorageEstimated, Confidence: 0.2, Rows: rows})
 			}
 			return cloneStructFields(binding.Schema().Fields), binding.Fingerprint(), nil
 		},

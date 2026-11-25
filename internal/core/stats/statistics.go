@@ -10,6 +10,7 @@ const (
 	StorageNative
 	CatalogPersistent
 	Sampled
+	StorageEstimated // Estimated from source size without reading rows.
 )
 
 // Confidence 是 [0,1] 的统计置信度。

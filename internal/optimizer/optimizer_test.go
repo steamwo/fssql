@@ -69,39 +69,6 @@ func TestProjectionAndLimitPushdownCandidatesRemainResidual(t *testing.T) {
 	}
 }
 
-func TestJoinOrderCandidateUsesStatsWithoutRewritingBoundTree(t *testing.T) {
-	a, as := testScan("a", 1000)
-	b, bs := testScan("b", 10)
-	c, cs := testScan("c", 100)
-	pred := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Boolean}}
-	ab := &planner.LogicalPlan{Kind: planner.LogicalJoin, Join: planner.JoinInner, Predicate: pred, Children: []*planner.LogicalPlan{a, b}}
-	root := &planner.LogicalPlan{Kind: planner.LogicalJoin, Join: planner.JoinInner, Predicate: pred, Children: []*planner.LogicalPlan{ab, c}}
-	o := &Optimizer{Statistics: fakeStats{a.Scan.Fingerprint: as, b.Scan.Fingerprint: bs, c.Scan.Fingerprint: cs}}
-	order, err := o.JoinOrder(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"b", "c", "a"}
-	for i := range want {
-		if order[i] != want[i] {
-			t.Fatalf("order=%v", order)
-		}
-	}
-	if root.Children[0] != ab || ab.Children[0] != a {
-		t.Fatal("join order helper rewrote bound tree")
-	}
-}
-
-func TestOuterJoinIsNotReorderable(t *testing.T) {
-	a, _ := testScan("a", 1)
-	b, _ := testScan("b", 1)
-	pred := &binder.BoundExpression{Kind: binder.BoundLiteral, Type: types.LogicalType{ID: types.Boolean}}
-	root := &planner.LogicalPlan{Kind: planner.LogicalJoin, Join: planner.JoinLeft, Predicate: pred, Children: []*planner.LogicalPlan{a, b}}
-	if _, err := (&Optimizer{}).JoinOrder(context.Background(), root); err == nil {
-		t.Fatal("outer join must not reorder")
-	}
-}
-
 func TestPhysicalLoweringUsesHashAndCrossJoinKinds(t *testing.T) {
 	a, as := testScan("a", 10)
 	b, bs := testScan("b", 20)

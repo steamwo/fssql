@@ -22,6 +22,7 @@ func (f *RuntimeScanSourceFactory) WithAdapters(adapters []ScanOpenAdapter) (*Ru
 		return nil, fmt.Errorf("session: too many scan open adapters: %d > %d", len(f.adapters)+len(adapters), maxScanOpenAdapters)
 	}
 	out := &RuntimeScanSourceFactory{
+		relationStats: f.relationStats,
 		functions: f.functions,
 		adapters:  make(map[function.ID]ScanOpenFunc, len(f.adapters)+len(adapters)),
 		internal:  make(map[string]ScanOpenFunc, len(f.internal)),

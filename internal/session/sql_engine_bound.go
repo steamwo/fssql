@@ -20,7 +20,7 @@ func (e *StableSQLEngine) prepareBoundQuery(ctx context.Context, q *query.Contex
 	zoneName,workers:=e.sessionSnapshot()
  markQueryTimeZone(bound,zoneName)
  queryPlanner := planner.NewQueryPlanner(e.functions, relations)
-	opt := &optimizer.Optimizer{Statistics: e.config.Statistics}
+	opt := e.queryOptimizer(scans)
 	rewritten, subqueries, err := rewriteScalarSubqueries(ctx, queryPlanner, opt, bound)
 	if err != nil {
 		return nil, err
@@ -42,4 +42,12 @@ func (e *StableSQLEngine) prepareBoundQuery(ctx context.Context, q *query.Contex
 		return nil, err
 	}
 	return &PreparedSQLQuery{engine: e, physical: physical, scans: scans, subqueries: subqueries,zoneName:zoneName,workers:workers}, nil
+}
+
+func (e *StableSQLEngine) queryOptimizer(scans *RuntimeScanSourceFactory) *optimizer.Optimizer {
+	statistics := e.config.Statistics
+	if statistics == nil {
+		statistics = scans.relationStats
+	}
+	return &optimizer.Optimizer{Statistics: statistics}
 }

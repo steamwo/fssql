@@ -11,7 +11,7 @@ import (
 	"github.com/steamwo/fssql/internal/sql/binder"
 )
 
-// Optimizer 实现 rule optimizer + statistics/cardinality + join-order candidate + physical cost model。
+// Optimizer applies logical rewrites, estimates cardinality and lowers physical plans.
 type Optimizer struct {
 	Statistics stats.Provider // Statistics 是唯一 statistics 数据源 contract；可为空表示 Unknown。
 }
@@ -25,6 +25,10 @@ func (o *Optimizer) Optimize(ctx context.Context, logical *planner.LogicalPlan) 
 		return nil, err
 	}
 	copyPlan := cloneLogical(logical)
+	copyPlan, err := o.reorderJoins(ctx, copyPlan)
+	if err != nil {
+		return nil, err
+	}
 	o.markPushdownCandidates(copyPlan)
 	physical, err := o.lower(ctx, copyPlan)
 	if err != nil {
@@ -95,6 +99,19 @@ func (o *Optimizer) markRequiredScanColumns(node *planner.LogicalPlan, needed ma
 			return
 		case planner.LogicalFilter:
 			collectBoundColumnIndexes(node.Predicate, needed)
+		case planner.LogicalProject:
+			columns, ok := projectionColumns(node.Projection)
+			if !ok || len(node.Children) != 1 {
+				return
+			}
+			mapped := make(map[int]struct{}, len(needed))
+			for index := range needed {
+				if index < 0 || index >= len(columns) {
+					return
+				}
+				mapped[columns[index]] = struct{}{}
+			}
+			needed = mapped
 		case planner.LogicalSort:
 			// Cached rows are shared by consumers with different projections.
 			// Preserve the complete materialized schema for every cache reader.
@@ -334,17 +351,7 @@ func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, childr
 	case planner.LogicalOneRow:
 		return planner.CardinalityEstimate{Rows: 1, Confidence: 1}, nil
 	case planner.LogicalScan:
-		if o.Statistics == nil || p.Scan == nil || p.Scan.Fingerprint == "" {
-			return planner.CardinalityEstimate{}, nil
-		}
-		s, ok, err := o.Statistics.Lookup(ctx, p.Scan.Fingerprint)
-		if err != nil {
-			return planner.CardinalityEstimate{}, err
-		}
-		if !ok || !s.Valid() || s.Fingerprint != p.Scan.Fingerprint {
-			return planner.CardinalityEstimate{}, nil
-		}
-		return planner.CardinalityEstimate{Rows: s.Rows, Confidence: float64(s.Confidence)}, nil
+		return o.scanEstimate(ctx, p.Scan)
 	case planner.LogicalFilter:
 		return scale(children[0].Estimate, 0.1, 0.7), nil
 	case planner.LogicalProject:
@@ -379,7 +386,13 @@ func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, childr
 	case planner.LogicalJoin:
 		left, right := children[0].Estimate, children[1].Estimate
 		rows := saturatingMul(left.Rows, right.Rows)
-		if p.Join != planner.JoinCross {
+		if p.Join == planner.JoinInner && left.Confidence > 0 && right.Confidence > 0 {
+			// Without key distributions, use the larger input as a heuristic
+			// for equi-joins instead of growing the estimate quadratically.
+			if left.Rows > 0 && right.Rows > 0 {
+				rows = max(left.Rows, right.Rows)
+			}
+		} else if p.Join != planner.JoinCross {
 			rows = uint64(float64(rows) * 0.1)
 		}
 		return planner.CardinalityEstimate{Rows: rows, Confidence: minFloat(left.Confidence, right.Confidence) * 0.5}, nil
@@ -388,60 +401,18 @@ func (o *Optimizer) estimate(ctx context.Context, p *planner.LogicalPlan, childr
 	}
 }
 
-// JoinOrder 返回 inner/cross join leaf 的统计驱动候选顺序；它不重写已绑定树，避免 ColumnIndex 失配。
-func (o *Optimizer) JoinOrder(ctx context.Context, root *planner.LogicalPlan) ([]string, error) {
-	leaves := make([]joinLeaf, 0, 4)
-	if !collectReorderableLeaves(root, &leaves) {
-		return nil, fmt.Errorf("join order requires an inner/cross join tree of scans")
+func (o *Optimizer) scanEstimate(ctx context.Context, scan *planner.ScanSpec) (planner.CardinalityEstimate, error) {
+	if o.Statistics == nil || scan == nil || scan.Fingerprint == "" {
+		return planner.CardinalityEstimate{}, nil
 	}
-	for i := range leaves {
-		if o.Statistics == nil || leaves[i].fingerprint == "" {
-			continue
-		}
-		s, ok, err := o.Statistics.Lookup(ctx, leaves[i].fingerprint)
-		if err != nil {
-			return nil, err
-		}
-		if ok && s.Valid() && s.Fingerprint == leaves[i].fingerprint {
-			leaves[i].rows = s.Rows
-			leaves[i].known = true
-		}
+	s, ok, err := o.Statistics.Lookup(ctx, scan.Fingerprint)
+	if err != nil {
+		return planner.CardinalityEstimate{}, err
 	}
-	sort.SliceStable(leaves, func(i, j int) bool {
-		if leaves[i].known != leaves[j].known {
-			return leaves[i].known
-		}
-		if leaves[i].known && leaves[i].rows != leaves[j].rows {
-			return leaves[i].rows < leaves[j].rows
-		}
-		return leaves[i].relationID < leaves[j].relationID
-	})
-	out := make([]string, len(leaves))
-	for i, leaf := range leaves {
-		out[i] = leaf.relationID
+	if !ok || !s.Valid() || !(s.Confidence > 0) || s.Fingerprint != scan.Fingerprint {
+		return planner.CardinalityEstimate{}, nil
 	}
-	return out, nil
-}
-
-type joinLeaf struct {
-	relationID  string
-	fingerprint stats.DatasetFingerprint
-	rows        uint64
-	known       bool
-}
-
-func collectReorderableLeaves(p *planner.LogicalPlan, out *[]joinLeaf) bool {
-	if p == nil {
-		return false
-	}
-	if p.Kind == planner.LogicalScan && p.Scan != nil {
-		*out = append(*out, joinLeaf{relationID: p.Scan.RelationID, fingerprint: p.Scan.Fingerprint})
-		return true
-	}
-	if p.Kind != planner.LogicalJoin || (p.Join != planner.JoinInner && p.Join != planner.JoinCross) || len(p.Children) != 2 {
-		return false
-	}
-	return collectReorderableLeaves(p.Children[0], out) && collectReorderableLeaves(p.Children[1], out)
+	return planner.CardinalityEstimate{Rows: s.Rows, Confidence: float64(s.Confidence)}, nil
 }
 
 // cost 为 physical operator 计算相对成本；Memory 数值仅用于比较，不替代真实 reservation。
