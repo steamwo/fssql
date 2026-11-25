@@ -4,12 +4,10 @@ fssql 是 Go 实现的单节点、可嵌入 OLAP 查询引擎。本页记录贡�
 
 详细约束：
 
-- [架构决策注册表](docs/architecture/decisions.md)
-- [Architecture Invariants](docs/architecture/invariants.md)
-- [Feature Contract](docs/architecture/feature-contract.md)
-- [Module Boundaries](docs/architecture/module-boundaries.md)
-- [Release Verification Contract](docs/architecture/release-contract.md)
-- [Memory / VFS / Testing / Source Introspection contracts](docs/contracts/)
+- [内存契约](docs/contracts/memory.md)与 [VFS 契约](docs/contracts/vfs.md)
+- [公共 API 与兼容边界](docs/public-api.md)
+- [项目测试与发布验收标准](docs/testing-standard.md)
+- [数据源内省契约](docs/contracts/source-introspection.md)
 
 ## 执行模型
 

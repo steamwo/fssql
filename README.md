@@ -227,7 +227,7 @@ ORDER BY a.id;
 SELECT 1 AS id UNION SELECT 1 UNION SELECT 2 ORDER BY id;
 ```
 
-还支持 `INTERSECT`/`EXCEPT`（含 `ALL`）、`UNION BY NAME`、LATERAL、采样、标量子查询和常用字符串/日期/正则函数。完整范围见[能力矩阵](docs/architecture/feature-contract.md)与[公共 API 文档](docs/public-api.md)。
+还支持 `INTERSECT`/`EXCEPT`（含 `ALL`）、`UNION BY NAME`、LATERAL、采样、标量子查询和常用字符串/日期/正则函数。完整范围见[公共 API 文档](docs/public-api.md#databasesql-compatibility)。
 
 ### 临时表、视图与会话
 
@@ -456,12 +456,10 @@ SQL 已实现非递归 CTE、集合谓词、按位置的 UNION/INTERSECT/EXCEPT�
 ## 文档与开发
 
 - [公共 API、资源默认值与使用边界](docs/public-api.md)
-- [SQL、数据源和执行能力矩阵](docs/architecture/feature-contract.md)
-- [相关子查询与 LATERAL 的实现和支持范围](docs/architecture/subquery-lowering.md)
+- [SQL、相关子查询与 LATERAL 的支持范围](docs/public-api.md#databasesql-compatibility)
 - [架构约束](ARCHITECTURE.md)
 - [项目测试规范与 DuckDB 差分验证/性能基线方案](docs/testing-standard.md)
-- [2026-11-07 与 DuckDB 2.0.0 的差分与性能基线报告](docs/validation/2026-11-07-full-duckdb-comparison/report.md)：262/262 差分用例一致；28 个计时场景（本地与 MinIO）共 812 条正式样本，总体 `time_ratio` 中位 3.86。该报告用于验证语义正确性、发现性能差距和建立优化基线，不代表项目以替代 DuckDB 为目标
-- [引擎优化与改进计划及诊断证据](docs/optimization-review-2026-11-06.md)
+- [引擎性能优化记录](docs/performance-optimization-progress-2026-11-04.md)
 - [SQL 兼容性差异](compatibility/deviations.yaml)
 - [DuckDB 兼容性完善方案与实施进度](docs/duckdb-compatibility-roadmap.md)
 

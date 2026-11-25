@@ -1,8 +1,8 @@
 # fssql v1 Public API
 
-Status: implemented API reference for the current branch. The frozen v1 baseline and later extensions are distinguished in the [feature contract](architecture/feature-contract.md). Implementation coverage does not imply complete release or large-data performance acceptance.
+This reference covers the implemented API for the current branch. See the [testing standard](testing-standard.md) for the release and large-data performance criteria.
 
-This document describes the implemented public Go API and the internal HTTP adapter's wire contract. Internal package types and constructors are not part of the public Go API. The architecture feature contract describes the engine as a whole; it does not imply that every internal adapter is configurable through `gosql.Config`.
+This document describes the public Go API and the internal HTTP adapter's wire contract. See the [architecture overview](../ARCHITECTURE.md) for the engine's internal boundaries.
 
 For a complete runnable example covering both Go query APIs and the other public features, see [quickstart](../examples/quickstart/README.md) and run `go run ./examples/quickstart` from the repository root.
 
@@ -10,7 +10,7 @@ For a complete runnable example covering both Go query APIs and the other public
 
 | Capability | Available to an external Go module today |
 | --- | --- |
-| Native queries and statements | `Open`, `DB.QueryChunks`, `DB.Exec`, `DB.CopyTo`, `DB.Close`, `DB.MemoryUsed`. Native QueryChunks/Exec accept SQL text; SELECT value parameters use database/sql. |
+| Native queries and statements | `Open`, `DB.QueryChunks`, `DB.Exec`, `DB.CopyTo`, `DB.Close`, `DB.MemoryUsed`. `QueryChunksWithArgs` and `CopyToWithArgs` bind value parameters. |
 | `database/sql` | `OpenSQLDB`; SELECT parameters, prepared syntax and queries/statements through the same engine. Transactions remain unsupported. |
 | Custom sources | `Config.TableFunctions`, `TableFunction`, `BatchReader`, `BatchWriter`; fixed-schema, zero-argument sources. |
 | Custom scalar functions | `Config.ScalarFunctions`, `ScalarFunction`, `ScalarValue`, NULL policies and `NewHMACSHA256ScalarFunction`. |
@@ -20,7 +20,7 @@ For a complete runnable example covering both Go query APIs and the other public
 | Other protocol adapters | `Config.FTP` (FTP/implicit-TLS FTPS), `Config.SFTP` (OpenSSH), and `Config.WebDAV` (WebDAV/WebDAVS) enable endpoint-scoped reads and recoverable single-file COPY. Strict prerequisites and compatible limitations are documented below. Custom VFS registration remains internal. |
 | Source introspection | SQL `DESCRIBE`, `parquet_schema` and `parquet_file_metadata` use the query path. There is no exported `DB.InspectSource` method. |
 | HTTP service | The wire adapter is internal; the public package has no HTTP server constructor. |
-| Nested results | Type metadata is exposed for LIST/STRUCT; Chunk currently has no public accessor for nested element values. |
+| Nested results | `Chunk.Value`, `Chunk.List` and `Chunk.Struct` return owned nested values with type and NULL information. |
 
 ## Go package
 
@@ -85,6 +85,44 @@ _ = uri
 ```
 
 With an `OpenSQLDB` instance configured for the same root, use `QueryContext(ctx, "SELECT * FROM read_parquet(?)", uri)`. Parameters supply values; table names, column identifiers and SQL fragments cannot be parameters.
+
+### Directory catalogs
+
+Put `fssql.json` at the root of a local directory to declare multiple external tables. Set `format` to `parquet`, `csv`, `json` for arrays of objects, or `ndjson` for one object per line. Each table needs at least one matching file so fssql can bind its schema.
+
+```json
+{
+  "tables": [
+    {"name": "orders", "format": "parquet", "pattern": "orders/**/*.parquet"},
+    {"name": "prices", "format": "csv", "pattern": "prices/*.csv",
+     "options": {"header": true, "columns": "sku VARCHAR, amount DECIMAL(12,2)"}},
+    {"name": "customers", "format": "json", "pattern": "customers/*.json",
+     "options": {"columns": "id BIGINT, name VARCHAR"}},
+    {"name": "events", "format": "ndjson", "pattern": "events/**/*.ndjson"}
+  ]
+}
+```
+
+Use `/` in relative patterns on all platforms. `**` matches nested directories. The directory handle reserves the root's `fssql.json` for the catalog and excludes it from file reads and matches. The root sets up local access, so leave `Config.LocalFiles` unset.
+
+CSV, JSON, and NDJSON infer their schema from the first matching file by default. Set `options.columns` to a comma-separated list of `name TYPE` definitions to keep a stable schema across queries and new files. CSV maps columns by position and supports the same scalar types as `read_csv`. JSON and NDJSON map columns by field name and support `BOOLEAN`, `INTEGER`, `BIGINT`, `FLOAT`, `DOUBLE`, and `VARCHAR` in explicit schemas.
+
+For CSV, set `options.header` to `true` to treat the first row of each file as a header. With no explicit column definitions, the first file supplies the names. The default is `false`, which reads the first row as data and names inferred columns `column0`, `column1`, and so on.
+
+For production text tables, declare `options.columns` to keep the schema stable as files arrive. Set `options.validate_schema` to `true` with explicit columns to decode all matched files and declared columns before `OpenDirectorySQLDB` returns. Validation uses the normal query resource limits and reader semantics, including CSV column positions and nullable JSON fields. It adds a full scan at open time. Reopen the directory to revalidate a later file set.
+
+For Parquet tables, set `options.partition_columns` to a comma-separated list such as `year BIGINT, region VARCHAR`. The reader appends these columns using `key=value` directory names. Missing keys return NULL and invalid BIGINT values fail binding. Partition columns must have distinct names from file columns. Simple equality and NULL filters can skip files during scanning. The binder reads the first matching Parquet footer to determine the file schema.
+
+```go
+db, err := gosql.OpenDirectorySQLDB(ctx, "sales", gosql.Config{})
+if err != nil { return err }
+defer db.Close()
+
+var count int64
+err = db.QueryRowContext(ctx, "SELECT count(*) FROM orders").Scan(&count)
+```
+
+Opening the directory registers the tables in memory. Each query discovers matching files again, so additions are visible to subsequent queries. Reopening after a restart or moving the folder uses the same relative patterns. Local data files are read-only through this handle. Catalog changes made through SQL live in memory for the lifetime of the handle.
 
 ### Remote protocols
 
@@ -244,7 +282,13 @@ Native DECIMAL integers are unscaled storage values: DECIMAL(10,2) value 12.34 r
 
 Public constructors include `UTinyIntType`, `USmallIntType`, `UIntegerType`, `UBigIntType`, `BlobType`, `TimestampNSType` and `TimestampTZType`. Other scalar types can be described with `Type{ID: "BIGINT"}` or `Type{ID: "DECIMAL", Width: 10, Scale: 2}`.
 
-Nested LIST/STRUCT logical metadata is public through `Type.Child`/`Type.Fields`. The current public Chunk has no LIST/STRUCT element-value accessors, so callers cannot traverse nested values through this API. The database/sql adapter also rejects these values instead of coercing them into `driver.Value`.
+Use `Chunk.Value`, `Chunk.List` or `Chunk.Struct` to traverse LIST and STRUCT cells. These accessors return owned values that can outlive the callback. `Type.Child` and `Type.Fields` describe the element and field types. The database/sql adapter returns an error for non-NULL LIST and STRUCT cells.
+
+Use `DB.QueryChunksWithArgs(ctx, query, callback, args...)` to bind `?`, `$1` or named placeholders. Pass named values with `sql.Named`. `DB.QueryChunksWithStats` accepts the same arguments and returns planning and execution times, rows and chunks delivered, and peak managed memory and temporary storage reserved by the query. Execution time includes the callback. A callback error returns the statistics collected before the error.
+
+The report counts distinct matched files and files that returned data to a reader. Read requests and bytes include metadata and schema sampling. The byte count measures the buffers returned to the format readers, so compression, caching and remote transport can change the number of bytes transferred on the wire.
+
+For eligible joins of three or more file inputs, the planner uses source size estimates to choose a connected sequence of equi-joins and can apply simple single-table filters before joining. CSV estimates use file sizes. Parquet row counts are available when binding has already read every matched footer. The planner keeps the SQL column layout intact and retains the original join tree when estimates are missing or the join graph is disconnected.
 
 ### Execute non-row statements
 
@@ -269,7 +313,9 @@ if err != nil { return err }
 
 `destination` must use an enabled local/S3/FTP/FTPS/SFTP/WebDAV/WebDAVS driver and satisfy its selected publication mode. `CopyFormatCSV`, `CopyFormatJSON`, `CopyFormatNDJSON` and `CopyFormatParquet` select the format. Text output compression is `identity` (default), `gzip` or `zstd`; Parquet uses page compression `snappy` (default) or `identity`. Explicit `none` also disables compression. These defaults apply to both `CopyTo` and SQL COPY. CSV `Header` defaults to true; `Delimiter` and `Quote` configure single-byte separators/quoting. A failure returns a zero `ExportResult`; successful return follows final-object commit through the same export path as SQL COPY.
 
-`CopyOptions.ParquetRowGroupRows` and `ParquetPageRows` configure Parquet row-group/page boundaries independently of input chunks, including encrypted output. Zero selects the existing defaults: 2048 rows per group and 512 rows per page (clamped to smaller groups). Positive page rows must not exceed the effective group rows; negative sizes and layout options on text formats are rejected before opening output. Larger groups use the same DB memory budget and may fail when it is insufficient. These options apply to `CopyTo`; SQL COPY retains its existing layout defaults.
+`CopyOptions.ParquetRowGroupRows` and `ParquetPageRows` configure Parquet row-group and page sizes independently of input chunks, including encrypted output. SQL `COPY` accepts the same sizes through `PARQUET_ROW_GROUP_ROWS` and `PARQUET_PAGE_ROWS`. Zero selects 2048 rows per group and 512 rows per page, clamped to smaller groups. Positive page rows must fit in their effective group. Larger groups use the same DB memory budget.
+
+Use `DB.CopyToWithArgs(ctx, query, destination, options, args...)` to bind value parameters in the source query.
 
 Parquet export automatically considers `RLE_DICTIONARY` for low-cardinality VARCHAR/BLOB column chunks, including encrypted output. Dictionaries are limited to 256 entries and 32 KiB of PLAIN dictionary bytes; small chunks, high cardinality, insufficient estimated savings or a preparation-time memory limit retain PLAIN encoding. Encoding selection is internal and does not change SQL values, NULL handling or the compression option. Page/column statistics remain available independently of encoding.
 
@@ -441,7 +487,7 @@ Current boundary rules:
 | VARCHAR / BLOB | `String` / `Bytes` | string / copied []byte |
 | DATE / timestamps | `Int64` raw temporal values | time.Time in UTC |
 | NULL | accessor validity is false | nil; use sql.Null* or nullable destinations |
-| LIST / STRUCT | type metadata only | explicit error for non-NULL values |
+| LIST / STRUCT | owned, recursively typed values | explicit error for non-NULL values |
 
 ```go
 stmt, err := sqlDB.PrepareContext(ctx, "SELECT CAST($amount AS DECIMAL(38,2))")
@@ -485,7 +531,7 @@ Common SQL extensions:
 - `JOIN USING (column, ...)` supports merged unqualified keys and each side's original qualified keys, including outer joins. SELECT * retains the left input's column order and omits duplicate right keys. Compatible numeric join keys are materialized in their common type before hashing.
 - Derived SELECT inputs support explicit `LATERAL` and implicit references to preceding FROM inputs, including comma/CROSS/INNER joins and LEFT JOIN. Chained inputs, local aggregates, constant per-parameter row limits, prepared values and derived column aliases are supported. Dependent RIGHT/FULL/SEMI/ANTI joins and aggregates owned by a sibling input are rejected, as in DuckDB 2.0.0.
 
-Parameter-domain correlation supports non-equality/OR predicates, constant per-parameter LIMIT/OFFSET with ORDER BY, nested expression-subquery references across query levels, global aggregate expressions/HAVING, and references to grouping columns from outer aggregate outputs/HAVING. Domains propagate through derived tables/CTEs, positional set operations (including ALL) and JOINs, including outer/semi/anti joins and expression subqueries in ON. Pure outer aggregate calls are evaluated by their owning scope; child scalar cardinality and grouping legality are still checked. Non-constant correlated LIMIT/OFFSET and correlation pushed through SAMPLE remain rejected. Sampling an independent source before a correlated filter is supported. Quantified ANY/ALL/SOME comparisons support correlated and non-correlated subqueries, including empty sets and NULL. Numeric range/generate_series and LIST unnest accept constant or lateral arguments. File readers retain the column-argument restriction also present in DuckDB 2.0; supported constant string expressions can form their paths. Plans without usable hash keys currently use a cross product/filter and retain the CROSS build side in managed memory. See [subquery lowering](architecture/subquery-lowering.md).
+Parameter-domain correlation supports non-equality/OR predicates, constant per-parameter LIMIT/OFFSET with ORDER BY, nested expression-subquery references across query levels, global aggregate expressions/HAVING, and references to grouping columns from outer aggregate outputs/HAVING. Domains propagate through derived tables/CTEs, positional set operations (including ALL) and JOINs, including outer/semi/anti joins and expression subqueries in ON. Pure outer aggregate calls are evaluated by their owning scope; child scalar cardinality and grouping legality are still checked. Non-constant correlated LIMIT/OFFSET and correlation pushed through SAMPLE remain rejected. Sampling an independent source before a correlated filter is supported. Quantified ANY/ALL/SOME comparisons support correlated and non-correlated subqueries, including empty sets and NULL. Numeric range/generate_series and LIST unnest accept constant or lateral arguments. File readers retain the column-argument restriction also present in DuckDB 2.0; supported constant string expressions can form their paths. Plans without usable hash keys currently use a cross product/filter and retain the CROSS build side in managed memory.
 
 Remaining boundary differences are documented in `compatibility/deviations.yaml`.
 
