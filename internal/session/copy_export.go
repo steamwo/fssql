@@ -321,6 +321,8 @@ func copyWriterConfig(options binder.BoundCopyOptions, schema []exportpkg.Column
 		config.Format = exportpkg.FormatNDJSON
 	case binder.CopyParquet:
 		config.Format = exportpkg.FormatParquet
+		config.Parquet.RowGroupRows = options.ParquetRowGroupRows
+		config.Parquet.PageRows = options.ParquetPageRows
 		if options.Encryption != nil {
 			config.Parquet.Encryption = &exportpkg.ParquetEncryptionConfig{Algorithm: options.Encryption.Algorithm, KeyID: options.Encryption.KeyID, Key: options.Encryption.Key()}
 			if err := exportpkg.ValidateParquetEncryption(config.Parquet.Encryption); err != nil {

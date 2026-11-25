@@ -111,6 +111,50 @@ func TestParquetCopyLayout(t *testing.T) {
 	}
 }
 
+func TestSQLParquetCopyLayout(t *testing.T) {
+	root := t.TempDir()
+	db, err := OpenSQLDB(Config{LocalFiles: &LocalFileConfig{RootDir: root}, TempDir: t.TempDir(), ManifestDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	path := filepath.Join(root, "layout.parquet")
+	uri, err := FileURI(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	query := "COPY (SELECT * FROM range(5)) TO ?"
+	for _, options := range []string{
+		"FORMAT CSV, PARQUET_ROW_GROUP_ROWS 0",
+		"FORMAT PARQUET, PARQUET_ROW_GROUP_ROWS 3, PARQUET_PAGE_ROWS 4",
+	} {
+		if _, err := db.ExecContext(ctx, query+" ("+options+")", uri); err == nil {
+			t.Fatalf("invalid options succeeded: %s", options)
+		}
+	}
+	if _, err := db.ExecContext(ctx, query+" (FORMAT PARQUET, PARQUET_ROW_GROUP_ROWS ?, PARQUET_PAGE_ROWS 2)", uri, 3); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 12 {
+		t.Fatalf("read parquet bytes=%d err=%v", len(data), err)
+	}
+	footerLen := int(binary.LittleEndian.Uint32(data[len(data)-8:]))
+	if footerLen > len(data)-12 {
+		t.Fatal("invalid footer length")
+	}
+	meta, err := parquet.DecodeFileMetaData(data[len(data)-8-footerLen : len(data)-8])
+	if err != nil || len(meta.RowGroups) != 2 || meta.RowGroups[0].NumRows != 3 || meta.RowGroups[1].NumRows != 2 {
+		t.Fatalf("metadata=%+v err=%v", meta, err)
+	}
+	offset := meta.RowGroups[0].Columns[0].MetaData.DataPageOffset
+	header, _, err := parquet.DecodePageHeader(data[offset:])
+	if err != nil || header.Data == nil || header.Data.NumValues != 2 {
+		t.Fatalf("first page=%+v err=%v", header, err)
+	}
+}
+
 func TestParquetCopyInvalidLayoutHasNoSideEffects(t *testing.T) {
 	root, manifests := t.TempDir(), t.TempDir()
 	keyCalls := 0

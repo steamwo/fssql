@@ -120,6 +120,8 @@ type BoundCopyOptions struct {
 	Header      bool       // Header 仅 CSV 有效；CSV 默认 true 以匹配 DuckDB COPY TO。
 	Delimiter   byte       // Delimiter 仅 CSV 有效；默认逗号。
 	Quote       byte       // Quote 仅 CSV 有效；默认双引号。
+	ParquetRowGroupRows int
+	ParquetPageRows     int
 }
 
 // BoundCopyTo 是 COPY source → Export adapter 的副作用前结果。
@@ -413,6 +415,7 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 	}()
 	seen := make(map[string]struct{}, len(options))
 	var csvSpecific bool
+	var parquetLayout bool
 	var encryptedFormat bool
 	for _, option := range options {
 		name := strings.ToLower(option.Name.Name)
@@ -481,6 +484,21 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 			}
 			out.Header = value
 			csvSpecific = true
+		case "parquet_row_group_rows", "parquet_page_rows":
+			literal, ok := option.Value.(*ast.LiteralExpr)
+			if !ok || literal.Kind != ast.LiteralInteger {
+				return BoundCopyOptions{}, fmt.Errorf("%s requires a non-negative integer", strings.ToUpper(name))
+			}
+			rows, err := strconv.Atoi(literal.Value)
+			if err != nil || rows < 0 {
+				return BoundCopyOptions{}, fmt.Errorf("%s requires a non-negative integer", strings.ToUpper(name))
+			}
+			if name == "parquet_row_group_rows" {
+				out.ParquetRowGroupRows = rows
+			} else {
+				out.ParquetPageRows = rows
+			}
+			parquetLayout = true
 		case "delimiter":
 			value, err := copyRequiredString(option.Value)
 			if err != nil || len(value) != 1 {
@@ -516,6 +534,9 @@ func bindCopyOptions(destination string, options []ast.CopyOption) (BoundCopyOpt
 	}
 	if csvSpecific && out.Format != CopyCSV {
 		return BoundCopyOptions{}, fmt.Errorf("HEADER/DELIMITER/QUOTE are only valid for CSV output")
+	}
+	if parquetLayout && out.Format != CopyParquet {
+		return BoundCopyOptions{}, fmt.Errorf("Parquet layout options require Parquet format")
 	}
 	if out.Delimiter == out.Quote {
 		return BoundCopyOptions{}, fmt.Errorf("CSV DELIMITER and QUOTE must differ")
