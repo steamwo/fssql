@@ -7,7 +7,7 @@
 
 ## 1. 标准效力与完成定义
 
-本文细化 [Testing Contract](contracts/testing.md) 和 [Release Verification Contract](architecture/release-contract.md)。架构不变量、内存契约和格式契约继续有效；测试不能通过修改预期结果规避这些约束。
+本文细化 [Testing Contract](contracts/testing.md) 和 [架构约束](../ARCHITECTURE.md)，并定义发布验证要求。测试应直接验证架构、内存和格式契约。
 
 “必须”是硬性要求；“目标”是性能建设目标；“可选”不属于当前版本必需范围。本文定义测试要求，不表示相关自动化、用例或测量已经存在。已实现、已运行、已验收必须分别记录。
 
@@ -320,7 +320,7 @@ fixture 必须记录生成器版本、种子、schema、分布参数、行数、
 | L2 夜间 | 每日/主干变更 | 固定版本 DuckDB 全量差分、M 档、真实协议、格式互读、性质和定时 fuzz | DuckDB、MinIO/所需协议、相关读取器 |
 | L3 发布 | 候选版本 | L1+L2、Windows/Linux、L 档、默认/低预算、强制 spill、失败恢复、统计抽样、加密实际互读、正式性能门槛 | 独立基准机器与全部必需依赖 |
 
-后续 CI 必须将依赖准备失败与测试失败区分，但两者都不能形成通过的发布状态。当前仓库没有因此文档自动获得 CI enforcement；CI、清单生成器、差分扩展和性能判定器必须按第 11 节建设。
+[Verify 工作流](../.github/workflows/verify.yml)在代码 PR 和主干推送上运行 Go 1.22 的 Linux/Windows 测试与架构检查，并在 Linux 上检查 race。代码 PR 同时运行类型、集合操作和本地文件互操作的 DuckDB 差分子集。主干推送和夜间任务使用 DuckDB 2.0.0 和 PyArrow 24.0.0 运行完整的本地差分门禁。所选用例跳过、缺失或失败都会使任务失败。真实协议、性能与完整发布验收按对应层级另行执行。文档链接由 [Documentation 工作流](../.github/workflows/documentation.yml)检查。
 
 变更触发规则：语法/函数改动跑其签名及组合差分；类型改动跑所有搬运、spill、格式和 API 边界；优化器改动跑优化等价及实际 I/O；VFS/writer 改动跑真实协议、互操作及提交失败；内存/调度改动跑并发、Race、取消和资源矩阵。文档-only PR 只需链接、结构和事实核对，不机械运行全部引擎测试。
 
