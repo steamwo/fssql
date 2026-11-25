@@ -32,8 +32,9 @@ type JSONBindOptions struct {
 
 // JSONBinding 是 Query/Inspect 共用的普通 JSON source Bind 结果。
 type JSONBinding struct {
-	scanSet *fileset.ScanSet // scanSet 是 statement 内不可变文件集合。
-	schema  InferredSchema   // schema 来自现有 InferRecords typed inference。
+	scanSet  *fileset.ScanSet // scanSet 是 statement 内不可变文件集合。
+	schema   InferredSchema   // schema 来自现有 InferRecords typed inference。
+	explicit bool
 }
 
 // ScanSet 返回冻结 ScanSet；调用方不得修改其文件身份。
@@ -62,9 +63,9 @@ func (b JSONBinding) Fingerprint() string {
 
 // JSONBinder 是普通 JSON query/introspection 唯一 schema Bind 入口。
 type JSONBinder struct {
-	registry *vfs.Registry        // registry 是统一 VFS capability/driver registry。
-	planner  *fileset.Planner     // planner 先冻结 ScanSet 再读取 sample。
-	scope    *memory.Scope        // scope 约束 sample buffer 的 managed memory ownership。
+	registry *vfs.Registry         // registry 是统一 VFS capability/driver registry。
+	planner  *fileset.Planner      // planner 先冻结 ScanSet 再读取 sample。
+	scope    *memory.Scope         // scope 约束 sample buffer 的 managed memory ownership。
 	bm       *memory.BufferManager // bm 创建 managed range buffer。
 }
 
@@ -82,7 +83,7 @@ func (b *JSONBinder) Bind(ctx context.Context, pattern string, opts JSONBindOpti
 	if b == nil || b.registry == nil || b.planner == nil || b.scope == nil || b.bm == nil {
 		return JSONBinding{}, errors.New("json: uninitialized source binder")
 	}
-	pattern, fileOpts, err := fileViewOptions(pattern, opts.FileSet, b.registry)
+	pattern, fileOpts, columns, err := fileOptions(pattern, opts.FileSet, b.registry)
 	if err != nil {
 		return JSONBinding{}, err
 	}
@@ -90,11 +91,10 @@ func (b *JSONBinder) Bind(ctx context.Context, pattern string, opts JSONBindOpti
 	if err != nil {
 		return JSONBinding{}, err
 	}
-	files := scanSet.Files()
-	if len(files) == 0 {
-		return JSONBinding{}, fileset.ErrNoMatches
+	if len(columns) != 0 {
+		return JSONBinding{scanSet: scanSet, schema: InferredSchema{Fields: columns}, explicit: true}, nil
 	}
-	file := files[0]
+	file := scanSet.Files()[0]
 	if file.Size <= 0 {
 		return JSONBinding{}, fmt.Errorf("json: cannot infer schema from empty file %s", file.URI.String())
 	}
@@ -133,7 +133,7 @@ func (b *JSONBinder) Bind(ctx context.Context, pattern string, opts JSONBindOpti
 	}
 
 	for {
-		result, readErr := driver.ReadRange(ctx, vfs.RangeRequest{
+		result, readErr := vfs.ReadInputRange(ctx, driver.ReadRange, vfs.RangeRequest{
 			URI: file.URI, Offset: 0, Length: sample, Expected: &file.Identity, Tag: memory.TagReadAhead,
 		}, b.scope, b.bm)
 		if readErr != nil {
@@ -178,6 +178,9 @@ func (b *JSONBinder) InspectSource(ctx context.Context, pattern string, opts JSO
 	binding, err := b.Bind(ctx, pattern, opts)
 	if err != nil {
 		return introspection.SourceReport{}, err
+	}
+	if binding.explicit {
+		return introspection.NewSourceReport(binding.Schema().Fields, introspection.SchemaSourceExplicit, introspection.ConfidenceExact, binding.MatchedFiles(), 0, binding.Fingerprint(), false, false), nil
 	}
 	return introspection.NewSourceReport(
 		binding.Schema().Fields,

@@ -62,7 +62,7 @@ func (s *MetadataCountSource) Next(ctx context.Context) (*vector.DataChunk, bool
 		}
 		footer, err := b.cache.GetOrDiscover(ctx, driver, FooterSource{URI: file.URI, Size: file.Size, Identity: file.Identity}, b.scope, b.bm, s.cfg.MaxFooterBytes)
 		if err != nil {
-			return nil, false, err
+			return nil, false, fmt.Errorf("parquet: metadata count footer %s: %w", file.URI, err)
 		}
 		if _, err := ResolveSchemas([]*SchemaTree{base, footer.Schema}, false); err != nil {
 			return nil, false, err

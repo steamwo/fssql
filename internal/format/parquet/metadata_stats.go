@@ -79,6 +79,13 @@ func NewMetadataStatsSource(ctx context.Context, cfg RuntimeSourceConfig, reques
 	if !ok {
 		return nil, false, nil
 	}
+	if len(binding.partitionFields) != 0 {
+		for _, request := range requests {
+			if request.ColumnIndex >= len(binding.schema.Fields) {
+				return nil, false, nil
+			}
+		}
+	}
 	outputs, nonNull, ok, err := collectStats(ctx, cfg, binding, baseTree, plans)
 	if err != nil || !ok {
 		return nil, false, err

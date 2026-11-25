@@ -67,7 +67,7 @@ func (c *ColumnCursor) validIndexRef(ref pageIndexRef) bool {
 
 func (c *ColumnCursor) readIndex(ctx context.Context, ref pageIndexRef) (*memory.Buffer, error) {
 	identity := c.identity
-	result, err := c.driver.ReadRange(ctx, vfs.RangeRequest{URI: c.uri, Offset: ref.offset, Length: int64(ref.length), Expected: &identity, Tag: memory.TagMetadata}, c.scope, c.bm)
+	result, err := vfs.ReadInputRange(ctx, c.driver.ReadRange, vfs.RangeRequest{URI: c.uri, Offset: ref.offset, Length: int64(ref.length), Expected: &identity, Tag: memory.TagMetadata}, c.scope, c.bm)
 	c.metrics.Requests++
 	c.metrics.PlannedBytes += int64(ref.length)
 	if result.Buffer != nil {

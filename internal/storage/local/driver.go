@@ -106,48 +106,11 @@ func (d *Driver) Stat(ctx context.Context, u vfs.URI) (vfs.ObjectInfo, error) {
 }
 
 func (d *Driver) List(ctx context.Context, u vfs.URI, opts vfs.ListOptions) (vfs.ListPage, error) {
-	if strings.ToLower(u.Scheme) != "file" {
-		return vfs.ListPage{}, vfs.ErrUnsupportedScheme
-	}
-	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
-		return vfs.ListPage{}, fmt.Errorf("local: file URI host is not local: %q", u.Host)
-	}
-	prefix := strings.TrimPrefix(filepath.ToSlash(opts.Prefix), "/")
-	entries := make([]vfs.ListEntry, 0)
-	err := filepath.WalkDir(d.root, func(p string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		entryURI, err := URIFromPath(p)
-		if err != nil {
-			return err
-		}
-		if prefix != "" && !strings.HasPrefix(entryURI.ObjectKey(), prefix) {
-			return nil
-		}
-		entries = append(entries, vfs.ListEntry{URI: entryURI, Size: info.Size(), Identity: infoIdentity(info)})
+	var entries []vfs.ListEntry
+	if err := d.WalkList(ctx, u, opts.Prefix, func(entry vfs.ListEntry) error {
+		entries = append(entries, entry)
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return vfs.ListPage{}, err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].URI.Path < entries[j].URI.Path })
@@ -163,16 +126,63 @@ func (d *Driver) List(ctx context.Context, u vfs.URI, opts vfs.ListOptions) (vfs
 	if maxKeys <= 0 {
 		maxKeys = 1000
 	}
-	end := start + maxKeys
-	if end > len(entries) {
-		end = len(entries)
-	}
+	end := start + min(maxKeys, len(entries)-start)
 	page := vfs.ListPage{Entries: append([]vfs.ListEntry(nil), entries[start:end]...)}
 	if end < len(entries) {
 		page.Truncated = true
 		page.NextContinuationToken = strconv.Itoa(end)
 	}
 	return page, nil
+}
+
+func (d *Driver) WalkList(ctx context.Context, u vfs.URI, prefix string, visit func(vfs.ListEntry) error) error {
+	if strings.ToLower(u.Scheme) != "file" {
+		return vfs.ErrUnsupportedScheme
+	}
+	if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
+		return fmt.Errorf("local: file URI host is not local: %q", u.Host)
+	}
+	prefix = strings.TrimPrefix(filepath.ToSlash(prefix), "/")
+	return filepath.WalkDir(d.root, func(p string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		entryURI, err := URIFromPath(p)
+		if err != nil {
+			return err
+		}
+		key := entryURI.ObjectKey()
+		if entry.IsDir() {
+			dirPrefix := key
+			if dirPrefix != "" {
+				dirPrefix += "/"
+			}
+			if !strings.HasPrefix(prefix, dirPrefix) && !strings.HasPrefix(dirPrefix, prefix) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasPrefix(key, prefix) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		return visit(vfs.ListEntry{URI: entryURI, Size: info.Size(), Identity: infoIdentity(info)})
+	})
 }
 
 // ReadRange 独立读取一个精确范围；连续扫描可通过 OpenRangeReader 复用已验证的句柄。

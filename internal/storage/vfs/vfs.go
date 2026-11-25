@@ -173,6 +173,12 @@ type ListPage struct {
 	Truncated             bool
 }
 
+// ListWalker optionally visits a prefix in a single listing. A visit error
+// stops enumeration immediately. Entry order is unspecified.
+type ListWalker interface {
+	WalkList(ctx context.Context, uri URI, prefix string, visit func(ListEntry) error) error
+}
+
 type RangeRequest struct {
 	URI      URI
 	Offset   int64

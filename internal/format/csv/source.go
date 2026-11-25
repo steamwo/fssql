@@ -212,7 +212,7 @@ func (s *Source) read(ctx context.Context, file fileset.FileSnapshot, offset, le
 	if err != nil {
 		return vfs.RangeResult{}, err
 	}
-	return driver.ReadRange(ctx, vfs.RangeRequest{URI: file.URI, Offset: offset, Length: length, Expected: &file.Identity, Tag: memory.TagReadAhead}, s.scope, s.bm)
+	return vfs.ReadInputRange(ctx, driver.ReadRange, vfs.RangeRequest{URI: file.URI, Offset: offset, Length: length, Expected: &file.Identity, Tag: memory.TagReadAhead}, s.scope, s.bm)
 }
 
 func (s *Source) takeJob() (rangeJob, bool, error) {
@@ -290,6 +290,7 @@ func (s *Source) Next(ctx context.Context) (*vector.DataChunk, bool, error) {
 			chunk, remainder, err = s.runJob(ctx, job)
 		}
 		if err != nil {
+			err = fmt.Errorf("csv: read %s: %w", job.file.URI, err)
 			s.fail(err)
 			_ = s.Close()
 			return nil, false, err

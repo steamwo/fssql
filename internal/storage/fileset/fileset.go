@@ -113,6 +113,9 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 		}
 		f := snapshotFromInfo(vfs.ObjectInfo{URI: obj.URI, Size: obj.Size, Identity: obj.Identity}, opts.HivePartitioning)
 		f.SourceIdentity = obj.SourceIdentity
+		if observe := vfs.MatchObserver(ctx); observe != nil {
+			observe(f.URI)
+		}
 		return newScanSet(patternURI.String(), patternURI.ObjectKey(), []FileSnapshot{f}), nil
 	}
 
@@ -127,45 +130,32 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 	}
 
 	files := make([]FileSnapshot, 0, min(maxFiles, pageSize))
-	continuation := ""
-	seenTokens := map[string]struct{}{}
-	for {
-		page, err := driver.List(ctx, base, vfs.ListOptions{Prefix: prefix, ContinuationToken: continuation, MaxKeys: pageSize})
-		if err != nil {
-			return nil, err
+	visit := func(entry vfs.ListEntry) error {
+		matched, err := matchPath(patternURI.ObjectKey(), entry.URI.ObjectKey())
+		if err != nil || !matched {
+			return err
 		}
-		for _, entry := range page.Entries {
-			matched, err := matchPath(patternURI.ObjectKey(), entry.URI.ObjectKey())
+		if len(files) >= maxFiles {
+			return fmt.Errorf("%w: max=%d", ErrFileLimit, maxFiles)
+		}
+		f := snapshotFromEntry(entry, opts.HivePartitioning)
+		if p.registry.HasObjectViews() {
+			obj, err := p.registry.ResolveObject(ctx, entry.URI, opts.View)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			if !matched {
-				continue
-			}
-			if len(files) >= maxFiles {
-				return nil, fmt.Errorf("%w: max=%d", ErrFileLimit, maxFiles)
-			}
-			f := snapshotFromEntry(entry, opts.HivePartitioning)
-			if p.registry.HasObjectViews() {
-				obj, err := p.registry.ResolveObject(ctx, entry.URI, opts.View)
-				if err != nil {
-					return nil, err
-				}
-				f.URI, f.Size, f.Identity, f.SourceIdentity = obj.URI, obj.Size, obj.Identity, obj.SourceIdentity
-			}
-			files = append(files, f)
+			f.URI, f.Size, f.Identity, f.SourceIdentity = obj.URI, obj.Size, obj.Identity, obj.SourceIdentity
 		}
-		if !page.Truncated {
-			break
-		}
-		if page.NextContinuationToken == "" {
-			return nil, fmt.Errorf("%w: truncated page missing continuation token", ErrInvalidListing)
-		}
-		if _, exists := seenTokens[page.NextContinuationToken]; exists {
-			return nil, fmt.Errorf("%w: repeated continuation token %q", ErrInvalidListing, page.NextContinuationToken)
-		}
-		seenTokens[page.NextContinuationToken] = struct{}{}
-		continuation = page.NextContinuationToken
+		files = append(files, f)
+		return nil
+	}
+	if walker, ok := driver.(vfs.ListWalker); ok {
+		err = walker.WalkList(ctx, base, prefix, visit)
+	} else {
+		err = visitPages(ctx, driver, base, prefix, pageSize, visit)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("%w: %s", ErrNoMatches, patternURI.String())
@@ -173,7 +163,39 @@ func (p *Planner) Plan(ctx context.Context, rawPattern string, opts PlanOptions)
 	// Existing protocol listings keep their path order; no display serialization
 	// participates in resource identity or comparison.
 	sort.Slice(files, func(i, j int) bool { return files[i].URI.Path < files[j].URI.Path })
+	if observe := vfs.MatchObserver(ctx); observe != nil {
+		for _, file := range files {
+			observe(file.URI)
+		}
+	}
 	return newScanSet(patternURI.String(), prefix, files), nil
+}
+
+func visitPages(ctx context.Context, driver vfs.Driver, base vfs.URI, prefix string, pageSize int, visit func(vfs.ListEntry) error) error {
+	continuation := ""
+	seenTokens := map[string]struct{}{}
+	for {
+		page, err := driver.List(ctx, base, vfs.ListOptions{Prefix: prefix, ContinuationToken: continuation, MaxKeys: pageSize})
+		if err != nil {
+			return err
+		}
+		for _, entry := range page.Entries {
+			if err := visit(entry); err != nil {
+				return err
+			}
+		}
+		if !page.Truncated {
+			return nil
+		}
+		if page.NextContinuationToken == "" {
+			return fmt.Errorf("%w: truncated page missing continuation token", ErrInvalidListing)
+		}
+		if _, exists := seenTokens[page.NextContinuationToken]; exists {
+			return fmt.Errorf("%w: repeated continuation token %q", ErrInvalidListing, page.NextContinuationToken)
+		}
+		seenTokens[page.NextContinuationToken] = struct{}{}
+		continuation = page.NextContinuationToken
+	}
 }
 
 func hasGlob(s string) bool { return strings.ContainsAny(s, "*?[") }

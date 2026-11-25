@@ -220,17 +220,8 @@ func demoFiles(ctx context.Context, w io.Writer, env *environment) error {
 		return err
 	}
 
-	// 10. CREATE EXTERNAL TABLE 使用真实表函数 Bind 得到 schema，不保存 SQL 文本。
-	if _, err := env.sqlDB.ExecContext(ctx,
-		"CREATE EXTERNAL TABLE quickstart_events USING read_parquet("+quoteSQL(parquetURI)+")"); err != nil {
-		return err
-	}
-	if err := printQuery(ctx, w, env.sqlDB,
-		"CREATE EXTERNAL TABLE 后查询",
-		`SELECT count(*) AS rows, sum(amount) AS total
-		 FROM quickstart_events
-		 WHERE flag = true`,
-	); err != nil {
+	// 10. CREATE EXTERNAL TABLE 把按天落盘的 Parquet 分片注册为一张表。
+	if err := demoDirectoryTable(ctx, w, env); err != nil {
 		return err
 	}
 
@@ -301,6 +292,69 @@ func demoFiles(ctx context.Context, w io.Writer, env *environment) error {
 	}
 	return writef(w, "-- 文本压缩导出: %s=%d 字节，%s=%d 字节\n",
 		filepath.Base(gzipOut), fileSize(gzipOut), filepath.Base(zstdOut), fileSize(zstdOut))
+}
+
+func demoDirectoryTable(ctx context.Context, w io.Writer, env *environment) error {
+	ordersDir := filepath.Join(env.root, "orders")
+	dirURI, err := gosql.FileURI(ordersDir)
+	if err != nil {
+		return err
+	}
+	pattern := strings.TrimSuffix(dirURI, "/") + "/**/*.parquet"
+	writePart := func(day, query string) error {
+		dayDir := filepath.Join(ordersDir, day)
+		if err := os.MkdirAll(dayDir, 0o700); err != nil {
+			return err
+		}
+		uri, err := gosql.FileURI(filepath.Join(dayDir, "part.parquet"))
+		if err != nil {
+			return err
+		}
+		_, err = env.db.CopyTo(ctx, query, uri, gosql.CopyOptions{Format: gosql.CopyFormatParquet})
+		return err
+	}
+	const ordersQuery = "SELECT count(*), sum(amount) FROM quickstart_orders"
+	printOrders := func(day string) error {
+		var rows int64
+		var total string
+		if err := env.sqlDB.QueryRowContext(ctx, ordersQuery).Scan(&rows, &total); err != nil {
+			return err
+		}
+		return writef(w, "-- 目录外部表 %s rows=%d total=%s\n", day, rows, total)
+	}
+
+	if err := writePart("2026-01-01", "SELECT amount FROM range(10, 30, 10) AS t(amount)"); err != nil {
+		return err
+	}
+	if _, err := env.sqlDB.ExecContext(ctx,
+		"CREATE EXTERNAL TABLE quickstart_orders USING read_parquet("+quoteSQL(pattern)+")"); err != nil {
+		return err
+	}
+	if err := printOrders("2026-01-01"); err != nil {
+		return err
+	}
+
+	// 同一条 SELECT 在新增分片提交后会重新匹配文件。
+	if err := writePart("2026-01-02", "SELECT amount FROM range(30, 40, 10) AS t(amount)"); err != nil {
+		return err
+	}
+	if err := printOrders("2026-01-02"); err != nil {
+		return err
+	}
+
+	if err := writePart("2026-01-03", "SELECT 'invalid' AS amount"); err != nil {
+		return err
+	}
+	var rows int64
+	var total string
+	err = env.sqlDB.QueryRowContext(ctx, ordersQuery).Scan(&rows, &total)
+	if err == nil {
+		return fmt.Errorf("目录外部表读取不兼容分片时预期失败但成功执行")
+	}
+	if !strings.Contains(err.Error(), "schema mismatch") {
+		return fmt.Errorf("目录外部表预期 Parquet schema mismatch，实际错误：%w", err)
+	}
+	return writef(w, "-- 目录外部表拒绝不兼容分片：%v\n", err)
 }
 
 // printFilePreview 打印文件前若干行，用于展示导出选项的实际效果。

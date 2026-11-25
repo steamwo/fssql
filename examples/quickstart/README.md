@@ -129,6 +129,7 @@ go test ./examples/quickstart -count=1
   - 目标已存在时不会覆盖。
 - SQL `COPY (...) TO '...' (FORMAT ..., COMPRESSION ...)` 与 `CopyTo` 共用 Export/VFS 原子提交路径。
 - `CREATE EXTERNAL TABLE name USING read_parquet('...')` 通过真实表函数 Bind 获取 schema，不保存 SQL 文本。
+- 目录外部表 `quickstart_orders` 用 `read_parquet('.../orders/**/*.parquet')` 递归匹配日期子目录里的 Parquet 分片。首日发布后查询返回 2 行、合计 30。次日发布后再次运行同一条 `SELECT`，返回 3 行、合计 60。第三天分片将 `amount` 写成字符串，查询扫描到该分片时返回 `schema mismatch`。
 - 加密导出：`CopyOptions.Encryption` + `Config.ParquetKeys`。resolver 按 `(keyID, algorithm)` 返回 16 字节（AES-128-GCM）或 32 字节（AES-256-GCM）。配置 `Config.ParquetReadKeys` 按 key ID 取钥后，可以用 `read_parquet()` 查回。
 
 ### 6. Catalog DDL、DESCRIBE 与元数据
@@ -181,6 +182,5 @@ go test ./examples/quickstart -count=1
 更完整的 API 与 SQL 边界见：
 
 - [公共 API](../../docs/public-api.md)
-- [SQL 能力矩阵](../../docs/architecture/feature-contract.md)
-- [相关子查询与 LATERAL](../../docs/architecture/subquery-lowering.md)
+- [SQL、相关子查询与 LATERAL 的支持范围](../../docs/public-api.md#databasesql-compatibility)
 - [兼容性差异](../../compatibility/deviations.yaml)

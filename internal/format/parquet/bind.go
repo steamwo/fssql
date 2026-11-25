@@ -2,10 +2,12 @@ package parquet
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/core/types"
 	"github.com/steamwo/fssql/internal/storage/fileset"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
@@ -34,32 +36,54 @@ type BoundFileMetadata struct {
 }
 
 type SourceBinding struct {
-	scanSet        *fileset.ScanSet
-	schema         ResolvedSchema
-	metadata       []BoundFileMetadata
-	validationMode SchemaValidationMode
-	unionByName    bool
+	scanSet              *fileset.ScanSet
+	schema               ResolvedSchema
+	metadata             []BoundFileMetadata
+	validationMode       SchemaValidationMode
+	unionByName          bool
+	partitionFields      []types.StructField
+	partitionFingerprint string
 }
 
 func (b SourceBinding) ScanSet() *fileset.ScanSet { return b.scanSet }
 func (b SourceBinding) Schema() ResolvedSchema {
 	out := b.schema
 	out.Fields = append(out.Fields[:0:0], b.schema.Fields...)
+	out.Fields = append(out.Fields, b.partitionFields...)
 	return out
 }
 func (b SourceBinding) Metadata() []BoundFileMetadata {
 	return append([]BoundFileMetadata(nil), b.metadata...)
 }
-func (b SourceBinding) SchemaFiles() int                  { return len(b.metadata) }
+func (b SourceBinding) SchemaFiles() int                     { return len(b.metadata) }
 func (b SourceBinding) ValidationMode() SchemaValidationMode { return b.validationMode }
-func (b SourceBinding) UnionByName() bool                 { return b.unionByName }
+func (b SourceBinding) UnionByName() bool                    { return b.unionByName }
 func (b SourceBinding) MatchedFiles() int {
 	if b.scanSet == nil {
 		return 0
 	}
 	return b.scanSet.MatchedFiles()
 }
+
+// RowCount is available when binding already read every matched footer.
+func (b SourceBinding) RowCount() (uint64, bool) {
+	if len(b.metadata) == 0 || len(b.metadata) != b.MatchedFiles() {
+		return 0, false
+	}
+	var total uint64
+	for _, file := range b.metadata {
+		rows, err := exactMetadataRows(file.Footer.Metadata)
+		if err != nil || uint64(rows) > ^uint64(0)-total {
+			return 0, false
+		}
+		total += uint64(rows)
+	}
+	return total, true
+}
 func (b SourceBinding) Fingerprint() string {
+	if b.partitionFingerprint != "" {
+		return b.partitionFingerprint
+	}
 	if b.scanSet == nil {
 		return ""
 	}
@@ -90,6 +114,13 @@ func (b *SourceBinder) Bind(ctx context.Context, pattern string, opts SourceBind
 	}
 	if opts.ValidationMode != SchemaValidationBounded && opts.ValidationMode != SchemaValidationFull {
 		return SourceBinding{}, fmt.Errorf("parquet: invalid schema validation mode %d", opts.ValidationMode)
+	}
+	pattern, partitionSpec, partitionFields, err := parsePartitionSource(pattern)
+	if err != nil {
+		return SourceBinding{}, err
+	}
+	if len(partitionFields) != 0 {
+		opts.FileSet.HivePartitioning = true
 	}
 	scanSet, err := b.planner.Plan(ctx, pattern, opts.FileSet)
 	if err != nil {
@@ -130,11 +161,20 @@ func (b *SourceBinder) Bind(ctx context.Context, pattern string, opts SourceBind
 	if err != nil {
 		return SourceBinding{}, err
 	}
+	var partitionFingerprint string
+	if len(partitionFields) != 0 {
+		if err := validatePartitions(ctx, resolved.Fields, partitionFields, files); err != nil {
+			return SourceBinding{}, err
+		}
+		partitionFingerprint = fmt.Sprintf("%x", sha256.Sum256([]byte(scanSet.Fingerprint()+"\x00"+partitionSpec)))
+	}
 	return SourceBinding{
-		scanSet:        scanSet,
-		schema:         resolved,
-		metadata:       metadata,
-		validationMode: opts.ValidationMode,
-		unionByName:    opts.UnionByName,
+		scanSet:              scanSet,
+		schema:               resolved,
+		metadata:             metadata,
+		validationMode:       opts.ValidationMode,
+		unionByName:          opts.UnionByName,
+		partitionFields:      partitionFields,
+		partitionFingerprint: partitionFingerprint,
 	}, nil
 }

@@ -119,20 +119,21 @@ func (s *JSONRuntimeSource) Next(ctx context.Context) (*vector.DataChunk, bool, 
 			return nil, false, s.failLocked(err)
 		}
 
-		final := s.offset >= s.files[s.fileIndex].Size
+		file := s.files[s.fileIndex]
+		final := s.offset >= file.Size
 		data := []byte(nil)
 		if s.carry != nil {
 			data = s.carry.Bytes()
 		}
 		records, consumed, done, needMore, err := frameRuntimeJSON(data, final, vector.DefaultVectorSize, &s.frame)
 		if err != nil {
-			return nil, false, s.failLocked(err)
+			return nil, false, s.failLocked(fmt.Errorf("json: read %s: %w", file.URI, err))
 		}
 		if len(records) > 0 {
 			// records 是 carry 的 slice views；DecodeRecords 完成前不能 compact/release carry。
 			chunk, decodeErr := DecodeRecords(records, s.binding.schema.Fields, ProjectedPathSet{}, s.scope, s.bm)
 			if decodeErr != nil {
-				return nil, false, s.failLocked(decodeErr)
+				return nil, false, s.failLocked(fmt.Errorf("json: decode %s: %w", file.URI, decodeErr))
 			}
 			if compactErr := s.consumeLocked(consumed); compactErr != nil {
 				chunk.Release()
@@ -200,7 +201,7 @@ func (s *JSONRuntimeSource) readMoreLocked(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	result, err := driver.ReadRange(ctx, vfs.RangeRequest{
+	result, err := vfs.ReadInputRange(ctx, driver.ReadRange, vfs.RangeRequest{
 		URI: file.URI, Offset: s.offset, Length: length, Expected: &file.Identity, Tag: memory.TagReadAhead,
 	}, s.scope, s.bm)
 	if err != nil {

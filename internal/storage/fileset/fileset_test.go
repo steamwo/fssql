@@ -3,9 +3,13 @@ package fileset
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
+	"github.com/steamwo/fssql/internal/storage/local"
 	"github.com/steamwo/fssql/internal/storage/vfs"
 )
 
@@ -84,6 +88,102 @@ func TestPlannerPaginatesPrunesGlobAndDiscoversHive(t *testing.T) {
 	}
 	if set.Fingerprint() == "" {
 		t.Fatal("empty fingerprint")
+	}
+}
+
+type walkTestDriver struct {
+	vfs.Driver
+	entries []vfs.ListEntry
+	walks   int
+	visits  int
+}
+
+func (d *walkTestDriver) WalkList(_ context.Context, _ vfs.URI, prefix string, visit func(vfs.ListEntry) error) error {
+	if prefix != "data/" {
+		return fmt.Errorf("unexpected walk prefix %q", prefix)
+	}
+	d.walks++
+	for _, entry := range d.entries {
+		d.visits++
+		if err := visit(entry); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestPlannerWalksOnceAndStopsAtFileLimit(t *testing.T) {
+	pages := &fakeDriver{}
+	d := &walkTestDriver{Driver: pages}
+	for _, name := range []string{"b.csv", "a.csv", "c.json"} {
+		d.entries = append(d.entries, vfs.ListEntry{URI: mustURI(t, "s3://bucket/data/"+name)})
+	}
+	reg, err := vfs.NewRegistry(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := NewPlanner(reg)
+	set, err := planner.Plan(context.Background(), "s3://bucket/data/*.csv", PlanOptions{ListPageSize: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files := set.Files(); len(pages.tokens) != 0 || d.walks != 1 || len(files) != 2 || files[0].URI.ObjectKey() != "data/a.csv" {
+		t.Fatalf("pages=%v, walks=%d, files=%v", pages.tokens, d.walks, files)
+	}
+	d.visits = 0
+	_, err = planner.Plan(context.Background(), "s3://bucket/data/*.csv", PlanOptions{MaxFiles: 1})
+	if !errors.Is(err, ErrFileLimit) || d.visits != 2 {
+		t.Fatalf("visits=%d, err=%v", d.visits, err)
+	}
+}
+
+func BenchmarkPlannerLocalGlob(b *testing.B) {
+	root := b.TempDir()
+	for _, dir := range []string{"orders", "unrelated"} {
+		for day := 0; day < 22; day++ {
+			folder := filepath.Join(root, dir, fmt.Sprintf("day-%02d", day))
+			if err := os.MkdirAll(folder, 0o700); err != nil {
+				b.Fatal(err)
+			}
+			for part := 0; part < 100; part++ {
+				if err := os.WriteFile(filepath.Join(folder, fmt.Sprintf("part-%02d.csv", part)), nil, 0o600); err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	}
+	driver, err := local.NewDriver(root)
+	if err != nil {
+		b.Fatal(err)
+	}
+	pattern, err := local.URIFromPath(filepath.Join(root, "orders", "**", "*.csv"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		driver vfs.Driver
+	}{
+		{"walk", driver},
+		{"pages", struct{ vfs.Driver }{driver}},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			reg, err := vfs.NewRegistry(tc.driver)
+			if err != nil {
+				b.Fatal(err)
+			}
+			planner := NewPlanner(reg)
+			ctx := context.Background()
+			raw := pattern.String()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				set, err := planner.Plan(ctx, raw, PlanOptions{})
+				if err != nil || set.MatchedFiles() != 2200 {
+					b.Fatalf("unexpected local glob result: %v", err)
+				}
+			}
+		})
 	}
 }
 

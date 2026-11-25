@@ -63,8 +63,9 @@ type NDJSONBindOptions struct {
 	MaxRows                     int
 }
 type NDJSONBinding struct {
-	scanSet *fileset.ScanSet
-	schema  InferredSchema
+	scanSet  *fileset.ScanSet
+	schema   InferredSchema
+	explicit bool
 }
 
 func (b NDJSONBinding) ScanSet() *fileset.ScanSet { return b.scanSet }
@@ -100,7 +101,7 @@ func NewNDJSONBinder(r *vfs.Registry, s *memory.Scope, bm *memory.BufferManager)
 	return &NDJSONBinder{registry: r, planner: fileset.NewPlanner(r), scope: s, bm: bm}, nil
 }
 func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBindOptions) (NDJSONBinding, error) {
-	pattern, fileOpts, err := fileViewOptions(pattern, opts.FileSet, b.registry)
+	pattern, fileOpts, columns, err := fileOptions(pattern, opts.FileSet, b.registry)
 	if err != nil {
 		return NDJSONBinding{}, err
 	}
@@ -108,11 +109,10 @@ func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBind
 	if err != nil {
 		return NDJSONBinding{}, err
 	}
-	files := scanSet.Files()
-	if len(files) == 0 {
-		return NDJSONBinding{}, fileset.ErrNoMatches
+	if len(columns) != 0 {
+		return NDJSONBinding{scanSet: scanSet, schema: InferredSchema{Fields: columns}, explicit: true}, nil
 	}
-	file := files[0]
+	file := scanSet.Files()[0]
 	if file.Size <= 0 {
 		return NDJSONBinding{}, fmt.Errorf("json: empty NDJSON file")
 	}
@@ -146,7 +146,7 @@ func (b *NDJSONBinder) Bind(ctx context.Context, pattern string, opts NDJSONBind
 		maxRows = 2048
 	}
 	for {
-		res, err := d.ReadRange(ctx, vfs.RangeRequest{URI: file.URI, Offset: 0, Length: sample, Expected: &file.Identity, Tag: memory.TagReadAhead}, b.scope, b.bm)
+		res, err := vfs.ReadInputRange(ctx, d.ReadRange, vfs.RangeRequest{URI: file.URI, Offset: 0, Length: sample, Expected: &file.Identity, Tag: memory.TagReadAhead}, b.scope, b.bm)
 		if err != nil {
 			return NDJSONBinding{}, err
 		}
@@ -185,6 +185,9 @@ func (b *NDJSONBinder) InspectSource(ctx context.Context, pattern string, opts N
 	binding, err := b.Bind(ctx, pattern, opts)
 	if err != nil {
 		return introspection.SourceReport{}, err
+	}
+	if binding.explicit {
+		return introspection.NewSourceReport(binding.Schema().Fields, introspection.SchemaSourceExplicit, introspection.ConfidenceExact, binding.MatchedFiles(), 0, binding.Fingerprint(), false, false), nil
 	}
 	return introspection.NewSourceReport(binding.Schema().Fields, introspection.SchemaSourceSampleInferred, introspection.ConfidenceSampled, binding.MatchedFiles(), 1, binding.Fingerprint(), false, false), nil
 }
@@ -293,7 +296,7 @@ func (s *NDJSONSource) read(ctx context.Context, file fileset.FileSnapshot, off,
 	if err != nil {
 		return vfs.RangeResult{}, err
 	}
-	return d.ReadRange(ctx, vfs.RangeRequest{URI: file.URI, Offset: off, Length: n, Expected: &file.Identity, Tag: memory.TagReadAhead}, s.scope, s.bm)
+	return vfs.ReadInputRange(ctx, d.ReadRange, vfs.RangeRequest{URI: file.URI, Offset: off, Length: n, Expected: &file.Identity, Tag: memory.TagReadAhead}, s.scope, s.bm)
 }
 func (s *NDJSONSource) take() (ndjsonJob, bool, error) {
 	s.mu.Lock()
@@ -346,6 +349,7 @@ func (s *NDJSONSource) Next(ctx context.Context) (*vector.DataChunk, bool, error
 			c, rem, err = s.runJob(ctx, j)
 		}
 		if err != nil {
+			err = fmt.Errorf("ndjson: read %s: %w", j.file.URI, err)
 			s.fail(err)
 			return nil, false, err
 		}

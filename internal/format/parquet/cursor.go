@@ -183,7 +183,7 @@ func (c *ColumnCursor) readRange(ctx context.Context, offset, length int64, tag 
 	if c.reader != nil {
 		read = c.reader.ReadRange
 	}
-	result, err := read(ctx, request, c.scope, c.bm)
+	result, err := vfs.ReadInputRange(ctx, read, request, c.scope, c.bm)
 	c.metrics.Requests++
 	c.metrics.PlannedBytes += length
 	if err != nil {

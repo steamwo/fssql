@@ -65,7 +65,7 @@ func discoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		read = reader.ReadRange
 	}
 	trailerReq := vfs.RangeRequest{URI: src.URI, Offset: src.Size - 8, Length: 8, Expected: &identity, Tag: memory.TagParquetRange}
-	trailer, err := read(ctx, trailerReq, scope, bm)
+	trailer, err := vfs.ReadInputRange(ctx, read, trailerReq, scope, bm)
 	if err != nil {
 		return out, err
 	}
@@ -89,7 +89,7 @@ func discoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		if keys == nil {
 			return out, errEncryptedKeyRequired
 		}
-		head, err := read(ctx, vfs.RangeRequest{URI: src.URI, Offset: 0, Length: 4, Expected: &identity, Tag: memory.TagParquetRange}, scope, bm)
+		head, err := vfs.ReadInputRange(ctx, read, vfs.RangeRequest{URI: src.URI, Offset: 0, Length: 4, Expected: &identity, Tag: memory.TagParquetRange}, scope, bm)
 		if err != nil {
 			return out, err
 		}
@@ -116,7 +116,7 @@ func discoverFooter(ctx context.Context, driver vfs.Driver, src FooterSource, sc
 		return out, fmt.Errorf("%w: metadata offset %d", ErrInvalidFooter, metaOffset)
 	}
 	metaReq := vfs.RangeRequest{URI: src.URI, Offset: metaOffset, Length: metaLen, Expected: &identity, Tag: memory.TagMetadata}
-	meta, err := read(ctx, metaReq, scope, bm)
+	meta, err := vfs.ReadInputRange(ctx, read, metaReq, scope, bm)
 	if err != nil {
 		return out, err
 	}

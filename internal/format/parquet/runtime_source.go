@@ -115,9 +115,19 @@ func NewRuntimeSource(ctx context.Context, cfg RuntimeSourceConfig) (*RuntimeSou
 	}
 	baseTree := metadata[0].Footer.Schema
 	resolved := binding.Schema()
-	projectionIndexes, projectionNames, filters, err := resolveRuntimePushdown(resolved, cfg.Pushdown)
+	physicalPushdown := cfg.Pushdown
+	var partitionFilters []formatscan.IndexedFilter
+	if len(binding.partitionFields) != 0 {
+		physicalPushdown, partitionFilters = splitPartitionPushdown(cfg.Pushdown, len(binding.schema.Fields))
+	}
+	projectionIndexes, projectionNames, filters, err := resolveRuntimePushdown(binding.schema, physicalPushdown)
 	if err != nil {
 		return nil, err
+	}
+	if len(projectionIndexes) != 0 {
+		for i := range binding.partitionFields {
+			projectionIndexes = append(projectionIndexes, len(binding.schema.Fields)+i)
+		}
 	}
 	outputTypes := make([]types.LogicalType, len(resolved.Fields))
 	for i, field := range resolved.Fields {
@@ -143,10 +153,15 @@ func NewRuntimeSource(ctx context.Context, cfg RuntimeSourceConfig) (*RuntimeSou
 			return runtimePreparedFile{}, fmt.Errorf("parquet: runtime schema drift for %s: %w", file.URI.String(), err)
 		}
 		rowGroups := append([]RowGroup(nil), footer.Metadata.RowGroups...)
+		values := partitionValues(file, binding.partitionFields)
 		return runtimePreparedFile{
 			rowGroups: rowGroups,
 			newScanner: func(rg RowGroup) (runtimeRowGroupScanner, error) {
-				return NewRowGroupScanner(driver, file.URI, file.Identity, footer.Schema, rg, projectionNames, filters, binder.scope, binder.bm, batchSize)
+				scanner, err := NewRowGroupScanner(driver, file.URI, file.Identity, footer.Schema, rg, projectionNames, filters, binder.scope, binder.bm, batchSize)
+				if err != nil || len(values) == 0 {
+					return scanner, err
+				}
+				return &partitionScanner{runtimeRowGroupScanner: scanner, values: values, scope: binder.scope, buffers: binder.bm}, nil
 			},
 		}, nil
 	}
@@ -155,6 +170,9 @@ func NewRuntimeSource(ctx context.Context, cfg RuntimeSourceConfig) (*RuntimeSou
 		return nil, err
 	}
 	source.outputTypes = outputTypes
+	if len(partitionFilters) != 0 {
+		source.files = prunePartitionFiles(source.files, binding.partitionFields, partitionFilters)
+	}
 	source.projectionIndexes = projectionIndexes
 	source.scope = binder.scope
 	source.buffers = binder.bm

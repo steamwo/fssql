@@ -92,6 +92,10 @@ type DB struct {
 }
 
 func Open(config Config) (*DB, error) {
+	return open(config, false)
+}
+
+func open(config Config, localReadOnly bool) (*DB, error) {
 	if config.SampleCompatibility != "" && config.SampleCompatibility != "duckdb" && config.SampleCompatibility != "duckdb-msvc" {
 		return nil, errors.New("gosql: unsupported SampleCompatibility (use duckdb or duckdb-msvc)")
 	}
@@ -148,7 +152,7 @@ func Open(config Config) (*DB, error) {
 
 	drivers := make([]vfs.Driver, 0, 2)
 	if config.LocalFiles != nil {
-		driver, err := publicLocalDriver(*config.LocalFiles)
+		driver, err := publicLocalDriver(*config.LocalFiles, localReadOnly)
 		if err != nil {
 			return nil, err
 		}
