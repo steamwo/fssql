@@ -232,7 +232,7 @@ func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan
 	case planner.PhysicalUnionAll:
 		return b.lowerUnion(ctx, plan, sink)
 	case planner.PhysicalApply:
-		return b.buildJoinAware(ctx,plan.Children[0],&tableApplySink{executor:b.Executor,plan:plan,downstream:sink})
+		return b.buildJoinAware(ctx, plan.Children[0], &tableApplySink{executor: b.Executor, plan: plan, downstream: sink})
 	case planner.PhysicalFilter:
 		filter, err := sqltransform.NewFilter(b.Executor, plan.Predicate)
 		if err != nil {
@@ -264,6 +264,7 @@ func (b *Builder) buildJoinAware(ctx context.Context, plan *planner.PhysicalPlan
 		}
 		return b.buildJoinAware(ctx, plan.Children[0], wrapped)
 	case planner.PhysicalHashAggregate, planner.PhysicalDistinct, planner.PhysicalSort:
+		plan = directJoinAggregatePlan(plan)
 		operator, suffix, err := b.openBlockingOperator(ctx, plan)
 		if err != nil {
 			return nil, err
@@ -434,6 +435,7 @@ func combineAbort(first, second func() error) func() error {
 
 // lowerAggregate 创建 aggregate operator 后复用统一 blocking-stage 生命周期。
 func (b *Builder) lowerAggregate(ctx context.Context, plan *planner.PhysicalPlan) (loweredStage, error) {
+	plan = directJoinAggregatePlan(plan)
 	child := plan.Children[0]
 	if inner, keyIndex, ok := distinctCountChild(plan); ok {
 		if factory, implemented := b.Aggregates.(DistinctCountAggregateFactory); implemented {
@@ -589,4 +591,29 @@ func (b *Builder) lowerBlockingStage(ctx context.Context, child *planner.Physica
 		relationID:   childStage.relationID + ":" + suffix,
 		dependencies: []*pipeline.Pipeline{childPipeline},
 	}, nil
+}
+
+func directJoinAggregatePlan(plan *planner.PhysicalPlan) *planner.PhysicalPlan {
+	child := plan.Children[0]
+	// Pure aggregate arguments can address the JOIN schema directly. Removing
+	// this pre-projection exposes the optional match-batch consumer on the bridge.
+	if plan.Kind == planner.PhysicalHashAggregate && len(plan.GroupBy) == 0 && child.Kind == planner.PhysicalProject && len(child.Children) == 1 && child.Children[0].Kind == planner.PhysicalHashJoin {
+		mapping := make([]int, len(child.Projection))
+		pure := true
+		for i, expr := range child.Projection {
+			if expr == nil || expr.Kind != binder.BoundColumn || expr.ColumnIndex < 0 || expr.ColumnIndex >= len(child.Children[0].Output) || !expr.Type.Same(child.Children[0].Output[expr.ColumnIndex].Type) {
+				pure = false
+				break
+			}
+			mapping[i] = expr.ColumnIndex
+		}
+		if pure {
+			if specs := remapAggregateArguments(plan.Aggregates, mapping); specs != nil {
+				copyPlan := *plan
+				copyPlan.Children, copyPlan.Aggregates = child.Children, specs
+				plan, child = &copyPlan, child.Children[0]
+			}
+		}
+	}
+	return plan
 }

@@ -107,6 +107,34 @@ func (b *Bridge) Consume(ctx context.Context, chunk *vector.DataChunk) error {
 	return b.op.Consume(ctx, chunk)
 }
 
+// ConsumeJoinBatch uses the same lifecycle barrier as ordinary Consume.
+func (b *Bridge) ConsumeJoinBatch(ctx context.Context, batch pipeline.JoinBatch) (bool, error) {
+	consumer, ok := b.op.(pipeline.JoinBatchConsumer)
+	if !ok {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return true, err
+	}
+	if b.concurrent {
+		b.gate.RLock()
+		defer b.gate.RUnlock()
+	} else {
+		b.consumeMu.Lock()
+		defer b.consumeMu.Unlock()
+	}
+	b.stateMu.Lock()
+	closed, finalized := b.closed, b.finalized
+	b.stateMu.Unlock()
+	if closed {
+		return true, fmt.Errorf("blocking bridge is closed")
+	}
+	if finalized {
+		return true, fmt.Errorf("blocking bridge already finalized")
+	}
+	return consumer.ConsumeJoinBatch(ctx, batch)
+}
+
 // Finalize 关闭 dependency Consume 阶段；它不调用 Emit，避免在 dependency pipeline 内 materialize 全部结果。
 func (b *Bridge) Finalize(ctx context.Context) error {
 	if b == nil || b.op == nil {

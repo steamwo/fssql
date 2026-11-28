@@ -229,6 +229,16 @@ func NewDictionary(child *Vector, sel SelectionVector) (*Vector, error) {
 	return &Vector{Type: child.Type, Kind: Dictionary, count: sel.Len(), dictChild: child, dictSel: sel, validity: NewValidityMask(sel.Len())}, nil
 }
 func (v *Vector) Count() int         { return v.count }
+
+// ResetStringHeap reuses the storage of a flat output vector. All previously
+// written values must be dead and every consumed row must be overwritten before
+// the next read. Fixed-width vectors need no reset; their gathers write validity.
+func (v *Vector) ResetStringHeap() {
+	if v.Kind == Flat && v.heap != nil {
+		v.heap.used = 0
+	}
+}
+
 func (v *Vector) IsValid(i int) bool { idx, base := v.resolve(i); return base.validity.IsValid(idx) }
 func (v *Vector) SetNull(i int) {
 	if v.Kind == Dictionary {

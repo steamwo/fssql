@@ -1,0 +1,422 @@
+{
+  "before/BenchmarkJoinVectorPipeline/memory/inner": {
+    "samples": [
+      {
+        "ns": 399240.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 396133.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 413189.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 411515.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 451104.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 443044.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 654915.0,
+        "bytes": 96336,
+        "allocations": 31
+      }
+    ],
+    "median_ns": 413189.0,
+    "median_bytes": 96336,
+    "median_allocations": 31
+  },
+  "before/BenchmarkJoinVectorPipeline/memory/left": {
+    "samples": [
+      {
+        "ns": 499317.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 776643.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 489523.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 602182.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 599930.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 497285.0,
+        "bytes": 96336,
+        "allocations": 31
+      },
+      {
+        "ns": 513418.0,
+        "bytes": 96336,
+        "allocations": 31
+      }
+    ],
+    "median_ns": 513418.0,
+    "median_bytes": 96336,
+    "median_allocations": 31
+  },
+  "before/BenchmarkJoinVectorPipeline/stable/inner": {
+    "samples": [
+      {
+        "ns": 45928.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 45507.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 45329.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 44268.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 43272.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 47833.0,
+        "bytes": 39936,
+        "allocations": 23
+      },
+      {
+        "ns": 46613.0,
+        "bytes": 39936,
+        "allocations": 23
+      }
+    ],
+    "median_ns": 45507.0,
+    "median_bytes": 39936,
+    "median_allocations": 23
+  },
+  "before/BenchmarkJoinVectorPipeline/stable/left": {
+    "samples": [
+      {
+        "ns": 140785.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 142724.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 135571.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 151980.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 145538.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 144641.0,
+        "bytes": 68272,
+        "allocations": 28
+      },
+      {
+        "ns": 140069.0,
+        "bytes": 68272,
+        "allocations": 28
+      }
+    ],
+    "median_ns": 142724.0,
+    "median_bytes": 68272,
+    "median_allocations": 28
+  },
+  "after/BenchmarkJoinVectorPipeline/memory/inner": {
+    "samples": [
+      {
+        "ns": 65871.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 65100.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 83820.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 60359.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 64937.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 62983.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 62217.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 64937.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  },
+  "after/BenchmarkJoinVectorPipeline/memory/left": {
+    "samples": [
+      {
+        "ns": 95686.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 83005.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 94817.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 86578.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 113147.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 94567.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 86057.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 94567.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  },
+  "after/BenchmarkJoinVectorPipeline/stable/inner": {
+    "samples": [
+      {
+        "ns": 43320.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 38984.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 37231.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 34960.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 34755.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 34561.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 33868.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 34960.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  },
+  "after/BenchmarkJoinVectorPipeline/stable/left": {
+    "samples": [
+      {
+        "ns": 107121.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 106435.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 106904.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 108533.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 104387.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 103892.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 101519.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 106435.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  },
+  "after/BenchmarkJoinGlobalAggregate/fusedfalse": {
+    "samples": [
+      {
+        "ns": 71414.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 74347.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 73938.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 82600.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 82776.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 81199.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 83705.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 81199.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  },
+  "after/BenchmarkJoinGlobalAggregate/fusedtrue": {
+    "samples": [
+      {
+        "ns": 64766.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 80379.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 64174.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 64544.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 65717.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 63518.0,
+        "bytes": 0,
+        "allocations": 0
+      },
+      {
+        "ns": 62481.0,
+        "bytes": 0,
+        "allocations": 0
+      }
+    ],
+    "median_ns": 64544.0,
+    "median_bytes": 0,
+    "median_allocations": 0
+  }
+}

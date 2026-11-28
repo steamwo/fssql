@@ -170,11 +170,10 @@ func (j *ExternalHashJoin) probeChunk(ctx context.Context, chunk *vector.DataChu
 	if err := exechash.HashChunk(chunk, j.probeKeys, hashes[:chunk.Cardinality]); err != nil {
 		return err
 	}
-	comparer, err := exechash.NewChunkKeyComparer(chunk, j.probeKeys)
-	if err != nil {
+	if err := emitter.comparer.Reset(chunk, j.probeKeys); err != nil {
 		return err
 	}
-	return j.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], comparer, emitter, stable)
+	return j.probeBatch(ctx, chunk, hashes[:chunk.Cardinality], &emitter.comparer, emitter, stable)
 }
 
 // probeDenseIntegers 一次收集整批匹配行；唯一构建键保证每个 probe 行最多产生一行。
