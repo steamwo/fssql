@@ -14,6 +14,8 @@ import (
 
 // LocalFileConfig explicitly enables access to local files below RootDir.
 // RootDir must be absolute; zero configuration keeps file:// disabled.
+// The host must protect the root and its ancestors from untrusted modification;
+// path validation does not provide an OS-level filesystem sandbox.
 type LocalFileConfig struct {
 	RootDir string
 }

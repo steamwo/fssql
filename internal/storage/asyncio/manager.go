@@ -105,14 +105,14 @@ func (m *Manager) SubmitReadAhead(ctx context.Context, req Request) Future {
 func (m *Manager) Active() int64 { return m.active.Load() }
 
 func (m *Manager) Close() {
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		return
-	}
-	m.closed = true
+	// Wake blocked submissions before waiting for their read locks. The queue
+	// remains open until every submitter has left the send select.
 	m.cancel()
-	close(m.jobs)
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+		close(m.jobs)
+	}
 	m.mu.Unlock()
 	m.wg.Wait()
 }

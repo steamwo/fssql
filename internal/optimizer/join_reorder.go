@@ -94,6 +94,10 @@ func (g *joinGraph) collect(plan *planner.LogicalPlan) bool {
 		if !ok || a < 0 || b < 0 || a >= len(plan.Output) || b >= len(plan.Output) || (a < width) == (b < width) {
 			return false
 		}
+		// Predicates and edge endpoints share the root join's column layout.
+		if start != 0 {
+			expr = remapJoinExpr(expr, func(index int) int { return start + index })
+		}
 		g.edges = append(g.edges, joinEdge{start + a, start + b, expr})
 		return true
 	})

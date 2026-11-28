@@ -70,6 +70,8 @@ MemoryUsed and MemoryLimitBytes describe engine-managed memory, not total proces
 
 `LocalFileConfig.RootDir` must be an absolute directory. Use `FileURI` for platform paths rather than constructing `file://` strings, especially on Windows. Configuring a root does not make paths outside that root accessible.
 
+The host must protect the root directory and its ancestors from untrusted modification. Local path checks are not an OS-level sandbox against concurrent replacement of directories or symlinks; use operating-system permissions or process isolation for that boundary.
+
 ```go
 root, err := filepath.Abs("data") // an existing application data directory
 if err != nil { return err }

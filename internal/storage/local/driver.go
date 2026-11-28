@@ -196,19 +196,36 @@ func (d *Driver) ReadRange(ctx context.Context, request vfs.RangeRequest, scope 
 	if request.Length > int64(int(^uint(0)>>1)) {
 		return vfs.RangeResult{}, fmt.Errorf("local: range length too large: %d", request.Length)
 	}
-	p, err := d.localPath(request.URI, true)
-	if err != nil {
-		return vfs.RangeResult{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		return vfs.RangeResult{}, err
-	}
-	f, err := os.Open(p)
+	f, p, err := d.openRead(ctx, request.URI)
 	if err != nil {
 		return vfs.RangeResult{}, err
 	}
 	defer f.Close()
 	return readFileRange(ctx, request, scope, bm, f, p, nil)
+}
+
+// openRead opens the resolved, root-checked path rather than following the
+// caller's symlink again after validation. The directory tree must be trusted:
+// path-based validation cannot isolate hostile concurrent ancestor replacement.
+func (d *Driver) openRead(ctx context.Context, u vfs.URI) (*os.File, string, error) {
+	p, err := d.localPath(u, true)
+	if err != nil {
+		return nil, "", err
+	}
+	resolved, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return nil, "", err
+	}
+	if !withinRoot(d.root, resolved) {
+		return nil, "", fmt.Errorf("local: symlink escapes configured root: %s", u.String())
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
+	f, err := os.Open(resolved)
+	// Retain the requested path for readFileRange's replacement check, so
+	// retargeting an alias also invalidates an already-open reader.
+	return f, p, err
 }
 
 // readFileRange 保留读前、读后及路径身份检查，避免句柄复用掩盖文件修改或替换。
@@ -265,7 +282,7 @@ func readFileRange(ctx context.Context, request vfs.RangeRequest, scope *memory.
 	if err != nil {
 		return fail(err)
 	}
-	if !identity.Matches(infoIdentity(afterFD)) {
+	if !os.SameFile(before, afterFD) || !identity.Matches(infoIdentity(afterFD)) {
 		return fail(vfs.ErrObjectChanged)
 	}
 	// Also verify the pathname still names the same detectable version. On Unix an
@@ -274,7 +291,7 @@ func readFileRange(ctx context.Context, request vfs.RangeRequest, scope *memory.
 	if err != nil {
 		return fail(vfs.ErrObjectChanged)
 	}
-	if !identity.Matches(infoIdentity(afterPath)) {
+	if !os.SameFile(before, afterPath) || !identity.Matches(infoIdentity(afterPath)) {
 		return fail(vfs.ErrObjectChanged)
 	}
 	return vfs.RangeResult{Buffer: buf, Identity: identity}, nil

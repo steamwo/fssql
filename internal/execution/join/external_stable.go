@@ -303,7 +303,13 @@ func (s *stableExternalProbeSink) finishLocked(ctx context.Context) error {
 	j.core.releaseLocked()
 	return nil
 }
-func (s *stableExternalProbeSink) Close() error { s.join.Close(); return nil }
+func (s *stableExternalProbeSink) Close() error {
+	s.join.Close()
+	if downstream, ok := s.downstream.(pipeline.CloseableSink); ok {
+		return downstream.Close()
+	}
+	return nil
+}
 
 func (j *StableExternalHashJoin) processSpilled(ctx context.Context, buildSet, probeSet partitionSet, depth int, parentBytes uint64, emitter *stableStoredEmitter) error {
 	if buildSet.rows == 0 || probeSet.rows == 0 {

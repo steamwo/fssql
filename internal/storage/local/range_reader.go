@@ -27,11 +27,7 @@ func (d *Driver) OpenRangeReader(ctx context.Context, uri vfs.URI, expected *vfs
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	path, err := d.localPath(uri, true)
-	if err != nil {
-		return nil, err
-	}
-	file, err := os.Open(path)
+	file, path, err := d.openRead(ctx, uri)
 	if err != nil {
 		return nil, err
 	}

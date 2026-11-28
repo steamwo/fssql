@@ -477,6 +477,16 @@ func (s *probeSink) Consume(ctx context.Context, chunk *vector.DataChunk) error 
 	return nil
 }
 
+// Close propagates abort cleanup through nested join/transform sinks. Normal
+// Finalize may be interrupted after an upstream join has emitted its rows.
+func (s *probeSink) Close() error {
+	s.join.Close()
+	if downstream, ok := s.downstream.(pipeline.CloseableSink); ok {
+		return downstream.Close()
+	}
+	return nil
+}
+
 func (s *probeSink) Finalize(ctx context.Context) error {
 	j := s.join
 	if err := ctx.Err(); err != nil {

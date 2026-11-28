@@ -234,6 +234,9 @@ func (r *sqlRows) Columns() []string {
 func (r *sqlRows) Close() error {
 	var closeErr error
 	r.closeOnce.Do(func() {
+		// Sources and operators run on the query context, including readers that
+		// are blocked before producing their next chunk.
+		r.q.Cancel()
 		r.cancel()
 		if r.current != nil {
 			r.current.Release()

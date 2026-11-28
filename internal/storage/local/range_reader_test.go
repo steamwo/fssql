@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/memory"
@@ -120,6 +121,61 @@ func TestRangeReaderDetectsModificationDuringRead(t *testing.T) {
 	})
 	if _, err := reader.ReadRange(context.Background(), vfs.RangeRequest{URI: uri, Length: 3}, scope, bm); !errors.Is(err, vfs.ErrObjectChanged) {
 		t.Fatalf("concurrent modification error=%v", err)
+	}
+	if scope.Used() != 0 {
+		t.Fatalf("failed read retained %d bytes", scope.Used())
+	}
+}
+
+func TestRangeReaderDetectsReplacementWithMatchingMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents replacing files opened by this reader")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "input.bin")
+	if err := os.WriteFile(path, []byte("original"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	driver, err := NewDriver(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uri := mustURI(t, path)
+	reader, err := driver.OpenRangeReader(context.Background(), uri, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	original, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Keep the original inode alive via the reader while replacing the path
+	// with a different file carrying the same size and modification time.
+	if err := os.Rename(path, filepath.Join(root, "previous.bin")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("replaced"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !infoIdentity(original).Matches(infoIdentity(replacement)) {
+		t.Fatal("test files do not have matching metadata")
+	}
+	scope, bm := managed(t, 1024)
+	defer scope.Close()
+	res, err := reader.ReadRange(context.Background(), vfs.RangeRequest{URI: uri, Length: 3}, scope, bm)
+	if res.Buffer != nil {
+		res.Buffer.Release()
+	}
+	if !errors.Is(err, vfs.ErrObjectChanged) {
+		t.Fatalf("replacement error=%v, want ErrObjectChanged", err)
 	}
 	if scope.Used() != 0 {
 		t.Fatalf("failed read retained %d bytes", scope.Used())

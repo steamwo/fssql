@@ -139,6 +139,11 @@ func (r *compactReader) listHeader() (byte, int, error) {
 		}
 		n = int(u)
 	}
+	// Every collection value occupies at least one byte, including an empty
+	// struct's STOP marker. Reject truncated counts before allocating slices.
+	if n > r.remaining() {
+		return 0, 0, fmt.Errorf("parquet: compact collection length %d exceeds remaining bytes %d", n, r.remaining())
+	}
 	return typ, n, nil
 }
 func (r *compactReader) boolValue(f fieldHeader) (bool, error) {

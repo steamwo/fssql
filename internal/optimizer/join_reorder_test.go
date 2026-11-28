@@ -2,6 +2,8 @@ package optimizer
 
 import (
 	"context"
+	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/steamwo/fssql/internal/core/types"
@@ -73,6 +75,111 @@ func TestOptimizeJoinOrderPreservesDisconnectedAndOuterJoins(t *testing.T) {
 	physical, err = o.Optimize(context.Background(), root)
 	if err != nil || physical.Children[0].Join != planner.JoinLeft || physical.Children[0].Children[0].Scan.RelationID != "a" {
 		t.Fatalf("outer join changed: %v", err)
+	}
+}
+
+func TestOptimizeJoinOrderPreservesNestedJoinKeys(t *testing.T) {
+	eq := func(left, right int) *binder.BoundExpression {
+		return joinTestComparison("=", joinTestRef(left), joinTestRef(right))
+	}
+	for _, tc := range []struct {
+		name   string
+		inputs int
+		build  func([]*planner.LogicalPlan) *planner.LogicalPlan
+		keys   []string
+	}{
+		{
+			name: "right_nested_composite_keys", inputs: 3,
+			build: func(scans []*planner.LogicalPlan) *planner.LogicalPlan {
+				right := joinTestPlan(scans[1], scans[2], joinAnd(eq(1, 2), eq(3, 0)))
+				return joinTestPlan(scans[0], right, eq(0, 2))
+			},
+			keys: []string{"a_key=b_key", "b_extra=c_key", "b_key=c_extra"},
+		},
+		{
+			name: "bushy", inputs: 4,
+			build: func(scans []*planner.LogicalPlan) *planner.LogicalPlan {
+				left := joinTestPlan(scans[0], scans[1], eq(1, 2))
+				right := joinTestPlan(scans[2], scans[3], eq(3, 0))
+				return joinTestPlan(left, right, eq(3, 5))
+			},
+			keys: []string{"a_extra=b_key", "b_extra=c_extra", "c_key=d_extra"},
+		},
+		{
+			name: "deeply_right_nested", inputs: 4,
+			build: func(scans []*planner.LogicalPlan) *planner.LogicalPlan {
+				right := joinTestPlan(scans[2], scans[3], eq(1, 2))
+				right = joinTestPlan(scans[1], right, eq(0, 2))
+				return joinTestPlan(scans[0], right, eq(1, 2))
+			},
+			keys: []string{"a_extra=b_key", "b_key=c_key", "c_extra=d_key"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			statistics := fakeStats{}
+			var scans []*planner.LogicalPlan
+			var wantColumns []string
+			for i, name := range []string{"a", "b", "c", "d"}[:tc.inputs] {
+				scan, estimate := testScan(name, []uint64{1000, 100, 10, 1}[i])
+				scan.Output = []planner.Column{joinTestColumn(name + "_key"), joinTestColumn(name + "_extra")}
+				scans = append(scans, scan)
+				statistics[estimate.Fingerprint] = estimate
+				wantColumns = append(wantColumns, name+"_key", name+"_extra")
+			}
+			original := tc.build(scans)
+			if err := original.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			rightPredicate := original.Children[1].Predicate
+			wantPredicate := remapJoinExpr(rightPredicate, func(index int) int { return index })
+			physical, err := (&Optimizer{Statistics: statistics}).Optimize(context.Background(), original)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var gotKeys []string
+			var columns func(*planner.PhysicalPlan) []string
+			columns = func(plan *planner.PhysicalPlan) []string {
+				switch plan.Kind {
+				case planner.PhysicalScan:
+					return []string{plan.Output[0].Name, plan.Output[1].Name}
+				case planner.PhysicalProject:
+					input := columns(plan.Children[0])
+					out := make([]string, len(plan.Projection))
+					for i, expr := range plan.Projection {
+						out[i] = input[expr.ColumnIndex]
+					}
+					return out
+				case planner.PhysicalHashJoin:
+					left, right := columns(plan.Children[0]), columns(plan.Children[1])
+					keys, err := planner.ExtractHashJoinKeys(plan.Predicate, len(left), len(right))
+					if err != nil {
+						t.Fatal(err)
+					}
+					for i, index := range keys.Left {
+						a, b := left[index], right[keys.Right[i]]
+						if a > b {
+							a, b = b, a
+						}
+						gotKeys = append(gotKeys, a+"="+b)
+					}
+					return append(left, right...)
+				default:
+					t.Fatalf("unexpected physical kind %v", plan.Kind)
+					return nil
+				}
+			}
+			if got := columns(physical); !slices.Equal(got, wantColumns) {
+				t.Fatalf("output columns=%v, want %v", got, wantColumns)
+			}
+			slices.Sort(gotKeys)
+			if !slices.Equal(gotKeys, tc.keys) {
+				t.Fatalf("join keys=%v, want %v", gotKeys, tc.keys)
+			}
+			if !reflect.DeepEqual(rightPredicate, wantPredicate) {
+				t.Fatal("optimizer mutated the original nested join predicate")
+			}
+		})
 	}
 }
 
