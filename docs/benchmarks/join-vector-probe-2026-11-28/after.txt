@@ -1,0 +1,42 @@
+BenchmarkJoinVectorPipeline/memory/inner         	    3415	     65871 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3776	     65100 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3445	     83820 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3879	     60359 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3382	     64937 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3818	     62983 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/inner         	    3771	     62217 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2683	     95686 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2919	     83005 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2802	     94817 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2826	     86578 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2611	    113147 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2712	     94567 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/memory/left         	    2376	     86057 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    4768	     43320 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    7104	     38984 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    6711	     37231 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    7014	     34960 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    6620	     34755 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    6105	     34561 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/inner         	    7134	     33868 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    1962	    107121 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    2200	    106435 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    2185	    106904 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    1918	    108533 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    1929	    104387 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    2296	    103892 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinVectorPipeline/stable/left         	    2373	    101519 ns/op	      2048 rows/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    3296	     71414 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    3246	     74347 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    2715	     73938 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    3344	     82600 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    3369	     82776 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    2977	     81199 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedfalse         	    3265	     83705 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3766	     64766 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3391	     80379 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3847	     64174 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3703	     64544 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3079	     65717 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3372	     63518 ns/op	       0 B/op	       0 allocs/op
+BenchmarkJoinGlobalAggregate/fusedtrue         	    3918	     62481 ns/op	       0 B/op	       0 allocs/op

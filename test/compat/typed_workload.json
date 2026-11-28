@@ -186,5 +186,90 @@
     "priority": "P1",
     "sql": "SELECT id, upper(CAST(grp AS VARCHAR) || 'a') AS u, abs(id - 2048) AS n FROM {batch} ORDER BY id",
     "ordered": true
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-INNER",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,COUNT(l.v) AS lc,COUNT(r.v) AS rc,SUM(l.v) AS ls,SUM(r.v) AS rs FROM l INNER JOIN r ON l.k=r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-LEFT",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,COUNT(l.v) AS lc,COUNT(r.v) AS rc,SUM(l.v) AS ls,SUM(r.v) AS rs FROM l LEFT JOIN r ON l.k=r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-RIGHT",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,COUNT(l.v) AS lc,COUNT(r.v) AS rc,SUM(l.v) AS ls,SUM(r.v) AS rs FROM l RIGHT JOIN r ON l.k=r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-FULL",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,COUNT(l.v) AS lc,COUNT(r.v) AS rc,SUM(l.v) AS ls,SUM(r.v) AS rs FROM l FULL JOIN r ON l.k=r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-EMPTY",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "SELECT COUNT(*) AS n,COUNT(b.id) AS c,SUM(b.id) AS s FROM range(8) a(id) JOIN range(0) b(id) ON a.id=b.id"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-NULL-SAFE",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,COUNT(r.v) AS c,SUM(r.v) AS s FROM l LEFT JOIN r ON l.k IS NOT DISTINCT FROM r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-FLOAT",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "SELECT COUNT(*) AS n,COUNT(b.v) AS c,SUM(b.v) AS s FROM range(100) a(id) LEFT JOIN (SELECT id,CAST(id AS DOUBLE)/4 AS v FROM range(37) t(id)) b ON a.id=b.id"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-DECIMAL",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "SELECT SUM(b.v) AS s FROM range(100) a(id) JOIN (SELECT id,CAST(id AS DECIMAL(10,2)) AS v FROM range(37) t(id)) b ON a.id=b.id"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-EXPRESSION-FALLBACK",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT COUNT(*) AS n,SUM(r.v+1) AS s FROM l LEFT JOIN r ON l.k=r.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-GROUP-FALLBACK",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "WITH l AS (SELECT 1 AS k, 10 AS v UNION ALL SELECT 2,NULL UNION ALL SELECT 9,90 UNION ALL SELECT NULL,40), r AS (SELECT 1 AS k, 3 AS v UNION ALL SELECT 1,NULL UNION ALL SELECT 2,5 UNION ALL SELECT 8,80 UNION ALL SELECT NULL,99) SELECT l.k AS k,COUNT(*) AS n,SUM(r.v) AS s FROM l LEFT JOIN r ON l.k=r.k GROUP BY l.k"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-STRING-COUNT",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "SELECT COUNT(b.v) AS n FROM range(100) a(id) LEFT JOIN (SELECT id,CAST(id AS VARCHAR) AS v FROM range(37) t(id)) b ON a.id=b.id"
+  },
+  {
+    "id": "JOIN-GLOBAL-BATCH-HUGEINT-OVERFLOW",
+    "source": "synthetic",
+    "capability": "join-aggregate",
+    "priority": "P0",
+    "sql": "SELECT SUM(b.v) AS s FROM range(2) a(id) JOIN (SELECT id,CAST('170141183460469231731687303715884105727' AS HUGEINT) AS v FROM range(2) t(id)) b ON a.id=b.id",
+    "error_category": "overflow"
   }
 ]

@@ -230,6 +230,10 @@ func (a *externalJoinAdapter) Close()                                      { a.c
 // inMemoryJoinAdapter 包装既有 HashJoin；CROSS 固定以右侧 build、左侧 probe。
 type inMemoryJoinAdapter struct{ core *execjoin.HashJoin }
 
+func (a *inMemoryJoinAdapter) SetRequiredOutputColumns(needed []bool) error {
+	return a.core.SetRequiredOutputColumns(needed)
+}
+
 func (a *inMemoryJoinAdapter) BuildSide() pipeline.BinaryBuildSide              { return pipeline.BinaryBuildRight }
 func (a *inMemoryJoinAdapter) BuildSink() pipeline.Sink                          { return a.core.BuildSink() }
 func (a *inMemoryJoinAdapter) ProbeSink(downstream pipeline.Sink) pipeline.Sink  { return a.core.ProbeSink(downstream) }

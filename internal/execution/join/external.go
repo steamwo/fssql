@@ -391,6 +391,7 @@ type hybridPartition struct {
 
 // ExternalHashJoin 管理可溢写的哈希分区和可选的唯一整数直接索引。
 type ExternalHashJoin struct {
+	outputs outputPool
 	mu      sync.Mutex
 	spillMu sync.Mutex
 	// probeRows is updated by concurrent probe workers; Stats folds it in.
@@ -630,6 +631,7 @@ func (j *ExternalHashJoin) enforceBuildBudget(ctx context.Context) error {
 
 // releaseLocked 在所有 probe worker 退出后回收索引、驻留行及溢写资源。
 func (j *ExternalHashJoin) releaseLocked() {
+	j.outputs.close()
 	if j.dense != nil {
 		j.dense.release()
 		j.dense = nil
@@ -830,9 +832,13 @@ func (s *externalProbeSink) Consume(ctx context.Context, chunk *vector.DataChunk
 	}
 	j.mu.Unlock()
 
-	em := newBatchEmitter(Inner, j.config.Scope, j.config.Buffers, j.config.LeftTypes, j.config.RightTypes, j.buildSide, j.buildLayout, s.downstream)
-	em.required = j.config.RequiredOutput
-	if err := j.probeChunk(ctx, chunk, &em, nil); err != nil {
+	em, err := j.outputs.emitter(j.config.Scope, j.config.Buffers, Inner, j.config.LeftTypes, j.config.RightTypes, j.buildSide, j.buildLayout, j.config.RequiredOutput, s.downstream)
+	if err != nil {
+		j.recordProbeFailure(err)
+		return err
+	}
+	defer j.outputs.releaseEmitter(em)
+	if err := j.probeChunk(ctx, chunk, em, nil); err != nil {
 		em.abort()
 		j.recordProbeFailure(err)
 		return err
@@ -1193,6 +1199,7 @@ func (s *externalProbeSink) Finalize(ctx context.Context) error {
 		}
 	}
 	em := newStoredEmitter(j, s.downstream)
+	defer em.abort()
 	for i := range j.partitions {
 		p := &j.partitions[i]
 		if !p.spilled {
@@ -1228,6 +1235,7 @@ type storedEmitter struct {
 	downstream pipeline.Sink
 	cols       []*vector.Vector
 	count      int
+	output     *joinOutput
 }
 
 func newStoredEmitter(j *ExternalHashJoin, downstream pipeline.Sink) *storedEmitter {
@@ -1235,16 +1243,25 @@ func newStoredEmitter(j *ExternalHashJoin, downstream pipeline.Sink) *storedEmit
 }
 func (e *storedEmitter) ensure() error {
 	if e.cols != nil {
+		if e.count == 0 {
+			for _, column := range e.cols {
+				column.ResetStringHeap()
+			}
+		}
 		return nil
 	}
-	typesOut := make([]types.LogicalType, 0, len(e.join.config.LeftTypes)+len(e.join.config.RightTypes))
-	typesOut = append(typesOut, e.join.config.LeftTypes...)
-	typesOut = append(typesOut, e.join.config.RightTypes...)
-	cols, err := newOutputColumns(e.join.config.Scope, e.join.config.Buffers, typesOut, e.join.config.RequiredOutput, vector.DefaultVectorSize)
-	if err != nil { return err }
-	e.cols = cols
+	core := e.join
+	out, err := core.outputs.acquire(core.config.Scope, core.config.Buffers, core.config.Type, core.config.LeftTypes, core.config.RightTypes, core.config.RequiredOutput, vector.DefaultVectorSize)
+	if err != nil {
+		return err
+	}
+	e.output, e.cols = out, out.chunk.Columns
+	for _, column := range e.cols {
+		column.ResetStringHeap()
+	}
 	return nil
 }
+
 func (e *storedEmitter) append(ctx context.Context, buildRow, probeRow []byte) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -1279,18 +1296,17 @@ func (e *storedEmitter) flush(ctx context.Context) error {
 	if e.count == 0 {
 		return nil
 	}
-	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
-	e.cols = nil
+	transferred, err := consumeOutput(ctx, e.downstream, e.output, e.count)
+	if transferred {
+		e.output, e.cols = nil, nil
+	}
 	e.count = 0
 	return err
 }
+
 func (e *storedEmitter) abort() {
-	for _, v := range e.cols {
-		if v != nil {
-			v.Release()
-		}
+	if e.output != nil {
+		e.join.outputs.put(e.output)
 	}
-	e.cols = nil
-	e.count = 0
+	e.output, e.cols, e.count = nil, nil, 0
 }

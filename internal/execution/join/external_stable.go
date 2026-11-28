@@ -233,15 +233,23 @@ func (s *stableExternalProbeSink) Consume(ctx context.Context, chunk *vector.Dat
 	if s.Finished() {
 		return ctx.Err()
 	}
-	emitter := newBatchEmitter(core.config.Type, core.config.Scope, core.config.Buffers, core.config.LeftTypes, core.config.RightTypes, core.buildSide, core.buildLayout, s.downstream)
-	emitter.required = core.config.RequiredOutput
-	if err := core.probeChunk(ctx, chunk, &emitter, j); err != nil {
+	emitter, err := core.outputs.emitter(core.config.Scope, core.config.Buffers, core.config.Type, core.config.LeftTypes, core.config.RightTypes, core.buildSide, core.buildLayout, core.config.RequiredOutput, s.downstream)
+	if err != nil {
+		core.recordProbeFailure(err)
+		return err
+	}
+	defer core.outputs.releaseEmitter(emitter)
+	if err := core.probeChunk(ctx, chunk, emitter, j); err != nil {
 		emitter.abort()
 		core.recordProbeFailure(err)
 		return err
 	}
 	core.probeRows.Add(uint64(chunk.Cardinality))
-	if err := emitter.flush(ctx); err != nil { emitter.abort(); core.recordProbeFailure(err); return err }
+	if err := emitter.flush(ctx); err != nil {
+		emitter.abort()
+		core.recordProbeFailure(err)
+		return err
+	}
 	return nil
 }
 
@@ -250,47 +258,76 @@ func (s *stableExternalProbeSink) Finalize(ctx context.Context) error {
 	core := j.core
 	core.mu.Lock()
 	defer core.mu.Unlock()
-	if err := ctx.Err(); err != nil { return j.failLocked(err) }
-	if core.failed != nil { return core.failed }
-	if core.closed || !core.built { return j.failLocked(errors.New("external join not ready for finalize")) }
+	if err := ctx.Err(); err != nil {
+		return j.failLocked(err)
+	}
+	if core.failed != nil {
+		return core.failed
+	}
+	if core.closed || !core.built {
+		return j.failLocked(errors.New("external join not ready for finalize"))
+	}
 	if s.Finished() {
 		return s.finishLocked(ctx)
 	}
 	for i := range core.partitions {
 		partition := &core.partitions[i]
 		if partition.probeSpill != nil {
-			if err := partition.probeSpill.Close(ctx); err != nil { return j.failLocked(err) }
+			if err := partition.probeSpill.Close(ctx); err != nil {
+				return j.failLocked(err)
+			}
 		}
 	}
 	emitter := newStableStoredEmitter(j, s.downstream)
+	defer emitter.abort()
 	for i := range core.partitions {
 		if s.Finished() {
 			break
 		}
 		partition := &core.partitions[i]
-		if !partition.spilled { continue }
+		if !partition.spilled {
+			continue
+		}
 		buildSet := partition.buildSpill.set()
 		var probeSet partitionSet
-		if partition.probeSpill != nil { probeSet = partition.probeSpill.set() }
-		if err := j.processSpilled(ctx, buildSet, probeSet, 0, 0, emitter); err != nil { emitter.abort(); return j.failLocked(err) }
+		if partition.probeSpill != nil {
+			probeSet = partition.probeSpill.set()
+		}
+		if err := j.processSpilled(ctx, buildSet, probeSet, 0, 0, emitter); err != nil {
+			emitter.abort()
+			return j.failLocked(err)
+		}
 		partition.buildSpill.pages = nil
-		if partition.probeSpill != nil { partition.probeSpill.pages = nil }
+		if partition.probeSpill != nil {
+			partition.probeSpill.pages = nil
+		}
 	}
 	if core.config.Type == Full && !s.Finished() {
 		for i := range core.partitions {
 			partition := &core.partitions[i]
-			if partition.spilled || partition.resident == nil { continue }
+			if partition.spilled || partition.resident == nil {
+				continue
+			}
 			reader := partition.resident.borrowReader()
 			for row := 0; row < partition.resident.Count(); row++ {
 				if !isMatched(j.residentMatched[i], row) {
 					_, buildRow, ok := reader.record(row)
-					if !ok { emitter.abort(); return j.failLocked(errors.New("invalid resident build record")) }
-					if err := emitter.emitUnmatchedBuild(ctx, buildRow); err != nil { emitter.abort(); return j.failLocked(err) }
+					if !ok {
+						emitter.abort()
+						return j.failLocked(errors.New("invalid resident build record"))
+					}
+					if err := emitter.emitUnmatchedBuild(ctx, buildRow); err != nil {
+						emitter.abort()
+						return j.failLocked(err)
+					}
 				}
 			}
 		}
 	}
-	if err := emitter.flush(ctx); err != nil { emitter.abort(); return j.failLocked(err) }
+	if err := emitter.flush(ctx); err != nil {
+		emitter.abort()
+		return j.failLocked(err)
+	}
 	return s.finishLocked(ctx)
 }
 
@@ -516,6 +553,7 @@ type stableStoredEmitter struct {
 	downstream pipeline.Sink
 	cols       []*vector.Vector
 	count      int
+	output     *joinOutput
 }
 func newStableStoredEmitter(join *StableExternalHashJoin, downstream pipeline.Sink) *stableStoredEmitter { return &stableStoredEmitter{join: join, downstream: downstream} }
 func (e *stableStoredEmitter) outputTypes() []types.LogicalType {
@@ -523,12 +561,26 @@ func (e *stableStoredEmitter) outputTypes() []types.LogicalType {
 	out := make([]types.LogicalType, 0, len(e.join.core.config.LeftTypes)+len(e.join.core.config.RightTypes)); out=append(out,e.join.core.config.LeftTypes...); out=append(out,e.join.core.config.RightTypes...); return out
 }
 func (e *stableStoredEmitter) ensure() error {
-	if e.cols != nil { return nil }
-	cols, err := newOutputColumns(e.join.core.config.Scope, e.join.core.config.Buffers, e.outputTypes(), e.join.core.config.RequiredOutput, vector.DefaultVectorSize)
-	if err != nil { return err }
-	e.cols = cols
+	if e.cols != nil {
+		if e.count == 0 {
+			for _, column := range e.cols {
+				column.ResetStringHeap()
+			}
+		}
+		return nil
+	}
+	core := e.join.core
+	out, err := core.outputs.acquire(core.config.Scope, core.config.Buffers, core.config.Type, core.config.LeftTypes, core.config.RightTypes, core.config.RequiredOutput, vector.DefaultVectorSize)
+	if err != nil {
+		return err
+	}
+	e.output, e.cols = out, out.chunk.Columns
+	for _, column := range e.cols {
+		column.ResetStringHeap()
+	}
 	return nil
 }
+
 func (e *stableStoredEmitter) emitMatch(ctx context.Context, buildRow, probeRow []byte, _ bool) error {
 	if e.join.core.config.Type == Anti { return nil }
 	if e.join.core.config.Type == Semi { return e.appendProbeOnly(ctx, probeRow) }
@@ -563,10 +615,17 @@ func (e *stableStoredEmitter) flush(ctx context.Context) error {
 	if e.count == 0 {
 		return nil
 	}
-	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
-	e.cols = nil
+	transferred, err := consumeOutput(ctx, e.downstream, e.output, e.count)
+	if transferred {
+		e.output, e.cols = nil, nil
+	}
 	e.count = 0
 	return err
 }
-func (e *stableStoredEmitter) abort(){for _,v:=range e.cols{if v!=nil{v.Release()}};e.cols=nil;e.count=0}
+
+func (e *stableStoredEmitter) abort() {
+	if e.output != nil {
+		e.join.core.outputs.put(e.output)
+	}
+	e.output, e.cols, e.count = nil, nil, 0
+}

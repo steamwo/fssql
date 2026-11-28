@@ -61,6 +61,28 @@ func hashVectorBatch(v *vector.Vector, count int, out []uint64, combine bool) er
 	if v == nil || count < 0 || count > v.Count() || len(out) < count {
 		return errors.New("invalid hash batch bounds")
 	}
+	// BIGINT's signed/unsigned semantic hashes share the same bit mixer. Flat
+	// batches avoid representation resolution and an indirect call per value.
+	if v.Type.ID == types.BigInt {
+		view, ok := v.BorrowFixedWidth()
+		if ok {
+			if data, validity, flat := view.FlatData(); flat {
+				allValid := validity.AllValid(count)
+				for row := 0; row < count; row++ {
+					h := semantics.HashNull()
+					if allValid || validity.IsValid(row) {
+						h = semantics.HashUint64(binary.LittleEndian.Uint64(data[row*8 : row*8+8]))
+					}
+					if combine {
+						out[row] = semantics.CombineHash(out[row], h)
+					} else {
+						out[row] = h
+					}
+				}
+				return nil
+			}
+		}
+	}
 	if v.Type.ID == types.Varchar {
 		view, _ := v.BorrowBytes()
 		for row := 0; row < count; row++ {

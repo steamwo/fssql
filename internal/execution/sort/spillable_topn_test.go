@@ -93,7 +93,10 @@ func varcharTopReference(rows []varcharTopRow, keys []Key, n int) []varcharTopRo
 			}
 			return a.key < b.key
 		}
-		return a.id > b.id
+		if keys[1].Desc {
+			return a.id > b.id
+		}
+		return a.id < b.id
 	})
 	if n < len(want) {
 		want = want[:n]

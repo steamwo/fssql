@@ -58,6 +58,22 @@ func (e *ExternalAggregate) shardForWorker(ctx context.Context) (int, *HashAggre
 }
 
 func (e *ExternalAggregate) consumeWorker(ctx context.Context, chunk *vector.DataChunk) error {
+	return e.consumeWorkerInput(ctx, chunk, nil)
+}
+
+func (e *ExternalAggregate) ConsumeJoinBatch(ctx context.Context, batch pipeline.JoinBatch) (bool, error) {
+	if len(e.cfg.GroupColumns) != 0 || e.cfg.CountOnly {
+		return false, nil
+	}
+	for _, bound := range e.bound {
+		if bound.Spec.Kind != CountStar && bound.Spec.Kind != Count && bound.Spec.Kind != Sum {
+			return false, nil
+		}
+	}
+	return true, e.consumeWorkerInput(ctx, nil, &batch)
+}
+
+func (e *ExternalAggregate) consumeWorkerInput(ctx context.Context, chunk *vector.DataChunk, batch *pipeline.JoinBatch) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -71,7 +87,12 @@ func (e *ExternalAggregate) consumeWorker(ctx context.Context, chunk *vector.Dat
 		e.shardGate.RUnlock()
 		return err
 	}
-	consumeErr := shard.Consume(ctx, chunk)
+	var consumeErr error
+	if batch == nil {
+		consumeErr = shard.Consume(ctx, chunk)
+	} else {
+		_, consumeErr = shard.ConsumeJoinBatch(ctx, *batch)
+	}
 	var total int64
 	if consumeErr == nil {
 		bytes := shard.ManagedBytes()

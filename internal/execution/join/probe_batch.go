@@ -23,16 +23,21 @@ type batchEmitter struct {
 	buildLayout exechash.RowLayout
 	downstream  pipeline.Sink
 
-	required   []bool
-	cols       []*vector.Vector
-	probeChunk *vector.DataChunk
-	probeRows  [vector.DefaultVectorSize]int    // probeRows 保存当前批次的输入行号。
-	buildRows  [vector.DefaultVectorSize][]byte // buildRows 借用匹配的构建行。
-	count      int
-	stopped    bool
+	required           []bool
+	pool               *outputPool
+	output             *joinOutput
+	scratchReservation *memory.Reservation
+	comparer           exechash.ChunkKeyComparer
+	cols               []*vector.Vector
+	probeChunk         *vector.DataChunk
+	probeRows          [vector.DefaultVectorSize]int    // probeRows 保存当前批次的输入行号。
+	buildRows          [vector.DefaultVectorSize][]byte // buildRows 借用匹配的构建行。
+	count              int
+	stopped            bool
 }
 
-// newBatchEmitter 返回值对象，使每批约 64 KiB 的选择数组无需单独堆分配。
+// newBatchEmitter creates an unpooled emitter for kernel benchmarks. Production
+// sinks lease emitters and their match-selection scratch from the query pool.
 func newBatchEmitter(typ Type, scope *memory.Scope, bm *memory.BufferManager, leftTypes, rightTypes []types.LogicalType, buildSide Side, buildLayout exechash.RowLayout, downstream pipeline.Sink) batchEmitter {
 	return batchEmitter{
 		typ: typ, scope: scope, bm: bm, leftTypes: leftTypes, rightTypes: rightTypes,
@@ -74,7 +79,25 @@ func (e *batchEmitter) buildStart() int {
 }
 
 func (e *batchEmitter) ensure() error {
+	if e.output != nil && e.output.capacity < e.count {
+		e.output.chunk.Release()
+		e.output, e.cols = nil, nil
+	}
 	if e.cols != nil {
+		for _, col := range e.cols {
+			col.ResetStringHeap()
+		}
+		return nil
+	}
+	if e.pool != nil {
+		out, err := e.pool.acquire(e.scope, e.bm, e.typ, e.leftTypes, e.rightTypes, e.required, e.count)
+		if err != nil {
+			return err
+		}
+		e.output, e.cols = out, out.chunk.Columns
+		for _, col := range e.cols {
+			col.ResetStringHeap()
+		}
 		return nil
 	}
 	cols, err := newOutputColumns(e.scope, e.bm, e.outputTypes(), e.required, e.count)
@@ -149,6 +172,18 @@ func (e *batchEmitter) flush(ctx context.Context) error {
 	if e.count == 0 {
 		return nil
 	}
+	if consumer, ok := e.downstream.(pipeline.JoinBatchConsumer); ok {
+		accepted, err := consumer.ConsumeJoinBatch(ctx, pipeline.JoinBatch{
+			Probe: e.probeChunk, ProbeRows: e.probeRows[:e.count], BuildRows: e.buildRows[:e.count],
+			BuildLayout: e.buildLayout, ProbeStart: e.probeStart(), ProbeWidth: len(e.probeTypes()), BuildStart: e.buildStart(),
+		})
+		if accepted || err != nil {
+			clear(e.buildRows[:e.count])
+			e.probeChunk, e.count = nil, 0
+			e.stopped = err == nil && pipeline.SinkFinished(e.downstream)
+			return err
+		}
+	}
 	if err := e.ensure(); err != nil {
 		return err
 	}
@@ -183,12 +218,21 @@ func (e *batchEmitter) flush(ctx context.Context) error {
 			return err
 		}
 	}
-	chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
-	err := pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
+	var err error
+	if e.output != nil {
+		var transferred bool
+		transferred, err = consumeOutput(ctx, e.downstream, e.output, e.count)
+		if transferred {
+			e.output, e.cols = nil, nil
+		}
+	} else {
+		chunk := &vector.DataChunk{Columns: e.cols, Cardinality: e.count}
+		err = pipeline.ConsumeOwnedChunk(ctx, e.downstream, chunk)
+		e.cols = nil
+	}
 	for i := 0; i < e.count; i++ {
 		e.buildRows[i] = nil
 	}
-	e.cols = nil
 	e.probeChunk = nil
 	e.count = 0
 	e.stopped = err == nil && pipeline.SinkFinished(e.downstream)
@@ -196,14 +240,18 @@ func (e *batchEmitter) flush(ctx context.Context) error {
 }
 
 func (e *batchEmitter) abort() {
-	for _, v := range e.cols {
-		if v != nil {
-			v.Release()
+	e.comparer.Clear()
+	if e.output != nil {
+		e.pool.put(e.output)
+		e.output = nil
+	} else {
+		for _, v := range e.cols {
+			if v != nil {
+				v.Release()
+			}
 		}
 	}
-	for i := range e.buildRows {
-		e.buildRows[i] = nil
-	}
+	clear(e.buildRows[:e.count])
 	e.cols = nil
 	e.probeChunk = nil
 	e.count = 0

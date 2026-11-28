@@ -227,18 +227,43 @@ type ChunkKeyComparer struct {
 }
 
 func NewChunkKeyComparer(chunk *vector.DataChunk, columns []int) (*ChunkKeyComparer, error) {
-	if chunk == nil {
-		return nil, errors.New("nil key chunk")
+	c := &ChunkKeyComparer{}
+	if err := c.Reset(chunk, columns); err != nil {
+		return nil, err
 	}
-	c := &ChunkKeyComparer{chunk: chunk, columns: append([]int(nil), columns...), views: make([]vector.FixedWidthView, len(columns)), viewOK: make([]bool, len(columns)), byteViews: make([]vector.BytesView, len(columns))}
+	return c, nil
+}
+
+// Reset borrows a new batch while reusing the comparer metadata. Call Clear
+// before returning a comparer to a query pool so it cannot retain input chunks.
+func (c *ChunkKeyComparer) Reset(chunk *vector.DataChunk, columns []int) error {
+	c.Clear()
+	if chunk == nil {
+		return errors.New("nil key chunk")
+	}
+	c.chunk = chunk
+	if cap(c.columns) < len(columns) {
+		c.columns = make([]int, len(columns))
+		c.views = make([]vector.FixedWidthView, len(columns))
+		c.viewOK = make([]bool, len(columns))
+		c.byteViews = make([]vector.BytesView, len(columns))
+	}
+	c.columns, c.views, c.viewOK, c.byteViews = c.columns[:len(columns)], c.views[:len(columns)], c.viewOK[:len(columns)], c.byteViews[:len(columns)]
+	copy(c.columns, columns)
 	for i, col := range columns {
 		if col < 0 || col >= len(chunk.Columns) {
-			return nil, errors.New("projected row key index out of range")
+			return errors.New("projected row key index out of range")
 		}
 		c.views[i], c.viewOK[i] = chunk.Columns[col].BorrowFixedWidth()
 		c.byteViews[i], _ = chunk.Columns[col].BorrowBytes()
 	}
-	return c, nil
+	return nil
+}
+
+func (c *ChunkKeyComparer) Clear() {
+	c.chunk = nil
+	clear(c.views)
+	clear(c.byteViews)
 }
 
 // Equal compares one chunk row against encoded key columns. The encoded layout

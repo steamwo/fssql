@@ -1,0 +1,16 @@
+{
+  "baseline_commit": "00f4f56295a5d89619ed64eea4030cae3daa8c8b",
+  "go_version": "go version go1.22.12 linux/amd64",
+  "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+  "GOMAXPROCS": 1,
+  "cpu_max": "200000 100000",
+  "memory_max": "8589934592",
+  "warmups_per_case": 2,
+  "samples_per_case": 7,
+  "benchtime": "200ms",
+  "independent_process_per_sample": true,
+  "benchmark_sha256": "a56b7574224900260d52faddc958a76377fe47df2ec6f4478bf110ec1e90f095",
+  "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+  "candidate_branch": "codex/join-vector-probe-reuse",
+  "candidate_go_sources_sha256": "be929fc469bc110088baa0b596d1b353170936a7c205fc6d0e1038337bcc178e"
+}

@@ -19,6 +19,19 @@ func validateRequiredOutput(config ExternalConfig) error {
 	return nil
 }
 
+func (j *HashJoin) SetRequiredOutputColumns(needed []bool) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.built || j.closed || j.rightRows.Count() != 0 {
+		return errors.New("join output requirements must be configured before build")
+	}
+	if err := validateRequiredOutput(ExternalConfig{Type: j.typ, LeftTypes: j.leftTypes, RightTypes: j.rightTypes, RequiredOutput: needed}); err != nil {
+		return err
+	}
+	j.required = append([]bool(nil), needed...)
+	return nil
+}
+
 // SetRequiredOutputColumns configures immutable output requirements before
 // build. The complete schema stays available to downstream index references.
 func (j *StableExternalHashJoin) SetRequiredOutputColumns(needed []bool) error {
