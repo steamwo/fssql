@@ -1,0 +1,59 @@
+name: Bench 100M Wide JOIN TopN
+
+on:
+  push:
+    branches:
+      - bench/join-topn-duckdb-100m-wide-20261128
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.3'
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install DuckDB and PyArrow
+        run: python -m pip install 'duckdb==2.0.0' 'pyarrow==24.0.0'
+
+      - name: Run 100M x 64 wide JOIN and TopN comparison
+        run: python tools/bench-wide-100m.py
+
+      - name: Show benchmark report
+        if: always()
+        run: |
+          if [ -f artifacts/bench-wide-100m/report.md ]; then
+            cat artifacts/bench-wide-100m/report.md
+          fi
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: join-topn-duckdb-100m-wide
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            artifacts/bench-wide-100m/report.md
+            artifacts/bench-wide-100m/metadata.json
+            artifacts/bench-wide-100m/summary.json
+            artifacts/bench-wide-100m/correctness.json
+            artifacts/bench-wide-100m/samples.jsonl
+            artifacts/bench-wide-100m/all-runs.jsonl
+            artifacts/bench-wide-100m/build.log
+            artifacts/bench-wide-100m/logs
+            artifacts/bench-wide-100m/raw
+            artifacts/bench-wide-100m/cases
